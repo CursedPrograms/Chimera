@@ -1,0 +1,14 @@
+LayerTack
+Copyright (c) 2024-2026 Cursed Entertainment. MIT License (see LICENSE).
+
+The blend modes (cpp/src/blend.cpp) are ported from PhotoCraft,
+https://github.com/storytold/photocraft (crates/color/src/blend.rs and
+crates/compose/src/psblend.rs), licensed MIT OR Apache-2.0.
+Copyright (c) the PhotoCraft contributors.
+
+Third-party code built into LayerTack:
+- Dear ImGui (MIT), https://github.com/ocornut/imgui
+- SDL2 (zlib), https://www.libsdl.org
+- stb_image, stb_image_write (MIT / public domain), https://github.com/nothings/stb
+- ONNX Runtime (MIT), https://github.com/microsoft/onnxruntime, loaded at run time
+- U2-Net-p (Apache-2.0), https://github.com/xuebinqin/U-2-Net, downloaded on first use of Select Subject

@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LayerTack - a layer-based image editor</title>
+  <meta name="description" content="LayerTack: a layer-based image editor in C++. Layers, true layer masks, Photoshop's 27 blend modes, Select Subject, curves, levels, black and white, blurs and noise.">
+  <link rel="icon" href="site/favicon.ico">
+  <link rel="stylesheet" href="site/style.css">
+</head>
+
+<body>
+  <header class="top">
+    <img class="logo" src="site/logo.png" alt="LayerTack">
+    <div>
+      <h1>LayerTack</h1>
+      <p class="tag">A layer-based image editor: layers, masks, blend modes, selections, adjustments.</p>
+    </div>
+  </header>
+
+  <main>
+    <section class="shot">
+      <img src="images/window.jpg" alt="LayerTack: a subject mask, a Multiply layer with a gradient mask and an ellipse selection">
+    </section>
+
+    <section class="actions">
+      <a class="btn" href="https://github.com/CursedPrograms/LayerTack">Get it on GitHub</a>
+      <a class="btn quiet" href="https://github.com/CursedPrograms/LayerTack#build">How to build</a>
+    </section>
+
+    <section class="grid">
+      <article>
+        <h2>Layers and masks</h2>
+        <p>Unlimited layers with their own size and position. True layer masks: black hides, white reveals. Paint them,
+          blur them, curve them, switch them off with Shift-click, see them with Alt-click.</p>
+      </article>
+      <article>
+        <h2>27 blend modes</h2>
+        <p>Every Photoshop layer mode, from Multiply and Screen to Vivid Light, Hard Mix, Hue and Luminosity, with the
+          same maths.</p>
+      </article>
+      <article>
+        <h2>Selections</h2>
+        <p>Marquees, Lasso, Polygonal Lasso and Magic Wand, with add, subtract and intersect, feathering and marching
+          ants. Select Subject and Remove Background find the subject for you, on your own PC.</p>
+      </article>
+      <article>
+        <h2>Painting</h2>
+        <p>A brush and eraser with size, hardness and opacity; a paint bucket with tolerance; an eyedropper. Fill an
+          empty layer, set its blend mode, mask it.</p>
+      </article>
+      <article>
+        <h2>Adjustments</h2>
+        <p>Curves over the histogram, Levels, Brightness/Contrast, Hue/Saturation with Vibrance, Photoshop's Black &amp;
+          White with six colour sliders, Invert, Desaturate, Threshold. Live previews.</p>
+      </article>
+      <article>
+        <h2>Filters and size</h2>
+        <p>Gaussian Blur, Box Blur, Average and Add Noise. Free Transform, Image Size (bicubic) and Canvas Size. PNG with
+          transparency, JPG, and projects that keep every layer.</p>
+      </article>
+    </section>
+
+    <section class="keys">
+      <h2>The usual shortcuts</h2>
+      <p id="keys"></p>
+    </section>
+  </main>
+
+  <footer>
+    <p>Blend maths ported from <a href="https://github.com/storytold/photocraft">PhotoCraft</a> (MIT / Apache-2.0).</p>
+    <p>&copy; <a href="https://cursed-entertainment.itch.io/">Cursed Entertainment</a> <span id="year">2026</span></p>
+  </footer>
+  <script src="site/site.js"></script>
+</body>
+
+</html>

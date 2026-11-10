@@ -1,136 +1,143 @@
 [![Twitter: @NorowaretaGemu](https://img.shields.io/badge/X-@NorowaretaGemu-blue.svg?style=flat)](https://x.com/NorowaretaGemu)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-<a href="https://github.com/CursedPrograms/Flask-Python-Template/actions/workflows/auto-assign.yml">
-    <img class="workflow-badge workflow-success" src="https://github.com/Cursed-Entertainment/Image-Uploader-Resizer/actions/workflows/auto-assign.yml/badge.svg" alt="Auto Assign Workflow">
-</a>
-
-<a href="https://github.com/CursedPrograms/Flask-Python-Template/actions/workflows/proof-html.yml">
-    <img class="workflow-badge workflow-success" src="https://github.com/Cursed-Entertainment/Image-Uploader-Resizer/actions/workflows/proof-html.yml/badge.svg" alt="Proof HTML Workflow">
-</a>
-  <br>
+<br>
 <div align="center">
   <a href="https://ko-fi.com/cursedentertainment">
     <img src="https://ko-fi.com/img/githubbutton_sm.svg" alt="ko-fi" style="width: 20%;"/>
   </a>
 </div>
-  <br>
-
-
+<br>
 <div align="center">
-  <img alt="Python" src="https://img.shields.io/badge/python%20-%23323330.svg?&style=for-the-badge&logo=python&logoColor=white"/>
-    <img alt="JavaScript" src="https://img.shields.io/badge/javascript%20-%23323330.svg?&style=for-the-badge&logo=javascript&logoColor=white"/>
-  <img alt="HTML5" src="https://img.shields.io/badge/html5%20-%23323330.svg?&style=for-the-badge&logo=html5&logoColor=white"/>
-  <img alt="CSS3" src="https://img.shields.io/badge/css3%20-%23323330.svg?&style=for-the-badge&logo=css3&logoColor=white"/>
-</div>
-
-<div align="center">
-  <img alt="Flask" src="https://img.shields.io/badge/flask%20-%23323330.svg?&style=for-the-badge&logo=flaks&logoColor=white"/>
+  <img alt="C++" src="https://img.shields.io/badge/c++%20-%23323330.svg?&style=for-the-badge&logo=c%2B%2B&logoColor=white"/>
+  <img alt="CMake" src="https://img.shields.io/badge/cmake%20-%23323330.svg?&style=for-the-badge&logo=cmake&logoColor=white"/>
+  <img alt="OpenGL" src="https://img.shields.io/badge/opengl%20-%23323330.svg?&style=for-the-badge&logo=opengl&logoColor=white"/>
 </div>
 <div align="center">
-    <img alt="Git" src="https://img.shields.io/badge/git%20-%23323330.svg?&style=for-the-badge&logo=git&logoColor=white"/>
   <img alt="PowerShell" src="https://img.shields.io/badge/PowerShell-%23323330.svg?&style=for-the-badge&logo=powershell&logoColor=white"/>
   <img alt="Shell" src="https://img.shields.io/badge/Shell-%23323330.svg?&style=for-the-badge&logo=gnu-bash&logoColor=white"/>
   <img alt="Batch" src="https://img.shields.io/badge/Batch-%23323330.svg?&style=for-the-badge&logo=windows&logoColor=white"/>
-  </div>  
-  <br>
+</div>
+<br>
+
+<div align="center">
+  <img src="cpp/assets/logo.png" alt="LayerTack" width="120"/>
+</div>
 
 # LayerTack
 
+**A layer-based image editor for Windows (and Linux), written in C++.** Layers, true layer masks, Photoshop's blend
+modes, selections with Select Subject, tonal adjustments and filters, in a dark studio workspace.
+**[Website](https://cursedprograms.github.io/LayerTack/)**
 
-1. Layer Architecture & Masking
-Layer Stack Management: Support for unlimited raster layers, layer creation, deletion, reordering, duplication, and opacity control (0–100%).
+![LayerTack: a subject mask, a Multiply layer with a gradient mask and an ellipse selection](images/window.jpg)
 
-Merge Operations: Dedicated Merge Down and Flatten Image functionality to bake composite layers into single rasters.
+## Features
 
-Non-Destructive Layer Masking: Dedicated mask channels supporting black (hide), white (reveal), and grayscale (partial transparency) mask blending workflows.
+### 1. Layer architecture and masking
+- **Layer stack management:** unlimited raster layers; create, delete, duplicate, rename, reorder, show and hide;
+  opacity from 0 to 100%. Each layer keeps its own size and position, so moving one never crops it.
+- **Non-destructive layer masks:** a mask channel on any layer: black hides, white reveals, greys give partial
+  transparency. Add one that reveals all, hides all, or follows the selection; paint it with the brush; fill, blur
+  (feather), curve or level it like any picture; invert it, switch it off (Shift-click), view it on its own
+  (Alt-click), turn it into a selection, apply it or delete it.
+- **Blend modes:** all 27 of Photoshop's layer modes, with its exact maths: Normal, Dissolve, Darken, Multiply,
+  Color Burn, Linear Burn, Darker Color, Lighten, Screen, Color Dodge, Linear Dodge (Add), Lighter Color, Overlay,
+  Soft Light, Hard Light, Vivid Light, Linear Light, Pin Light, Hard Mix, Difference, Exclusion, Subtract, Divide,
+  Hue, Saturation, Color and Luminosity.
+- **Merge operations:** Merge Down, Merge Visible and Flatten Image, baking masks and blend modes into one raster.
 
-2. Selection & Segment Detection Tools
-Manual Selection Tools: Freehand Lasso, Polygonal Lasso, and Rectangular/Elliptical Marquee selection.
+### 2. Selection and segment detection
+- **Manual selection tools:** Rectangular and Elliptical Marquee, freehand Lasso, Polygonal Lasso and Magic Wand
+  (tolerance, contiguous, sample all layers), each in New, Add (Shift), Subtract (Alt) or Intersect mode, with
+  anti-aliased edges, feathering and marching ants.
+- **Select Subject:** automatic subject detection (U²-Net, run locally through ONNX Runtime) turned into a
+  selection.
+- **Remove Background:** the same detection as a layer mask in one click, so the edge can still be refined with
+  the brush.
+- **Refine:** Inverse, Feather, Grow / Shrink, and Load Selection from a mask or the layer's transparency.
 
-Segment Detection & Auto-Selection:
+### 3. Canvas tools and painting
+- **Brush and Eraser:** size, **hardness** (from a soft airbrush falloff to a crisp edge) and opacity; one stroke
+  never builds up past its opacity. On a mask, the brush paints greys.
+- **Paint Bucket / flood fill:** tolerance, contiguous or global, sample one layer or all, opacity; it respects the
+  selection, so filling a new empty layer and setting its blend mode is quick.
+- **Empty-layer workflow:** a new transparent layer in one click (Ctrl+Shift+N), ready for fills, overlays and
+  strokes.
+- **Transform:** move with the Move tool (arrow keys nudge), Free Transform (Ctrl+T) to scale and rotate a layer and
+  its mask round its centre, and flip horizontally or vertically.
+- **Eyedropper and Hand:** pick colours from the canvas; pan with the Hand, Space or the middle button; zoom with
+  the wheel.
 
-Select Subject: Automatic object outline detection and isolation.
+### 4. Tonal, colour and adjustment engine
+- **Curves:** a multi-point tone curve for RGB or each channel, over the target's histogram, with smooth monotone
+  interpolation (no overshoot).
+- **Levels:** input black and white points, gamma, output range.
+- **Colour and tone controls:** Brightness/Contrast and Hue/Saturation with Lightness, **Vibrance** and Colorize.
+- **Black & White:** Photoshop's converter with six colour sliders (reds, yellows, greens, cyans, blues, magentas)
+  and an optional tint.
+- **Also:** Invert, Desaturate and Threshold. Every adjustment previews live and works inside the selection.
 
-Background Removal: One-click automated background extraction and mask generation.
+### 5. Filters and processing effects
+- **Gaussian Blur:** a precise radius blur for smooth gradients and depth of field (computed in premultiplied
+  alpha, so transparent edges don't pick up dark fringes).
+- **Average:** the whole selection becomes its average colour, as in Photoshop; plus **Box Blur** for quick
+  uniform smoothing.
+- **Add Noise:** Photoshop-style Gaussian or Uniform noise, monochromatic or per channel.
 
-3. Canvas Tools & Painting
-Paint Bucket / Flood Fill: Fast area filling with contiguous tolerance control, pattern sampling, and blend mode integration.
+### 6. Export and canvas utilities
+- **PNG:** 32-bit PNG with full transparency; JPG export (onto white).
+- **Projects:** `.ltk` files keep every layer, mask, blend mode and opacity.
+- **Image Size:** bicubic resampling of every layer and mask, with locked proportions.
+- **Canvas Size:** grow or crop the canvas round any of nine anchors.
+- **Open:** PNG, JPG, BMP, TGA, GIF and flat PSD; drop files on the window to place them as layers.
+- **Undo / redo:** the last 20 steps.
 
-Empty Layer Workflow: Dedicated empty layer generation prepared for instant bucket fills, overlays, and manual stroke application.
+### 7. Workspace
+The usual layout: menus, a contextual tool options bar, the tools down the left, the canvas in the middle, the
+Layers panel on the right and a status bar, in the Cursed dark theme (solid greys with the Cursed pink). The usual
+shortcuts: V M L W B E G I H, [ and ] for brush size (Shift for hardness), X swaps colours, D resets them, Ctrl+Z,
+Ctrl+J, Ctrl+E, Ctrl+T, Ctrl+M, Ctrl+L, Ctrl+U, Ctrl+I, Ctrl+A, Ctrl+D, Ctrl+Shift+I, Ctrl+0, Ctrl+1.
 
-Canvas Manipulation: Transform tool to move, scale, rotate, and flip active layer content or selections.
+## Download and run
 
-4. Tonal, Color & Adjustment Engine
-Curves Adjustment: Custom tone curve editor supporting multi-point control for precise contrast, highlights, and shadow remap.
+Windows: build it once (below), then run `cpp/build/Release/LayerTack.exe`, or unzip `cpp/dist/LayerTack-win64.zip`
+anywhere and run `LayerTack.exe`. Open a picture with File > Open, by dropping it on the window, or with
+`LayerTack.exe picture.png`.
 
-Color & Tone Controls: Standardized adjustments for Brightness, Contrast, Saturation, Vibrance, and Hue.
+Select Subject downloads its model once (U²-Net-p, about 5 MB) the first time you use it: into
+`F:\AIModels\segment` when that drive exists, otherwise into LayerTack's settings folder.
 
-Black & White Converter: Dedicated grayscale engine with channel-specific weight adjustments (R/G/B) for fine tonal control.
+## Build
 
-5. Filter & Processing Effects
-Blur Engines:
+Windows: Visual Studio 2022 (C++) and CMake, then `cpp/build.bat` (or `build.ps1`). It fetches SDL2 and ONNX
+Runtime into `cpp/external/` once, builds `cpp/build/Release/LayerTack.exe` and packs `cpp/dist/LayerTack-win64.zip`.
 
-Gaussian Blur: Precision radius blur algorithm for smooth gradients and depth-of-field effects.
+Linux: `cpp/build.sh` (needs cmake, a C++17 compiler and libsdl2-dev; for Select Subject, libonnxruntime.so where
+the loader finds it, and zenity for file dialogs).
 
-Average Blur: Uniform box blur sampling for quick tone smoothing and color averaging.
+The code, in `cpp/src/`:
+- `doc.cpp`: the document: layers, masks, compositing, files (PNG, JPG, `.ltk`), undo
+- `blend.cpp`: the blend modes
+- `ops.cpp`: adjustments, filters, fills, selections, resizing, transform and the brush
+- `segment.cpp`: Select Subject through ONNX Runtime's C API (loaded at run time)
+- `app.cpp`: the window: menus, tools, canvas, Layers panel and dialogs
+- `main.cpp`: SDL2, OpenGL and Dear ImGui
 
-Photoshop-Style Noise Generator: Gaussian/Uniform noise engine with Monochromatic and RGB color distribution modes.
+## Credits
 
-6. Export & Canvas Utilities
-PNG Engine: Full 32-bit transparent PNG export preserving channel alpha data.
-
-Image Resizing: Bi-cubic canvas and image scale utility with locked aspect ratio options.
-
-Workspace Theme: Standard dark studio UI layout with high-contrast tool palettes and contextual top option bars.
+The blend-mode maths is ported from [PhotoCraft](https://github.com/storytold/photocraft) (MIT OR Apache-2.0).
+Built with [Dear ImGui](https://github.com/ocornut/imgui), [SDL2](https://www.libsdl.org),
+[stb](https://github.com/nothings/stb) and [ONNX Runtime](https://github.com/microsoft/onnxruntime); Select Subject
+uses [U²-Net](https://github.com/xuebinqin/U-2-Net). See [NOTICE](NOTICE).
 
 <br>
-## How to Run:
-
-### Install Requirements
-
-Using Python directly:
-
-```bash
-pip install -r requirements.txt
-```
-Or run: 
-- `install_requirements.bat`
-
-  
-  <br>
-
-### Run main.py
-
-Using Python directly:
-
-```bash
-python main.py
-```
-
-Using provided scripts:
-
-Windows:
-- `.\run.bat`
-or
-- `.\run.ps1`
-
-Unix-like systems (Linux/macOS):
-- `.\run.sh`
-
-  <br>
-
-## Requirements:
-
-```bash
-flask
-```
-
 <div align="center">
-© Cursed Entertainment 202*
+© Cursed Entertainment 2026
 </div>
+<br>
 <div align="center">
-<a href="https://github.com/CursedPrograms" target="_blank">
+<a href="https://cursed-entertainment.itch.io/" target="_blank">
     <img src="https://github.com/CursedPrograms/cursedentertainment/raw/main/images/logos/logo-wide-grey.png"
         alt="CursedEntertainment Logo" style="width:250px;">
 </a>

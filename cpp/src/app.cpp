@@ -1,0 +1,1236 @@
+// LayerTack - the window: menus, the tool options bar, the tools, the canvas, colours and layers, the dialogs.
+// The usual image editor layout, in the Changeling greys with the Cursed pink.
+#include "app.h"
+#include "blend.h"
+#include "segment.h"
+#include "util.h"
+
+#include <SDL.h>
+#include <SDL_opengl.h>
+#include <imgui.h>
+#include <imgui_internal.h>
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstring>
+#include <filesystem>
+#include <functional>
+#include <string>
+#include <vector>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#include <commdlg.h>
+#pragma comment(lib, "comdlg32.lib")
+#endif
+
+#ifndef GL_CLAMP_TO_EDGE
+#define GL_CLAMP_TO_EDGE 0x812F
+#endif
+
+namespace App {
+
+// ---------- colours (the Changeling look: greys, the Cursed pink; solid, no gradients) ----------
+static const ImU32 C_BG = IM_COL32(0x1a, 0x1a, 0x1a, 255), C_PANEL = IM_COL32(0x24, 0x24, 0x24, 255),
+                   C_LINE = IM_COL32(0x3a, 0x3a, 0x3a, 255), C_TEXT = IM_COL32(0xe6, 0xe6, 0xe6, 255),
+                   C_DIM = IM_COL32(0x9a, 0x9a, 0x9a, 255), C_PINK = IM_COL32(0xe0, 0x40, 0x8a, 255),
+                   C_DEEP = IM_COL32(0xc2, 0x18, 0x6b, 255), C_WELL = IM_COL32(0x14, 0x14, 0x14, 255);
+
+static ImVec4 col4(ImU32 c) { return ImGui::ColorConvertU32ToFloat4(c); }
+
+static void applyStyle() {
+    ImGuiStyle& s = ImGui::GetStyle();
+    s.WindowRounding = 0; s.FrameRounding = 2; s.GrabRounding = 2; s.PopupRounding = 2; s.ScrollbarRounding = 2;
+    s.WindowBorderSize = 0; s.FrameBorderSize = 0; s.PopupBorderSize = 1;
+    s.WindowPadding = ImVec2(8, 8); s.FramePadding = ImVec2(7, 4); s.ItemSpacing = ImVec2(6, 5);
+    ImVec4* c = s.Colors;
+    c[ImGuiCol_Text] = col4(C_TEXT); c[ImGuiCol_TextDisabled] = col4(C_DIM);
+    c[ImGuiCol_WindowBg] = col4(C_PANEL); c[ImGuiCol_ChildBg] = col4(C_PANEL); c[ImGuiCol_PopupBg] = col4(IM_COL32(0x21, 0x21, 0x21, 255));
+    c[ImGuiCol_Border] = col4(C_LINE); c[ImGuiCol_Separator] = col4(C_LINE);
+    c[ImGuiCol_FrameBg] = col4(C_WELL); c[ImGuiCol_FrameBgHovered] = col4(IM_COL32(0x2e, 0x2e, 0x2e, 255)); c[ImGuiCol_FrameBgActive] = col4(IM_COL32(0x33, 0x33, 0x33, 255));
+    c[ImGuiCol_TitleBg] = col4(C_BG); c[ImGuiCol_TitleBgActive] = col4(C_BG); c[ImGuiCol_MenuBarBg] = col4(C_BG);
+    c[ImGuiCol_ScrollbarBg] = col4(C_PANEL); c[ImGuiCol_ScrollbarGrab] = col4(C_LINE);
+    c[ImGuiCol_CheckMark] = col4(C_PINK); c[ImGuiCol_SliderGrab] = col4(C_PINK); c[ImGuiCol_SliderGrabActive] = col4(C_DEEP);
+    c[ImGuiCol_Button] = col4(IM_COL32(0x33, 0x33, 0x33, 255)); c[ImGuiCol_ButtonHovered] = col4(C_DEEP); c[ImGuiCol_ButtonActive] = col4(C_PINK);
+    c[ImGuiCol_Header] = col4(IM_COL32(0x33, 0x33, 0x33, 255)); c[ImGuiCol_HeaderHovered] = col4(C_DEEP); c[ImGuiCol_HeaderActive] = col4(C_PINK);
+    c[ImGuiCol_Tab] = col4(C_BG); c[ImGuiCol_TabActive] = col4(C_PANEL); c[ImGuiCol_TabHovered] = col4(C_DEEP);
+    c[ImGuiCol_ModalWindowDimBg] = ImVec4(0, 0, 0, 0.45f);
+}
+
+// ---------- state ----------
+static SDL_Window* window = nullptr;
+static std::string prefs;
+static Doc doc;
+static History hist;
+static Image view;                               // the composite on screen
+static GLuint viewTex = 0, checkerTex = 0;
+static int texW = 0, texH = 0;
+static Rect dirty{0, 0, 0, 0};
+static int docVersion = 0, selVersion = 0;
+static bool showMask = false;                    // Alt-click on a mask: see it in grey
+static bool quit = false, askQuit = false;
+static std::string toast; static double toastUntil = 0;
+
+enum Tool { T_MOVE, T_RECT, T_ELLIPSE, T_LASSO, T_POLY, T_WAND, T_BRUSH, T_ERASER, T_BUCKET, T_DROPPER, T_HAND, T_COUNT };
+static int tool = T_BRUSH;
+static uint8_t fg[4] = {224, 64, 138, 255}, bgc[4] = {255, 255, 255, 255};
+static float brushSize = 40, brushHard = 0.8f, brushOpacity = 1.0f;
+static float eraserSize = 40, eraserHard = 0.8f, eraserOpacity = 1.0f;
+static int selMode = SEL_NEW; static float selFeather = 0;
+static int tolerance = 32; static bool contiguous = true, sampleAll = false; static float bucketOpacity = 1.0f;
+
+// view: canvas pixel (x, y) is at screen origin + (x, y) * zoom
+static float zoom = 1.0f; static ImVec2 origin(0, 0); static ImVec2 canvasPos, canvasSize; static bool fitNext = true;
+
+// interaction
+static bool dragging = false, panning = false; static ImVec2 dragStart, dragNow, panStart, originStart;
+static int moveStartX = 0, moveStartY = 0;
+static std::vector<float> lasso, poly;
+static Stroke stroke;
+static std::vector<int> ants; static int antsVersion = -1;
+
+// thumbnails
+static std::vector<GLuint> thumbs, mthumbs; static int thumbVersion = -1; static double thumbAt = 0;
+
+static double now() { return SDL_GetTicks() / 1000.0; }
+static void say(const std::string& s) { toast = s; toastUntil = now() + 5; }
+static void changed(Rect r = {0, 0, 1 << 30, 1 << 30}) { dirty = dirty.unite(r.clip(doc.w, doc.h)); docVersion++; doc.dirty = true; }
+static void selChanged() { selVersion++; }
+static void remember(const std::string& what) { hist.push(doc, what); }
+
+// ---------- GL textures ----------
+static GLuint makeTex(int w, int h, const void* px, bool nearest, bool repeat) {
+    GLuint t;
+    glGenTextures(1, &t);
+    glBindTexture(GL_TEXTURE_2D, t);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, nearest ? GL_NEAREST : GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, nearest ? GL_NEAREST : GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, repeat ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, repeat ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    return t;
+}
+
+static void uploadView() {
+    if (texW != doc.w || texH != doc.h) {
+        if (viewTex) glDeleteTextures(1, &viewTex);
+        view = Image(doc.w, doc.h);
+        viewTex = makeTex(doc.w, doc.h, nullptr, false, false);
+        texW = doc.w; texH = doc.h;
+        dirty = {0, 0, doc.w, doc.h};
+    }
+    if (dirty.empty()) return;
+    composite(doc, view, dirty, showMask && doc.cur().hasMask);
+    glBindTexture(GL_TEXTURE_2D, viewTex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, doc.w);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, dirty.x0, dirty.y0, dirty.x1 - dirty.x0, dirty.y1 - dirty.y0, GL_RGBA, GL_UNSIGNED_BYTE, view.at(dirty.x0, dirty.y0));
+    glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    dirty = {0, 0, 0, 0};
+}
+
+// a small picture of a layer (or its mask), on the checkerboard
+static void makeThumb(GLuint& t, const Layer& l, bool mask) {
+    const int S = 40;
+    std::vector<uint8_t> px((size_t)S * S * 4);
+    const float k = std::max((float)doc.w, (float)doc.h) / S;
+    for (int y = 0; y < S; ++y)
+        for (int x = 0; x < S; ++x) {
+            const int cx = (int)((x + 0.5f) * k - (S * k - doc.w) / 2), cy = (int)((y + 0.5f) * k - (S * k - doc.h) / 2);
+            uint8_t* o = &px[((size_t)y * S + x) * 4];
+            const uint8_t chk = ((x / 5 + y / 5) & 1) ? 0x55 : 0x77;
+            o[0] = o[1] = o[2] = chk; o[3] = 255;
+            if (cx < 0 || cy < 0 || cx >= doc.w || cy >= doc.h) { o[0] = o[1] = o[2] = 0x24; continue; }
+            const int lx = cx - l.x, ly = cy - l.y;
+            const bool in = lx >= 0 && ly >= 0 && lx < l.img.w && ly < l.img.h;
+            if (mask) { const uint8_t v = in ? l.mask[(size_t)ly * l.img.w + lx] : 255; o[0] = o[1] = o[2] = v; continue; }
+            if (!in) continue;
+            const uint8_t* p = l.img.at(lx, ly);
+            for (int c = 0; c < 3; ++c) o[c] = (uint8_t)((p[c] * p[3] + chk * (255 - p[3])) / 255);
+        }
+    if (!t) t = makeTex(S, S, px.data(), false, false);
+    else { glBindTexture(GL_TEXTURE_2D, t); glPixelStorei(GL_UNPACK_ROW_LENGTH, 0); glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, S, S, GL_RGBA, GL_UNSIGNED_BYTE, px.data()); }
+}
+
+static void updateThumbs() {
+    if (thumbVersion == docVersion || now() - thumbAt < 0.25) return;
+    thumbVersion = docVersion; thumbAt = now();
+    thumbs.resize(doc.layers.size(), 0); mthumbs.resize(doc.layers.size(), 0);
+    for (size_t i = 0; i < doc.layers.size(); ++i) {
+        makeThumb(thumbs[i], doc.layers[i], false);
+        if (doc.layers[i].hasMask) makeThumb(mthumbs[i], doc.layers[i], true);
+    }
+}
+
+// ---------- files ----------
+#ifdef _WIN32
+static std::string fromW(const std::wstring& w) {
+    if (w.empty()) return {};
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    std::string s(n - 1, 0);
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, s.data(), n, nullptr, nullptr);
+    return s;
+}
+#endif
+// a file dialog: save = false opens. filter: "Pictures|*.png;*.jpg" pairs
+static std::string fileDialog(bool save, const char* filter, const char* defExt, const std::string& start) {
+#ifdef _WIN32
+    std::wstring f;
+    for (const char* p = filter; *p; ++p) f += (*p == '|') ? L'\0' : (wchar_t)*p;
+    f += L'\0'; f += L'\0';
+    wchar_t buf[4096] = {0};
+    if (!start.empty()) { std::wstring s = u8path(start).wstring(); wcsncpy(buf, s.c_str(), 4095); }
+    OPENFILENAMEW o{};
+    o.lStructSize = sizeof(o);
+    o.lpstrFilter = f.c_str(); o.lpstrFile = buf; o.nMaxFile = 4096;
+    std::wstring ext = defExt ? std::wstring(defExt, defExt + strlen(defExt)) : L"";
+    o.lpstrDefExt = defExt ? ext.c_str() : nullptr;
+    o.Flags = save ? (OFN_OVERWRITEPROMPT | OFN_NOCHANGEDIR) : (OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR);
+    const BOOL ok = save ? GetSaveFileNameW(&o) : GetOpenFileNameW(&o);
+    return ok ? fromW(buf) : std::string();
+#else
+    std::string cmd = save ? "zenity --file-selection --save --confirm-overwrite 2>/dev/null" : "zenity --file-selection 2>/dev/null";
+    FILE* p = popen(cmd.c_str(), "r");
+    if (!p) return {};
+    char line[4096] = {0};
+    std::string r = fgets(line, sizeof line, p) ? line : "";
+    pclose(p);
+    while (!r.empty() && (r.back() == '\n' || r.back() == '\r')) r.pop_back();
+    if (save && !r.empty() && defExt && r.find('.') == std::string::npos) r += std::string(".") + defExt;
+    return r;
+#endif
+}
+
+static const char* OPEN_FILTER = "Pictures and projects|*.png;*.jpg;*.jpeg;*.bmp;*.tga;*.gif;*.psd;*.ltk|All files|*.*|";
+
+static void setTitle() {
+    std::string name = doc.path.empty() ? "Untitled" : u8path(doc.path).filename().u8string();
+    SDL_SetWindowTitle(window, ("LayerTack - " + name + (doc.dirty ? " *" : "")).c_str());
+}
+
+static void fresh() {
+    hist = History();
+    showMask = false; dirty = {0, 0, doc.w, doc.h}; texW = -1;
+    docVersion++; selVersion++; fitNext = true;
+    doc.dirty = false;
+}
+
+bool open(const std::string& path) {
+    std::string err;
+    Doc d;
+    if (!openDoc(path, d, err)) { say(err); return false; }
+    doc = std::move(d);
+    fresh();
+    setTitle();
+    return true;
+}
+
+static void placeAsLayer(const std::string& path) {
+    Image img; std::string err;
+    if (!loadImage(path, img, err)) { say(err); return; }
+    remember("Place");
+    Layer l;
+    l.name = u8path(path).stem().u8string();
+    l.x = (doc.w - img.w) / 2; l.y = (doc.h - img.h) / 2;
+    l.img = std::move(img);
+    addLayer(doc, std::move(l));
+    changed();
+}
+
+void dropFile(const std::string& path) {
+    if (doc.layers.empty() || path.size() > 4 && path.substr(path.size() - 4) == ".ltk") open(path);
+    else placeAsLayer(path);
+}
+
+static void saveAs(bool project) {
+    std::string start = doc.path;
+    if (!start.empty()) start = u8path(start).replace_extension(project ? ".ltk" : ".png").u8string();
+    const std::string p = project ? fileDialog(true, "LayerTack project|*.ltk|", "ltk", start)
+                                  : fileDialog(true, "PNG|*.png|JPG|*.jpg|", "png", start);
+    if (p.empty()) return;
+    std::string err;
+    if (!(project ? saveProject(doc, p, err) : saveImage(doc, p, err))) { say(err); return; }
+    if (project) { doc.path = p; doc.dirty = false; }
+    say("Saved " + u8path(p).filename().u8string());
+    setTitle();
+}
+
+static void save() {
+    if (!doc.path.empty() && doc.path.size() > 4 && doc.path.substr(doc.path.size() - 4) == ".ltk") {
+        std::string err;
+        if (saveProject(doc, doc.path, err)) { doc.dirty = false; say("Saved"); setTitle(); } else say(err);
+    } else saveAs(true);
+}
+
+// ---------- commands ----------
+static void selectAll() { doc.sel.assign((size_t)doc.w * doc.h, 255); selChanged(); }
+static void deselect() { doc.sel.clear(); selChanged(); }
+
+static void selectSubject(bool asMask) {
+    say("Finding the subject...");
+    Image comp;
+    composite(doc, comp, {0, 0, doc.w, doc.h}, false);
+    std::vector<uint8_t> m; std::string err;
+    if (!segmentSubject(comp, m, err)) { say(err); return; }
+    if (asMask) {
+        // Remove Background: a mask on the active layer from the subject
+        remember("Remove Background");
+        std::vector<uint8_t> saved = doc.sel;
+        doc.sel = m;
+        if (doc.cur().hasMask) deleteMask(doc);
+        addMask(doc, 2);
+        doc.sel = std::move(saved);
+        changed();
+        say("Background hidden with a mask: paint the mask black or white to fix the edge");
+    } else {
+        remember("Select Subject");
+        combineSel(doc, m, selMode);
+        selChanged();
+        say("Subject selected");
+    }
+}
+
+static void fillWith(const uint8_t* c, const char* what) {
+    remember(what);
+    fillSelection(doc, c, 1.0f, BM_Normal);
+    changed();
+}
+static void clearSelection() {
+    remember("Clear");
+    if (doc.editMask && doc.cur().hasMask) { const uint8_t black[4] = {0, 0, 0, 255}; fillSelection(doc, black, 1.0f, BM_Normal); }
+    else {
+        Work o = getWork(doc), r = o;
+        for (size_t i = 0; i < r.px.size(); i += 4) r.px[i + 3] = 0;
+        putWork(doc, o, r);
+    }
+    changed();
+}
+
+// ---------- dialogs (adjustments and filters with a live preview) ----------
+enum Dlg { D_NONE, D_NEW, D_IMGSIZE, D_CANVAS, D_BC, D_HS, D_BW, D_CURVES, D_LEVELS, D_GAUSS, D_BOX, D_NOISE, D_FEATHER, D_GROW, D_THRESH, D_RENAME, D_ABOUT, D_TRANSFORM };
+static int dlg = D_NONE; static bool dlgOpen = false;
+static Doc dlgBackup; static Work dlgOrig; static bool dlgPreview = true, dlgDirty = false;
+static float p[8]; static bool pb[3]; static int pi[4];
+static float bwW[6] = {40, 60, 40, 60, 20, 80}; static float bwTint[3] = {0.88f, 0.69f, 0.5f};
+static std::vector<float> cx[4], cy[4]; static int curveCh = 0, curveDrag = -1;
+static char renameBuf[128];
+
+static bool needsTarget(int d) { return d >= D_BC && d <= D_THRESH && d != D_FEATHER && d != D_GROW; }
+
+static void openDlg(int d) {
+    if (needsTarget(d) && !doc.cur().visible) { say("The layer is hidden"); }
+    dlg = d; dlgOpen = true; dlgDirty = true;
+    memset(p, 0, sizeof p); memset(pb, 0, sizeof pb); memset(pi, 0, sizeof pi);
+    switch (d) {
+    case D_NEW: pi[0] = 1920; pi[1] = 1080; pb[0] = true; break;
+    case D_IMGSIZE: pi[0] = doc.w; pi[1] = doc.h; pb[0] = true; break;
+    case D_CANVAS: pi[0] = doc.w; pi[1] = doc.h; pi[2] = 1; pi[3] = 1; break;
+    case D_GAUSS: p[0] = 4; break;
+    case D_BOX: p[0] = 6; break;
+    case D_NOISE: p[0] = 12; pb[0] = true; pb[1] = true; break;
+    case D_FEATHER: p[0] = 8; break;
+    case D_GROW: pi[0] = 4; break;
+    case D_THRESH: p[0] = 128; break;
+    case D_LEVELS: p[0] = 0; p[1] = 255; p[2] = 1; p[3] = 0; p[4] = 255; break;
+    case D_CURVES: for (int c = 0; c < 4; ++c) { cx[c] = {0, 1}; cy[c] = {0, 1}; } curveCh = 0; break;
+    case D_BW: { const float def[6] = {40, 60, 40, 60, 20, 80}; memcpy(bwW, def, sizeof def); break; }
+    case D_RENAME: snprintf(renameBuf, sizeof renameBuf, "%s", doc.cur().name.c_str()); break;
+    case D_TRANSFORM: pi[0] = pi[1] = 100; pb[0] = true; p[0] = 0; dlgBackup = doc; break;
+    default: break;
+    }
+    if (needsTarget(d)) { dlgBackup = doc; dlgOrig = getWork(doc); }
+    ImGui::OpenPopup("dlg");
+}
+
+static void preview() {
+    if (dlg == D_TRANSFORM) {
+        // from the layer as it was, every time
+        doc.layers[doc.active] = dlgBackup.layers[doc.active];
+        transformLayer(doc, pi[0] / 100.0f, (pb[0] ? pi[0] : pi[1]) / 100.0f, p[0]);
+        changed();
+        return;
+    }
+    if (!needsTarget(dlg)) return;
+    Work r = dlgOrig;
+    if (dlgPreview) {
+        switch (dlg) {
+        case D_BC: adjBrightnessContrast(r, p[0], p[1]); break;
+        case D_HS: adjHueSat(r, p[0], p[1], p[2], pb[0]); if (p[3] != 0) adjVibrance(r, p[3]); break;
+        case D_BW: adjBlackWhite(r, bwW, pb[0], bwTint); break;
+        case D_CURVES: { uint8_t lut[4][256]; for (int c = 0; c < 4; ++c) curveLUT(cx[c], cy[c], lut[c]); adjCurves(r, lut); break; }
+        case D_LEVELS: adjLevels(r, p[0] / 255, p[1] / 255, p[2], p[3] / 255, p[4] / 255); break;
+        case D_GAUSS: filterGaussianBlur(r, p[0]); break;
+        case D_BOX: filterBoxBlur(r, (int)p[0]); break;
+        case D_NOISE: filterAddNoise(r, p[0], pb[0], pb[1], 1234); break;
+        case D_THRESH: adjThreshold(r, p[0] / 255); break;
+        }
+    }
+    putWork(doc, dlgOrig, r);
+    changed();
+}
+
+static void closeDlg(bool ok) {
+    if (dlg == D_TRANSFORM) {
+        if (ok) hist.push(dlgBackup, "Free Transform");
+        else { doc.layers[doc.active] = dlgBackup.layers[doc.active]; changed(); }
+        dlgBackup = Doc();
+    }
+    if (needsTarget(dlg)) {
+        if (ok) { if (!dlgPreview) { dlgPreview = true; preview(); } hist.push(dlgBackup, "Adjustment"); }
+        else { putWork(doc, dlgOrig, dlgOrig); changed(); }
+        dlgBackup = Doc(); dlgOrig = Work();
+    }
+    dlg = D_NONE; dlgOpen = false;
+    ImGui::CloseCurrentPopup();
+}
+
+static void curvesWidget() {
+    const float S = 256;
+    ImVec2 a = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("curve", ImVec2(S, S));
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(a, ImVec2(a.x + S, a.y + S), C_WELL);
+    unsigned h[256];
+    histogram(doc, curveCh, h);
+    unsigned mx = 1; for (int i = 1; i < 255; ++i) mx = std::max(mx, h[i]);
+    for (int i = 0; i < 256; ++i) { const float v = std::min(1.0f, (float)h[i] / mx) * S; dl->AddLine(ImVec2(a.x + i + 0.5f, a.y + S), ImVec2(a.x + i + 0.5f, a.y + S - v), IM_COL32(0x44, 0x44, 0x44, 255)); }
+    for (int i = 1; i < 4; ++i) { dl->AddLine(ImVec2(a.x + S * i / 4, a.y), ImVec2(a.x + S * i / 4, a.y + S), C_LINE); dl->AddLine(ImVec2(a.x, a.y + S * i / 4), ImVec2(a.x + S, a.y + S * i / 4), C_LINE); }
+    dl->AddLine(ImVec2(a.x, a.y + S), ImVec2(a.x + S, a.y), IM_COL32(0x55, 0x55, 0x55, 255));
+    auto& xs = cx[curveCh]; auto& ys = cy[curveCh];
+    uint8_t lut[256];
+    curveLUT(xs, ys, lut);
+    const ImU32 lc = curveCh == 0 ? C_TEXT : (curveCh == 1 ? IM_COL32(255, 90, 90, 255) : curveCh == 2 ? IM_COL32(90, 220, 90, 255) : IM_COL32(90, 140, 255, 255));
+    for (int i = 0; i < 255; ++i) dl->AddLine(ImVec2(a.x + i, a.y + S - lut[i]), ImVec2(a.x + i + 1, a.y + S - lut[i + 1]), lc, 2);
+    for (size_t i = 0; i < xs.size(); ++i) dl->AddRect(ImVec2(a.x + xs[i] * S - 4, a.y + S - ys[i] * S - 4), ImVec2(a.x + xs[i] * S + 4, a.y + S - ys[i] * S + 4), C_PINK, 0, 0, 2);
+    const ImVec2 m = ImGui::GetIO().MousePos;
+    const float mx01 = std::clamp((m.x - a.x) / S, 0.0f, 1.0f), my01 = std::clamp(1 - (m.y - a.y) / S, 0.0f, 1.0f);
+    if (ImGui::IsItemActivated()) {
+        curveDrag = -1;
+        for (size_t i = 0; i < xs.size(); ++i) if (std::fabs(xs[i] - mx01) * S < 8 && std::fabs(ys[i] - my01) * S < 8) curveDrag = (int)i;
+        if (curveDrag < 0) {                     // a new point
+            size_t at = 0; while (at < xs.size() && xs[at] < mx01) ++at;
+            xs.insert(xs.begin() + at, mx01); ys.insert(ys.begin() + at, my01); curveDrag = (int)at;
+        }
+    }
+    if (ImGui::IsItemActive() && curveDrag >= 0) {
+        const int i = curveDrag, n = (int)xs.size();
+        const float lo = i > 0 ? xs[i - 1] + 0.01f : 0.0f, hi = i < n - 1 ? xs[i + 1] - 0.01f : 1.0f;
+        xs[i] = (i == 0 || i == n - 1) && n > 2 ? std::clamp(mx01, lo, hi) : std::clamp(mx01, lo, hi);
+        ys[i] = my01;
+        // dragged off the side: the point goes (the ends stay)
+        if (i > 0 && i < n - 1 && (m.y < a.y - 20 || m.y > a.y + S + 20)) { xs.erase(xs.begin() + i); ys.erase(ys.begin() + i); curveDrag = -1; }
+        dlgDirty = true;
+    }
+    if (ImGui::IsItemDeactivated()) curveDrag = -1;
+}
+
+static void drawDialog() {
+    if (!dlgOpen) return;
+    const char* titles[] = {"", "New", "Image Size", "Canvas Size", "Brightness/Contrast", "Hue/Saturation", "Black & White", "Curves",
+                            "Levels", "Gaussian Blur", "Box Blur", "Add Noise", "Feather Selection", "Grow / Shrink Selection", "Threshold", "Rename Layer", "About LayerTack", "Free Transform"};
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (!ImGui::BeginPopupModal("dlg", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) return;
+    ImGui::PushStyleColor(ImGuiCol_Text, col4(C_PINK));
+    ImGui::TextUnformatted(titles[dlg]);
+    ImGui::PopStyleColor();
+    ImGui::Separator();
+    bool ch = false;
+    ImGui::PushItemWidth(260);
+    switch (dlg) {
+    case D_NEW:
+        ImGui::InputInt("Width", &pi[0]); ImGui::InputInt("Height", &pi[1]);
+        ImGui::Checkbox("White background (else transparent)", &pb[0]);
+        break;
+    case D_IMGSIZE: {
+        const int ow = pi[0];
+        if (ImGui::InputInt("Width", &pi[0]) && pb[0]) pi[1] = std::max(1, (int)std::lround((double)pi[0] * doc.h / doc.w));
+        if (ImGui::InputInt("Height", &pi[1]) && pb[0]) pi[0] = std::max(1, (int)std::lround((double)pi[1] * doc.w / doc.h));
+        (void)ow;
+        ImGui::Checkbox("Keep proportions", &pb[0]);
+        ImGui::TextDisabled("Every layer and mask is resampled (bicubic).");
+        break;
+    }
+    case D_CANVAS:
+        ImGui::InputInt("Width", &pi[0]); ImGui::InputInt("Height", &pi[1]);
+        ImGui::Text("Anchor");
+        for (int y = 0; y < 3; ++y) {
+            for (int x = 0; x < 3; ++x) {
+                if (x) ImGui::SameLine();
+                ImGui::PushID(y * 3 + x);
+                const bool on = pi[2] == x && pi[3] == y;
+                if (on) ImGui::PushStyleColor(ImGuiCol_Button, col4(C_PINK));
+                if (ImGui::Button(on ? "o" : " ", ImVec2(26, 26))) { pi[2] = x; pi[3] = y; }
+                if (on) ImGui::PopStyleColor();
+                ImGui::PopID();
+            }
+        }
+        break;
+    case D_BC: ch |= ImGui::SliderFloat("Brightness", &p[0], -150, 150, "%.0f"); ch |= ImGui::SliderFloat("Contrast", &p[1], -50, 100, "%.0f"); break;
+    case D_HS:
+        ch |= ImGui::SliderFloat("Hue", &p[0], -180, 180, "%.0f"); ch |= ImGui::SliderFloat("Saturation", &p[1], -100, 100, "%.0f");
+        ch |= ImGui::SliderFloat("Lightness", &p[2], -100, 100, "%.0f"); ch |= ImGui::SliderFloat("Vibrance", &p[3], -100, 100, "%.0f");
+        ch |= ImGui::Checkbox("Colorize", &pb[0]);
+        break;
+    case D_BW: {
+        const char* names[6] = {"Reds", "Yellows", "Greens", "Cyans", "Blues", "Magentas"};
+        for (int i = 0; i < 6; ++i) ch |= ImGui::SliderFloat(names[i], &bwW[i], -200, 300, "%.0f%%");
+        ch |= ImGui::Checkbox("Tint", &pb[0]);
+        if (pb[0]) { ImGui::SameLine(); ch |= ImGui::ColorEdit3("##tint", bwTint, ImGuiColorEditFlags_NoInputs); }
+        break;
+    }
+    case D_CURVES: {
+        const char* chs[] = {"RGB", "Red", "Green", "Blue"};
+        ImGui::Combo("Channel", &curveCh, chs, 4);
+        curvesWidget();
+        ImGui::TextDisabled("Click to add a point, drag it, drag it off the box to remove it.");
+        if (ImGui::Button("Reset channel")) { cx[curveCh] = {0, 1}; cy[curveCh] = {0, 1}; dlgDirty = true; }
+        break;
+    }
+    case D_LEVELS:
+        ch |= ImGui::SliderFloat("Input black", &p[0], 0, 253, "%.0f"); ch |= ImGui::SliderFloat("Gamma", &p[2], 0.1f, 9.99f, "%.2f");
+        ch |= ImGui::SliderFloat("Input white", &p[1], 2, 255, "%.0f"); ch |= ImGui::SliderFloat("Output black", &p[3], 0, 255, "%.0f");
+        ch |= ImGui::SliderFloat("Output white", &p[4], 0, 255, "%.0f");
+        break;
+    case D_GAUSS: ImGui::SliderFloat("Radius (px)", &p[0], 0.1f, 250, "%.1f", ImGuiSliderFlags_Logarithmic); ch |= ImGui::IsItemDeactivatedAfterEdit(); break;
+    case D_BOX: ImGui::SliderFloat("Radius (px)", &p[0], 1, 200, "%.0f", ImGuiSliderFlags_Logarithmic); ch |= ImGui::IsItemDeactivatedAfterEdit(); break;
+    case D_NOISE:
+        ImGui::SliderFloat("Amount (%)", &p[0], 0.1f, 400, "%.1f", ImGuiSliderFlags_Logarithmic); ch |= ImGui::IsItemDeactivatedAfterEdit();
+        ch |= ImGui::Checkbox("Gaussian (else uniform)", &pb[0]); ch |= ImGui::Checkbox("Monochromatic", &pb[1]);
+        break;
+    case D_FEATHER: ImGui::SliderFloat("Radius (px)", &p[0], 0.1f, 250, "%.1f", ImGuiSliderFlags_Logarithmic); break;
+    case D_GROW: ImGui::SliderInt("Pixels (- shrinks)", &pi[0], -100, 100); break;
+    case D_THRESH: ch |= ImGui::SliderFloat("Level", &p[0], 1, 255, "%.0f"); break;
+    case D_TRANSFORM:
+        ImGui::SliderInt(pb[0] ? "Scale (%)" : "Width (%)", &pi[0], 1, 400); ch |= ImGui::IsItemDeactivatedAfterEdit();
+        if (!pb[0]) { ImGui::SliderInt("Height (%)", &pi[1], 1, 400); ch |= ImGui::IsItemDeactivatedAfterEdit(); }
+        ImGui::SliderFloat("Rotate", &p[0], -180, 180, "%.1f deg"); ch |= ImGui::IsItemDeactivatedAfterEdit();
+        ch |= ImGui::Checkbox("Keep proportions", &pb[0]);
+        ImGui::SameLine();
+        if (ImGui::Button("90 left")) { p[0] -= 90; ch = true; }
+        ImGui::SameLine();
+        if (ImGui::Button("90 right")) { p[0] += 90; ch = true; }
+        if (p[0] > 180) p[0] -= 360; if (p[0] < -180) p[0] += 360;
+        ImGui::TextDisabled("The layer and its mask, round the layer's centre.");
+        break;
+    case D_RENAME: ImGui::SetKeyboardFocusHere(); if (ImGui::InputText("Name", renameBuf, sizeof renameBuf, ImGuiInputTextFlags_EnterReturnsTrue)) { remember("Rename"); doc.cur().name = renameBuf; closeDlg(true); ImGui::PopItemWidth(); ImGui::EndPopup(); return; } break;
+    case D_ABOUT:
+        ImGui::TextUnformatted("LayerTack: layers, masks, blend modes, selections and adjustments.");
+        ImGui::TextUnformatted("Blend maths ported from PhotoCraft (MIT / Apache-2.0).");
+        ImGui::TextUnformatted("Farica\xe2\x98\x86Kimora \xc2\xa9 Cursed Entertainment");
+        break;
+    }
+    ImGui::PopItemWidth();
+    if (needsTarget(dlg)) { if (ImGui::Checkbox("Preview", &dlgPreview)) ch = true; }
+    if (ch || dlgDirty) { dlgDirty = false; preview(); }
+    ImGui::Separator();
+    if (ImGui::Button("OK", ImVec2(110, 0)) || ImGui::IsKeyPressed(ImGuiKey_Enter) && dlg != D_RENAME) {
+        switch (dlg) {
+        case D_NEW: if (pi[0] > 0 && pi[1] > 0 && pi[0] <= 16384 && pi[1] <= 16384) { doc = newDoc(pi[0], pi[1], pb[0]); fresh(); setTitle(); } break;
+        case D_IMGSIZE: if (pi[0] > 0 && pi[1] > 0 && pi[0] <= 16384 && pi[1] <= 16384) { remember("Image Size"); resizeImage(doc, pi[0], pi[1]); changed(); selChanged(); fitNext = true; } break;
+        case D_CANVAS: if (pi[0] > 0 && pi[1] > 0 && pi[0] <= 16384 && pi[1] <= 16384) { remember("Canvas Size"); resizeCanvas(doc, pi[0], pi[1], pi[2], pi[3]); changed(); selChanged(); fitNext = true; } break;
+        case D_FEATHER: remember("Feather"); featherSel(doc, p[0]); selChanged(); break;
+        case D_GROW: remember(pi[0] > 0 ? "Grow" : "Shrink"); growSel(doc, pi[0]); selChanged(); break;
+        case D_RENAME: remember("Rename"); doc.cur().name = renameBuf; break;
+        }
+        closeDlg(true);
+    }
+    if (dlg != D_ABOUT) {
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(110, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) closeDlg(false);
+    }
+    ImGui::EndPopup();
+}
+
+// ---------- the view ----------
+static ImVec2 toScreen(float x, float y) { return ImVec2(canvasPos.x + origin.x + x * zoom, canvasPos.y + origin.y + y * zoom); }
+static ImVec2 toCanvas(ImVec2 s) { return ImVec2((s.x - canvasPos.x - origin.x) / zoom, (s.y - canvasPos.y - origin.y) / zoom); }
+static void fit() {
+    zoom = std::min(1.0f, std::min((canvasSize.x - 40) / doc.w, (canvasSize.y - 40) / doc.h));
+    origin = ImVec2((canvasSize.x - doc.w * zoom) / 2, (canvasSize.y - doc.h * zoom) / 2);
+}
+static void zoomAt(float nz, ImVec2 screen) {
+    nz = std::clamp(nz, 0.02f, 64.0f);
+    const ImVec2 c = toCanvas(screen);
+    zoom = nz;
+    origin = ImVec2(screen.x - canvasPos.x - c.x * zoom, screen.y - canvasPos.y - c.y * zoom);
+}
+
+static int modeFromKeys() {
+    const ImGuiIO& io = ImGui::GetIO();
+    if (io.KeyShift && io.KeyAlt) return SEL_AND;
+    if (io.KeyShift) return SEL_ADD;
+    if (io.KeyAlt) return SEL_SUB;
+    return selMode;
+}
+
+static void finishShape(std::vector<uint8_t> shape, int mode, const char* what) {
+    remember(what);
+    combineSel(doc, std::move(shape), mode);
+    if (selFeather > 0) featherSel(doc, selFeather);
+    selChanged();
+}
+
+static void pickColour(ImVec2 c, bool toBg) {
+    const int x = (int)c.x, y = (int)c.y;
+    if (x < 0 || y < 0 || x >= doc.w || y >= doc.h) return;
+    memcpy(toBg ? bgc : fg, view.at(x, y), 3);
+}
+
+static uint8_t* brushColour() { return fg; }
+
+static void canvasInput() {
+    ImGuiIO& io = ImGui::GetIO();
+    const bool hovered = ImGui::IsItemHovered();
+    const ImVec2 m = io.MousePos;
+    const ImVec2 c = toCanvas(m);
+    const bool space = ImGui::IsKeyDown(ImGuiKey_Space) && !io.WantTextInput;
+    const int t = space ? T_HAND : tool;
+
+    if (hovered && io.MouseWheel != 0) zoomAt(zoom * (io.MouseWheel > 0 ? 1.15f : 1 / 1.15f), m);
+    // middle button always pans
+    if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) { panning = true; panStart = m; originStart = origin; }
+    if (panning) { origin = ImVec2(originStart.x + m.x - panStart.x, originStart.y + m.y - panStart.y); if (!ImGui::IsMouseDown(ImGuiMouseButton_Middle) && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) panning = false; }
+
+    if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+        dragging = true; dragStart = c; dragNow = c;
+        switch (t) {
+        case T_HAND: panning = true; panStart = m; originStart = origin; dragging = false; break;
+        case T_MOVE: remember("Move"); moveStartX = doc.cur().x; moveStartY = doc.cur().y; break;
+        case T_LASSO: lasso = {c.x, c.y}; break;
+        case T_POLY:
+            if (poly.empty()) poly = {c.x, c.y};
+            else if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) || (std::hypot(c.x - poly[0], c.y - poly[1]) * zoom < 8 && poly.size() >= 6)) {
+                finishShape(shapePolygon(doc, poly), modeFromKeys(), "Polygonal Lasso"); poly.clear();
+            } else { poly.push_back(c.x); poly.push_back(c.y); }
+            dragging = false;
+            break;
+        case T_WAND: finishShape(shapeWand(doc, (int)c.x, (int)c.y, tolerance, contiguous, sampleAll), modeFromKeys(), "Magic Wand"); dragging = false; break;
+        case T_BUCKET:
+            if (c.x >= 0 && c.y >= 0 && c.x < doc.w && c.y < doc.h) { remember("Paint Bucket"); bucketFill(doc, (int)c.x, (int)c.y, fg, tolerance, contiguous, sampleAll, bucketOpacity); changed(); }
+            dragging = false;
+            break;
+        case T_DROPPER: pickColour(c, io.KeyAlt); dragging = true; break;
+        case T_BRUSH: case T_ERASER:
+            if (io.KeyAlt && t == T_BRUSH) { pickColour(c, false); dragging = false; break; }
+            if (!doc.cur().visible) { say("The layer is hidden: show it to paint"); dragging = false; break; }
+            remember(t == T_BRUSH ? "Brush" : "Eraser");
+            strokeBegin(doc, stroke);
+            changed(strokeTo(doc, stroke, c.x, c.y, t == T_BRUSH ? brushSize : eraserSize, t == T_BRUSH ? brushHard : eraserHard, t == T_BRUSH ? brushOpacity : eraserOpacity, brushColour(), t == T_ERASER, true));
+            break;
+        default: break;
+        }
+    }
+    if (dragging && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        dragNow = c;
+        switch (t) {
+        case T_MOVE: {
+            Layer& l = doc.cur();
+            const int nx = moveStartX + (int)std::lround(c.x - dragStart.x), ny = moveStartY + (int)std::lround(c.y - dragStart.y);
+            if (nx != l.x || ny != l.y) { l.x = nx; l.y = ny; changed(); }
+            break;
+        }
+        case T_LASSO: if (std::hypot(c.x - lasso[lasso.size() - 2], c.y - lasso.back()) * zoom > 2) { lasso.push_back(c.x); lasso.push_back(c.y); } break;
+        case T_DROPPER: pickColour(c, io.KeyAlt); break;
+        case T_BRUSH: case T_ERASER:
+            if (stroke.on) changed(strokeTo(doc, stroke, c.x, c.y, t == T_BRUSH ? brushSize : eraserSize, t == T_BRUSH ? brushHard : eraserHard, t == T_BRUSH ? brushOpacity : eraserOpacity, brushColour(), t == T_ERASER, false));
+            break;
+        default: break;
+        }
+    }
+    if (dragging && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+        dragging = false;
+        switch (t) {
+        case T_RECT: case T_ELLIPSE:
+            if (std::fabs(c.x - dragStart.x) < 1 && std::fabs(c.y - dragStart.y) < 1) { if (modeFromKeys() == SEL_NEW) { remember("Deselect"); deselect(); } }
+            else finishShape(t == T_RECT ? shapeRect(doc, (int)std::lround(dragStart.x), (int)std::lround(dragStart.y), (int)std::lround(c.x), (int)std::lround(c.y))
+                                         : shapeEllipse(doc, (int)std::lround(dragStart.x), (int)std::lround(dragStart.y), (int)std::lround(c.x), (int)std::lround(c.y)),
+                             modeFromKeys(), t == T_RECT ? "Rectangle Select" : "Ellipse Select");
+            break;
+        case T_LASSO: if (lasso.size() >= 6) finishShape(shapePolygon(doc, lasso), modeFromKeys(), "Lasso"); lasso.clear(); break;
+        case T_BRUSH: case T_ERASER: strokeEnd(stroke); break;
+        default: break;
+        }
+    }
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) && t != T_HAND && !ImGui::IsMouseDown(ImGuiMouseButton_Middle)) panning = false;
+    if (t == T_HAND && panning) origin = ImVec2(originStart.x + m.x - panStart.x, originStart.y + m.y - panStart.y);
+}
+
+static void drawCanvas() {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    dl->AddRectFilled(canvasPos, ImVec2(canvasPos.x + canvasSize.x, canvasPos.y + canvasSize.y), C_BG);
+    const ImVec2 a = toScreen(0, 0), b = toScreen((float)doc.w, (float)doc.h);
+    dl->PushClipRect(canvasPos, ImVec2(canvasPos.x + canvasSize.x, canvasPos.y + canvasSize.y), true);
+    dl->AddImage((ImTextureID)(intptr_t)checkerTex, a, b, ImVec2(0, 0), ImVec2((b.x - a.x) / 16, (b.y - a.y) / 16));
+    glBindTexture(GL_TEXTURE_2D, viewTex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, zoom >= 2 ? GL_NEAREST : GL_LINEAR);
+    dl->AddImage((ImTextureID)(intptr_t)viewTex, a, b);
+    dl->AddRect(ImVec2(a.x - 1, a.y - 1), ImVec2(b.x + 1, b.y + 1), C_LINE);
+
+    // marching ants
+    if (antsVersion != selVersion) { ants = selOutline(doc); antsVersion = selVersion; }
+    const int phase = (int)(now() * 8);
+    for (size_t i = 0; i + 3 < ants.size(); i += 4) {
+        const ImVec2 p0 = toScreen((float)ants[i], (float)ants[i + 1]), p1 = toScreen((float)ants[i + 2], (float)ants[i + 3]);
+        const bool on = (((ants[i] + ants[i + 1]) / 4 + phase) & 1) != 0;
+        dl->AddLine(p0, p1, on ? IM_COL32(255, 255, 255, 255) : IM_COL32(0, 0, 0, 255), 1.0f);
+    }
+    // what's being drawn right now
+    const ImGuiIO& io = ImGui::GetIO();
+    if (dragging && (tool == T_RECT || tool == T_ELLIPSE)) {
+        const ImVec2 p0 = toScreen(dragStart.x, dragStart.y), p1 = toScreen(dragNow.x, dragNow.y);
+        if (tool == T_RECT) dl->AddRect(p0, p1, C_PINK, 0, 0, 1.5f);
+        else dl->AddEllipse(ImVec2((p0.x + p1.x) / 2, (p0.y + p1.y) / 2), std::fabs(p1.x - p0.x) / 2, std::fabs(p1.y - p0.y) / 2, C_PINK, 0, 64, 1.5f);
+    }
+    auto path = [&](const std::vector<float>& v, bool toMouse) {
+        for (size_t i = 0; i + 3 < v.size(); i += 2) dl->AddLine(toScreen(v[i], v[i + 1]), toScreen(v[i + 2], v[i + 3]), C_PINK, 1.5f);
+        if (toMouse && v.size() >= 2) dl->AddLine(toScreen(v[v.size() - 2], v.back()), io.MousePos, C_PINK, 1.0f);
+    };
+    if (!lasso.empty()) path(lasso, false);
+    if (!poly.empty()) path(poly, true);
+    // the brush outline
+    if ((tool == T_BRUSH || tool == T_ERASER) && ImGui::IsWindowHovered()) {
+        const float r = (tool == T_BRUSH ? brushSize : eraserSize) * 0.5f * zoom;
+        const float h = (tool == T_BRUSH ? brushHard : eraserHard);
+        dl->AddCircle(io.MousePos, r, IM_COL32(255, 255, 255, 200), 48, 1.0f);
+        dl->AddCircle(io.MousePos, r + 1, IM_COL32(0, 0, 0, 160), 48, 1.0f);
+        if (h < 0.98f) dl->AddCircle(io.MousePos, std::max(1.0f, r * h), IM_COL32(255, 255, 255, 90), 48, 1.0f);   // the solid core
+    }
+    dl->PopClipRect();
+}
+
+// ---------- tool icons (drawn, so there's no icon font to ship) ----------
+static void toolIcon(ImDrawList* dl, int t, ImVec2 c, ImU32 col) {
+    const float s = 9;
+    switch (t) {
+    case T_MOVE: dl->AddLine(ImVec2(c.x - s, c.y), ImVec2(c.x + s, c.y), col, 2); dl->AddLine(ImVec2(c.x, c.y - s), ImVec2(c.x, c.y + s), col, 2);
+        for (int k = 0; k < 4; ++k) { const float a = k * 1.5708f, ca = std::cos(a), sa = std::sin(a); const ImVec2 tip(c.x + ca * s, c.y + sa * s);
+            dl->AddTriangleFilled(tip, ImVec2(tip.x - ca * 4 - sa * 3, tip.y - sa * 4 + ca * 3), ImVec2(tip.x - ca * 4 + sa * 3, tip.y - sa * 4 - ca * 3), col); } break;
+    case T_RECT: for (int i = 0; i < 4; ++i) { const float o = -s + i * 5; dl->AddLine(ImVec2(c.x + o, c.y - s), ImVec2(c.x + o + 3, c.y - s), col, 2); dl->AddLine(ImVec2(c.x + o, c.y + s), ImVec2(c.x + o + 3, c.y + s), col, 2);
+            dl->AddLine(ImVec2(c.x - s, c.y + o), ImVec2(c.x - s, c.y + o + 3), col, 2); dl->AddLine(ImVec2(c.x + s, c.y + o), ImVec2(c.x + s, c.y + o + 3), col, 2); } break;
+    case T_ELLIPSE: dl->AddEllipse(c, s, s * 0.75f, col, 0, 24, 2); break;
+    case T_LASSO: dl->AddBezierCubic(ImVec2(c.x - 2, c.y + 6), ImVec2(c.x - 14, c.y - 2), ImVec2(c.x + 4, c.y - 16), ImVec2(c.x + 9, c.y - 2), col, 2);
+        dl->AddBezierCubic(ImVec2(c.x + 9, c.y - 2), ImVec2(c.x + 12, c.y + 6), ImVec2(c.x + 2, c.y + 8), ImVec2(c.x - 2, c.y + 6), col, 2); dl->AddLine(ImVec2(c.x - 2, c.y + 6), ImVec2(c.x - 6, c.y + 10), col, 2); break;
+    case T_POLY: { ImVec2 pts[5] = {ImVec2(c.x - s, c.y + 4), ImVec2(c.x - 4, c.y - s), ImVec2(c.x + s, c.y - 5), ImVec2(c.x + 5, c.y + s), ImVec2(c.x - s, c.y + 4)}; dl->AddPolyline(pts, 5, col, 0, 2); break; }
+    case T_WAND: dl->AddLine(ImVec2(c.x - s, c.y + s), ImVec2(c.x + 3, c.y - 3), col, 3);
+        for (int k = 0; k < 4; ++k) { const float a = k * 1.5708f + 0.78f; dl->AddLine(ImVec2(c.x + 5 + std::cos(a) * 2, c.y - 5 + std::sin(a) * 2), ImVec2(c.x + 5 + std::cos(a) * 6, c.y - 5 + std::sin(a) * 6), col, 1.5f); } break;
+    case T_BRUSH: dl->AddLine(ImVec2(c.x + s, c.y - s), ImVec2(c.x - 2, c.y + 2), col, 3); dl->AddCircleFilled(ImVec2(c.x - 4, c.y + 5), 4, col); break;
+    case T_ERASER: { ImVec2 q[4] = {ImVec2(c.x - s, c.y + 3), ImVec2(c.x - 1, c.y - s + 1), ImVec2(c.x + s, c.y - 2), ImVec2(c.x + 1, c.y + s - 1)}; dl->AddQuad(q[0], q[1], q[2], q[3], col, 2);
+        dl->AddQuadFilled(q[0], ImVec2((q[0].x + q[1].x) / 2 + 2, (q[0].y + q[1].y) / 2 + 2), ImVec2((q[3].x + q[2].x) / 2 + 1, (q[3].y + q[2].y) / 2 + 3), q[3], col); break; }
+    case T_BUCKET: { ImVec2 q[4] = {ImVec2(c.x - 7, c.y - 2), ImVec2(c.x, c.y - 9), ImVec2(c.x + 7, c.y - 2), ImVec2(c.x, c.y + 5)}; dl->AddQuad(q[0], q[1], q[2], q[3], col, 2); dl->AddCircleFilled(ImVec2(c.x + 8, c.y + 6), 3, col); break; }
+    case T_DROPPER: dl->AddLine(ImVec2(c.x - s, c.y + s), ImVec2(c.x + 2, c.y - 2), col, 2); dl->AddCircleFilled(ImVec2(c.x + 5, c.y - 5), 4, col); break;
+    case T_HAND: for (int k = 0; k < 4; ++k) dl->AddLine(ImVec2(c.x - 6 + k * 4, c.y - 1), ImVec2(c.x - 6 + k * 4, c.y - 8 + (k == 0 || k == 3 ? 3 : 0)), col, 2.5f);
+        dl->AddRectFilled(ImVec2(c.x - 7, c.y - 2), ImVec2(c.x + 7, c.y + 7), col, 3); break;
+    }
+}
+
+static const char* TOOL_NAMES[T_COUNT] = {"Move (V)", "Rectangle Select (M)", "Ellipse Select (M)", "Lasso (L)", "Polygonal Lasso (L)", "Magic Wand (W)",
+                                          "Brush (B)", "Eraser (E)", "Paint Bucket (G)", "Eyedropper (I)", "Hand (H, or hold Space)"};
+
+static void toolsPanel() {
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    for (int t = 0; t < T_COUNT; ++t) {
+        ImGui::PushID(t);
+        const ImVec2 a = ImGui::GetCursorScreenPos();
+        if (ImGui::InvisibleButton("t", ImVec2(32, 32))) { tool = t; poly.clear(); }
+        const bool on = tool == t, hov = ImGui::IsItemHovered();
+        dl->AddRectFilled(a, ImVec2(a.x + 32, a.y + 32), on ? C_PINK : (hov ? IM_COL32(0x33, 0x33, 0x33, 255) : C_PANEL), 3);
+        toolIcon(dl, t, ImVec2(a.x + 16, a.y + 16), on ? IM_COL32(255, 255, 255, 255) : C_TEXT);
+        if (hov) ImGui::SetTooltip("%s", TOOL_NAMES[t]);
+        ImGui::PopID();
+        if (t == T_MOVE || t == T_WAND || t == T_BUCKET) ImGui::Dummy(ImVec2(1, 4));
+    }
+    // colours: foreground over background, swap, default
+    ImGui::Dummy(ImVec2(1, 8));
+    const ImVec2 a = ImGui::GetCursorScreenPos();
+    dl->AddRectFilled(ImVec2(a.x + 12, a.y + 12), ImVec2(a.x + 32, a.y + 32), IM_COL32(bgc[0], bgc[1], bgc[2], 255));
+    dl->AddRect(ImVec2(a.x + 12, a.y + 12), ImVec2(a.x + 32, a.y + 32), C_LINE);
+    ImGui::SetCursorScreenPos(ImVec2(a.x + 12, a.y + 12));
+    if (ImGui::InvisibleButton("bgc", ImVec2(20, 20))) ImGui::OpenPopup("pickbg");
+    dl->AddRectFilled(a, ImVec2(a.x + 20, a.y + 20), IM_COL32(fg[0], fg[1], fg[2], 255));
+    dl->AddRect(a, ImVec2(a.x + 20, a.y + 20), IM_COL32(255, 255, 255, 200));
+    ImGui::SetCursorScreenPos(a);
+    if (ImGui::InvisibleButton("fgc", ImVec2(20, 20))) ImGui::OpenPopup("pickfg");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Foreground colour (X swaps, D black/white)");
+    ImGui::SetCursorScreenPos(ImVec2(a.x, a.y + 36));
+    for (int k = 0; k < 2; ++k) {
+        if (ImGui::BeginPopup(k ? "pickbg" : "pickfg")) {
+            uint8_t* c = k ? bgc : fg;
+            float f[3] = {c[0] / 255.0f, c[1] / 255.0f, c[2] / 255.0f};
+            if (ImGui::ColorPicker3("##c", f, ImGuiColorEditFlags_DisplayRGB | ImGuiColorEditFlags_DisplayHex)) for (int i = 0; i < 3; ++i) c[i] = (uint8_t)std::lround(f[i] * 255);
+            ImGui::EndPopup();
+        }
+    }
+}
+
+static bool sliderF(const char* label, float* v, float lo, float hi, const char* fmt, ImGuiSliderFlags f = 0) {
+    ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted(label); ImGui::SameLine(0, 5);
+    ImGui::PushID(label); const bool r = ImGui::SliderFloat("##v", v, lo, hi, fmt, f); ImGui::PopID(); return r;
+}
+static bool sliderI(const char* label, int* v, int lo, int hi) {
+    ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted(label); ImGui::SameLine(0, 5);
+    ImGui::PushID(label); const bool r = ImGui::SliderInt("##v", v, lo, hi); ImGui::PopID(); return r;
+}
+
+static void optionsBar() {
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextColored(col4(C_PINK), "%s", TOOL_NAMES[tool]);
+    ImGui::SameLine(0, 18);
+    ImGui::PushItemWidth(120);
+    auto selModes = [&]() {
+        const char* names[] = {"New", "Add", "Subtract", "Intersect"};
+        for (int i = 0; i < 4; ++i) {
+            if (i) ImGui::SameLine(0, 2);
+            const bool on = selMode == i;
+            if (on) ImGui::PushStyleColor(ImGuiCol_Button, col4(C_PINK));
+            if (ImGui::Button(names[i])) selMode = i;
+            if (on) ImGui::PopStyleColor();
+        }
+        ImGui::SameLine(0, 14);
+        ImGui::TextDisabled("Shift adds, Alt subtracts");
+    };
+    switch (tool) {
+    case T_BRUSH: case T_ERASER: {
+        float& sz = tool == T_BRUSH ? brushSize : eraserSize;
+        float& hd = tool == T_BRUSH ? brushHard : eraserHard;
+        float& op = tool == T_BRUSH ? brushOpacity : eraserOpacity;
+        sliderF("Size", &sz, 1, 1000, "%.0f px", ImGuiSliderFlags_Logarithmic); ImGui::SameLine(0, 14);
+        float h = hd * 100; if (sliderF("Hardness", &h, 0, 100, "%.0f%%")) hd = h / 100; ImGui::SameLine(0, 14);
+        float o = op * 100; if (sliderF("Opacity", &o, 1, 100, "%.0f%%")) op = o / 100; ImGui::SameLine(0, 14);
+        ImGui::TextDisabled(doc.editMask && doc.cur().hasMask ? "Painting the MASK: black hides, white reveals" : "[ ] size, Shift+[ ] hardness, Alt picks a colour");
+        break;
+    }
+    case T_RECT: case T_ELLIPSE: case T_LASSO: case T_POLY:
+        selModes(); ImGui::SameLine(0, 14);
+        sliderF("Feather", &selFeather, 0, 100, "%.0f px");
+        if (tool == T_POLY) { ImGui::SameLine(0, 14); ImGui::TextDisabled("Click points, double-click or Enter closes"); }
+        break;
+    case T_WAND: case T_BUCKET:
+        if (tool == T_WAND) { selModes(); ImGui::SameLine(0, 14); }
+        sliderI("Tolerance", &tolerance, 0, 255); ImGui::SameLine(0, 10);
+        ImGui::Checkbox("Contiguous", &contiguous); ImGui::SameLine(0, 10);
+        ImGui::Checkbox("Sample all layers", &sampleAll);
+        if (tool == T_BUCKET) { ImGui::SameLine(0, 10); float o = bucketOpacity * 100; if (sliderF("Opacity", &o, 1, 100, "%.0f%%")) bucketOpacity = o / 100; }
+        break;
+    case T_MOVE: ImGui::TextDisabled("Drag to move the layer (and its mask); arrow keys nudge, Shift+arrows by 10"); break;
+    case T_DROPPER: ImGui::TextDisabled("Click picks the foreground colour, Alt+click the background"); break;
+    case T_HAND: ImGui::TextDisabled("Drag to pan; the wheel zooms; Ctrl+0 fits, Ctrl+1 is 100%%"); break;
+    }
+    ImGui::PopItemWidth();
+}
+
+static void layersPanel(float height) {
+    Layer& cur = doc.cur();
+    ImGui::TextColored(col4(C_PINK), "LAYERS");
+    ImGui::PushItemWidth(-1);
+    if (ImGui::BeginCombo("##blend", blendName(cur.blend))) {
+        for (int m = 0; m < BM_Count; ++m) {
+            if (blendGroupStart(m)) ImGui::Separator();
+            if (ImGui::Selectable(blendName(m), m == cur.blend)) { remember("Blend Mode"); cur.blend = m; changed(); }
+        }
+        ImGui::EndCombo();
+    }
+    float op = cur.opacity * 100;
+    static bool opEditing = false;
+    if (ImGui::SliderFloat("##op", &op, 0, 100, "Opacity %.0f%%")) { if (!opEditing) { remember("Opacity"); opEditing = true; } cur.opacity = op / 100; changed(); }
+    if (ImGui::IsItemDeactivated()) opEditing = false;
+    ImGui::PopItemWidth();
+
+    ImGui::BeginChild("layerlist", ImVec2(0, height), false);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    for (int i = (int)doc.layers.size() - 1; i >= 0; --i) {
+        Layer& l = doc.layers[i];
+        ImGui::PushID(i);
+        const ImVec2 a = ImGui::GetCursorScreenPos();
+        const float w = ImGui::GetContentRegionAvail().x, h = 48;
+        const bool active = i == doc.active;
+        dl->AddRectFilled(a, ImVec2(a.x + w, a.y + h), active ? IM_COL32(0x3a, 0x20, 0x2e, 255) : C_PANEL);
+        dl->AddLine(ImVec2(a.x, a.y + h), ImVec2(a.x + w, a.y + h), C_LINE);
+        // the eye
+        ImGui::SetCursorScreenPos(ImVec2(a.x + 4, a.y + 14));
+        if (ImGui::InvisibleButton("eye", ImVec2(20, 20))) { remember("Visibility"); l.visible = !l.visible; changed(); }
+        if (l.visible) { dl->AddEllipse(ImVec2(a.x + 14, a.y + 24), 8, 5, C_TEXT, 0, 16, 1.5f); dl->AddCircleFilled(ImVec2(a.x + 14, a.y + 24), 2.5f, C_TEXT); }
+        else dl->AddRect(ImVec2(a.x + 7, a.y + 17), ImVec2(a.x + 21, a.y + 31), C_LINE);
+        // the layer's picture; click edits the pixels
+        const ImVec2 tp(a.x + 28, a.y + 4);
+        if (i < (int)thumbs.size() && thumbs[i]) dl->AddImage((ImTextureID)(intptr_t)thumbs[i], tp, ImVec2(tp.x + 40, tp.y + 40));
+        ImGui::SetCursorScreenPos(tp);
+        if (ImGui::InvisibleButton("px", ImVec2(40, 40))) { doc.active = i; doc.editMask = false; if (showMask) { showMask = false; changed(); } }
+        if (active && !doc.editMask) dl->AddRect(ImVec2(tp.x - 2, tp.y - 2), ImVec2(tp.x + 42, tp.y + 42), C_PINK, 0, 0, 2);
+        float nameX = tp.x + 48;
+        // the mask: click edits it, Shift+click turns it off, Alt+click shows it
+        if (l.hasMask) {
+            const ImVec2 mp(tp.x + 46, tp.y);
+            if (i < (int)mthumbs.size() && mthumbs[i]) dl->AddImage((ImTextureID)(intptr_t)mthumbs[i], mp, ImVec2(mp.x + 40, mp.y + 40));
+            if (!l.maskOn) { dl->AddLine(mp, ImVec2(mp.x + 40, mp.y + 40), IM_COL32(255, 60, 60, 255), 2); dl->AddLine(ImVec2(mp.x + 40, mp.y), ImVec2(mp.x, mp.y + 40), IM_COL32(255, 60, 60, 255), 2); }
+            ImGui::SetCursorScreenPos(mp);
+            if (ImGui::InvisibleButton("mask", ImVec2(40, 40))) {
+                const ImGuiIO& io = ImGui::GetIO();
+                doc.active = i;
+                if (io.KeyShift) { remember(l.maskOn ? "Disable Mask" : "Enable Mask"); l.maskOn = !l.maskOn; changed(); }
+                else if (io.KeyAlt) { doc.editMask = true; showMask = !showMask; changed(); }
+                else { doc.editMask = true; if (showMask) { showMask = false; changed(); } }
+            }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("Layer mask: click to paint it, Shift+click turns it off, Alt+click shows it");
+            if (active && doc.editMask) dl->AddRect(ImVec2(mp.x - 2, mp.y - 2), ImVec2(mp.x + 42, mp.y + 42), C_PINK, 0, 0, 2);
+            nameX = mp.x + 48;
+        }
+        // the name; double-click renames
+        ImGui::SetCursorScreenPos(ImVec2(nameX, a.y));
+        if (ImGui::InvisibleButton("name", ImVec2(std::max(10.0f, a.x + w - nameX), h))) { doc.active = i; doc.editMask = false; }
+        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) openDlg(D_RENAME);
+        dl->AddText(ImVec2(nameX, a.y + 9), l.visible ? C_TEXT : C_DIM, l.name.c_str());
+        char info[64];
+        snprintf(info, sizeof info, "%s%s", l.blend ? blendName(l.blend) : "", l.opacity < 1 ? (std::string(l.blend ? ", " : "") + std::to_string((int)std::lround(l.opacity * 100)) + "%").c_str() : "");
+        dl->AddText(ImVec2(nameX, a.y + 26), C_DIM, info);
+        ImGui::SetCursorScreenPos(ImVec2(a.x, a.y + h + 1));
+        ImGui::PopID();
+    }
+    ImGui::EndChild();
+    // the buttons under the list
+    auto btn = [&](const char* label, const char* tip) { const bool r = ImGui::Button(label); if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip); ImGui::SameLine(0, 3); return r; };
+    if (btn("New", "New empty layer (Ctrl+Shift+N)")) { remember("New Layer"); addLayer(doc, emptyLayer(doc, "Layer " + std::to_string(doc.layers.size()))); changed(); }
+    if (btn("Mask", "Add a layer mask (from the selection when there is one); Alt: hide all")) {
+        if (!cur.hasMask) { remember("Add Mask"); addMask(doc, doc.hasSel() ? 2 : (ImGui::GetIO().KeyAlt ? 1 : 0)); changed(); }
+        else say("The layer has a mask already");
+    }
+    if (btn("Dup", "Duplicate (Ctrl+J)")) { remember("Duplicate"); duplicateLayer(doc); changed(); }
+    if (btn("Up", "Move the layer up")) { remember("Reorder"); moveLayer(doc, 1); changed(); }
+    if (btn("Down", "Move the layer down")) { remember("Reorder"); moveLayer(doc, -1); changed(); }
+    if (btn("Merge", "Merge down (Ctrl+E)")) { remember("Merge Down"); mergeDown(doc); changed(); }
+    if (btn("Del", "Delete the layer")) { remember("Delete Layer"); deleteLayer(doc); changed(); }
+    ImGui::NewLine();
+}
+
+// ---------- menus ----------
+static bool item(const char* label, const char* key = nullptr, bool enabled = true) { return ImGui::MenuItem(label, key, false, enabled); }
+
+static void menus() {
+    if (!ImGui::BeginMainMenuBar()) return;
+    const bool mask = doc.cur().hasMask;
+    if (ImGui::BeginMenu("File")) {
+        if (item("New...", "Ctrl+N")) openDlg(D_NEW);
+        if (item("Open...", "Ctrl+O")) { const std::string p = fileDialog(false, OPEN_FILTER, nullptr, ""); if (!p.empty()) open(p); }
+        if (item("Place as Layer...", "Ctrl+Shift+O")) { const std::string p = fileDialog(false, OPEN_FILTER, nullptr, ""); if (!p.empty()) placeAsLayer(p); }
+        ImGui::Separator();
+        if (item("Save Project", "Ctrl+S")) save();
+        if (item("Save Project As...")) saveAs(true);
+        if (item("Export PNG / JPG...", "Ctrl+Shift+S")) saveAs(false);
+        ImGui::Separator();
+        if (item("Quit", "Ctrl+Q")) requestQuit();
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Edit")) {
+        if (item(hist.canUndo() ? ("Undo " + hist.undoNames.back()).c_str() : "Undo", "Ctrl+Z", hist.canUndo())) { hist.doUndo(doc); changed(); selChanged(); }
+        if (item(hist.canRedo() ? ("Redo " + hist.redoNames.back()).c_str() : "Redo", "Ctrl+Shift+Z", hist.canRedo())) { hist.doRedo(doc); changed(); selChanged(); }
+        ImGui::Separator();
+        if (item("Fill with Foreground", "Alt+Backspace")) fillWith(fg, "Fill");
+        if (item("Fill with Background", "Ctrl+Backspace")) fillWith(bgc, "Fill");
+        if (item("Clear", "Delete")) clearSelection();
+        ImGui::Separator();
+        if (item("Free Transform...", "Ctrl+T")) openDlg(D_TRANSFORM);
+        if (item("Flip Horizontal")) { remember("Flip"); flipLayer(doc, true); changed(); }
+        if (item("Flip Vertical")) { remember("Flip"); flipLayer(doc, false); changed(); }
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Image")) {
+        if (ImGui::BeginMenu("Adjustments")) {
+            if (item("Brightness/Contrast...")) openDlg(D_BC);
+            if (item("Levels...", "Ctrl+L")) openDlg(D_LEVELS);
+            if (item("Curves...", "Ctrl+M")) openDlg(D_CURVES);
+            ImGui::Separator();
+            if (item("Hue/Saturation...", "Ctrl+U")) openDlg(D_HS);
+            if (item("Black & White...", "Ctrl+Alt+Shift+B")) openDlg(D_BW);
+            ImGui::Separator();
+            if (item("Invert", "Ctrl+I")) { remember("Invert"); Work o = getWork(doc), r = o; adjInvert(r); putWork(doc, o, r); changed(); }
+            if (item("Desaturate", "Ctrl+Shift+U")) { remember("Desaturate"); Work o = getWork(doc), r = o; adjDesaturate(r); putWork(doc, o, r); changed(); }
+            if (item("Threshold...")) openDlg(D_THRESH);
+            ImGui::EndMenu();
+        }
+        ImGui::Separator();
+        if (item("Image Size...", "Ctrl+Alt+I")) openDlg(D_IMGSIZE);
+        if (item("Canvas Size...", "Ctrl+Alt+C")) openDlg(D_CANVAS);
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Layer")) {
+        if (item("New Layer", "Ctrl+Shift+N")) { remember("New Layer"); addLayer(doc, emptyLayer(doc, "Layer " + std::to_string(doc.layers.size()))); changed(); }
+        if (item("Duplicate Layer", "Ctrl+J")) { remember("Duplicate"); duplicateLayer(doc); changed(); }
+        if (item("Delete Layer", nullptr, doc.layers.size() > 1)) { remember("Delete Layer"); deleteLayer(doc); changed(); }
+        if (item("Rename Layer...")) openDlg(D_RENAME);
+        ImGui::Separator();
+        if (ImGui::BeginMenu("Layer Mask")) {
+            if (item("Reveal All", nullptr, !mask)) { remember("Add Mask"); addMask(doc, 0); changed(); }
+            if (item("Hide All", nullptr, !mask)) { remember("Add Mask"); addMask(doc, 1); changed(); }
+            if (item("Reveal Selection", nullptr, !mask && doc.hasSel())) { remember("Add Mask"); addMask(doc, 2); changed(); }
+            if (item("Hide Selection", nullptr, !mask && doc.hasSel())) { remember("Add Mask"); addMask(doc, 2); invertMask(doc); changed(); }
+            ImGui::Separator();
+            if (item("Edit the Mask", nullptr, mask)) { doc.editMask = true; }
+            if (item(doc.cur().maskOn ? "Disable" : "Enable", "Shift+click", mask)) { remember("Toggle Mask"); doc.cur().maskOn = !doc.cur().maskOn; changed(); }
+            if (item(showMask ? "Show the Picture" : "Show the Mask", "Alt+click", mask)) { showMask = !showMask; doc.editMask = true; changed(); }
+            if (item("Invert", nullptr, mask)) { remember("Invert Mask"); invertMask(doc); changed(); }
+            if (item("Selection from Mask", nullptr, mask)) { remember("Load Selection"); selectionFromMask(doc); selChanged(); }
+            ImGui::Separator();
+            if (item("Apply", nullptr, mask)) { remember("Apply Mask"); applyMask(doc); showMask = false; changed(); }
+            if (item("Delete", nullptr, mask)) { remember("Delete Mask"); deleteMask(doc); showMask = false; changed(); }
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Blend Mode")) {
+            for (int m = 0; m < BM_Count; ++m) { if (blendGroupStart(m)) ImGui::Separator(); if (ImGui::MenuItem(blendName(m), nullptr, doc.cur().blend == m)) { remember("Blend Mode"); doc.cur().blend = m; changed(); } }
+            ImGui::EndMenu();
+        }
+        ImGui::Separator();
+        if (item("Merge Down", "Ctrl+E", doc.active > 0)) { remember("Merge Down"); mergeDown(doc); changed(); }
+        if (item("Merge Visible", "Ctrl+Shift+E")) { remember("Merge Visible"); mergeVisible(doc); changed(); }
+        if (item("Flatten Image")) { remember("Flatten"); flatten(doc); changed(); }
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Select")) {
+        if (item("All", "Ctrl+A")) { remember("Select All"); selectAll(); }
+        if (item("Deselect", "Ctrl+D", doc.hasSel())) { remember("Deselect"); deselect(); }
+        if (item("Inverse", "Ctrl+Shift+I")) { remember("Inverse"); invertSel(doc); selChanged(); }
+        ImGui::Separator();
+        if (item("Subject")) selectSubject(false);
+        if (item("Remove Background (as a mask)")) selectSubject(true);
+        ImGui::Separator();
+        if (item("Feather...", "Shift+F6", doc.hasSel())) openDlg(D_FEATHER);
+        if (item("Grow / Shrink...", nullptr, doc.hasSel())) openDlg(D_GROW);
+        if (item("Load from Mask / Transparency")) { remember("Load Selection"); selectionFromMask(doc); selChanged(); }
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Filter")) {
+        if (ImGui::BeginMenu("Blur")) {
+            if (item("Average")) { remember("Average"); Work o = getWork(doc), r = o; filterAverage(doc, r); putWork(doc, o, r); changed(); }
+            if (item("Box Blur...")) openDlg(D_BOX);
+            if (item("Gaussian Blur...")) openDlg(D_GAUSS);
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Noise")) { if (item("Add Noise...")) openDlg(D_NOISE); ImGui::EndMenu(); }
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("View")) {
+        if (item("Fit on Screen", "Ctrl+0")) fit();
+        if (item("100%", "Ctrl+1")) zoomAt(1, ImVec2(canvasPos.x + canvasSize.x / 2, canvasPos.y + canvasSize.y / 2));
+        if (item("Zoom In", "Ctrl++")) zoomAt(zoom * 1.25f, ImVec2(canvasPos.x + canvasSize.x / 2, canvasPos.y + canvasSize.y / 2));
+        if (item("Zoom Out", "Ctrl+-")) zoomAt(zoom / 1.25f, ImVec2(canvasPos.x + canvasSize.x / 2, canvasPos.y + canvasSize.y / 2));
+        ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Help")) { if (item("About LayerTack")) openDlg(D_ABOUT); ImGui::EndMenu(); }
+    ImGui::EndMainMenuBar();
+}
+
+// ---------- keys (Photoshop's) ----------
+static void keys() {
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.WantTextInput || dlgOpen) return;
+    const bool ctrl = io.KeyCtrl, shift = io.KeyShift, alt = io.KeyAlt;
+    auto k = [](ImGuiKey key) { return ImGui::IsKeyPressed(key, false); };
+    auto kr = [](ImGuiKey key) { return ImGui::IsKeyPressed(key, true); };
+    if (ctrl) {
+        if (k(ImGuiKey_Z)) { if (shift) hist.doRedo(doc); else hist.doUndo(doc); changed(); selChanged(); }
+        else if (k(ImGuiKey_Y)) { hist.doRedo(doc); changed(); selChanged(); }
+        else if (k(ImGuiKey_N)) { if (shift) { remember("New Layer"); addLayer(doc, emptyLayer(doc, "Layer " + std::to_string(doc.layers.size()))); changed(); } else openDlg(D_NEW); }
+        else if (k(ImGuiKey_O)) { const std::string p = fileDialog(false, OPEN_FILTER, nullptr, ""); if (!p.empty()) { if (shift) placeAsLayer(p); else open(p); } }
+        else if (k(ImGuiKey_S)) { if (shift) saveAs(false); else save(); }
+        else if (k(ImGuiKey_Q)) requestQuit();
+        else if (k(ImGuiKey_A)) { remember("Select All"); selectAll(); }
+        else if (k(ImGuiKey_D)) { remember("Deselect"); deselect(); }
+        else if (k(ImGuiKey_I)) { if (shift) { remember("Inverse"); invertSel(doc); selChanged(); } else if (alt) openDlg(D_IMGSIZE); else { remember("Invert"); Work o = getWork(doc), r = o; adjInvert(r); putWork(doc, o, r); changed(); } }
+        else if (k(ImGuiKey_C) && alt) openDlg(D_CANVAS);
+        else if (k(ImGuiKey_T)) openDlg(D_TRANSFORM);
+        else if (k(ImGuiKey_J)) { remember("Duplicate"); duplicateLayer(doc); changed(); }
+        else if (k(ImGuiKey_E)) { if (shift) { remember("Merge Visible"); mergeVisible(doc); } else { remember("Merge Down"); mergeDown(doc); } changed(); }
+        else if (k(ImGuiKey_M)) openDlg(D_CURVES);
+        else if (k(ImGuiKey_L)) openDlg(D_LEVELS);
+        else if (k(ImGuiKey_U)) { if (shift) { remember("Desaturate"); Work o = getWork(doc), r = o; adjDesaturate(r); putWork(doc, o, r); changed(); } else openDlg(D_HS); }
+        else if (k(ImGuiKey_B) && alt && shift) openDlg(D_BW);
+        else if (k(ImGuiKey_0)) fit();
+        else if (k(ImGuiKey_1)) zoomAt(1, ImVec2(canvasPos.x + canvasSize.x / 2, canvasPos.y + canvasSize.y / 2));
+        else if (k(ImGuiKey_Equal) || k(ImGuiKey_KeypadAdd)) zoomAt(zoom * 1.25f, ImVec2(canvasPos.x + canvasSize.x / 2, canvasPos.y + canvasSize.y / 2));
+        else if (k(ImGuiKey_Minus) || k(ImGuiKey_KeypadSubtract)) zoomAt(zoom / 1.25f, ImVec2(canvasPos.x + canvasSize.x / 2, canvasPos.y + canvasSize.y / 2));
+        else if (k(ImGuiKey_Backspace)) fillWith(bgc, "Fill");
+        return;
+    }
+    if (alt && k(ImGuiKey_Backspace)) { fillWith(fg, "Fill"); return; }
+    if (shift && k(ImGuiKey_F6)) { openDlg(D_FEATHER); return; }
+    if (k(ImGuiKey_Delete) || k(ImGuiKey_Backspace)) { clearSelection(); return; }
+    if (k(ImGuiKey_Enter) && poly.size() >= 6) { finishShape(shapePolygon(doc, poly), selMode, "Polygonal Lasso"); poly.clear(); return; }
+    if (k(ImGuiKey_Escape)) { poly.clear(); lasso.clear(); return; }
+    if (k(ImGuiKey_V)) tool = T_MOVE;
+    if (k(ImGuiKey_M)) tool = tool == T_RECT ? T_ELLIPSE : T_RECT;
+    if (k(ImGuiKey_L)) tool = tool == T_LASSO ? T_POLY : T_LASSO;
+    if (k(ImGuiKey_W)) tool = T_WAND;
+    if (k(ImGuiKey_B)) tool = T_BRUSH;
+    if (k(ImGuiKey_E)) tool = T_ERASER;
+    if (k(ImGuiKey_G)) tool = T_BUCKET;
+    if (k(ImGuiKey_I)) tool = T_DROPPER;
+    if (k(ImGuiKey_H)) tool = T_HAND;
+    if (k(ImGuiKey_X)) { uint8_t t[4]; memcpy(t, fg, 4); memcpy(fg, bgc, 4); memcpy(bgc, t, 4); }
+    if (k(ImGuiKey_D)) { memset(fg, 0, 3); memset(bgc, 255, 3); }
+    // [ and ]: size; with Shift: hardness
+    float& sz = tool == T_ERASER ? eraserSize : brushSize;
+    float& hd = tool == T_ERASER ? eraserHard : brushHard;
+    if (kr(ImGuiKey_LeftBracket)) { if (shift) hd = std::max(0.0f, hd - 0.25f); else sz = std::max(1.0f, sz * 0.85f); }
+    if (kr(ImGuiKey_RightBracket)) { if (shift) hd = std::min(1.0f, hd + 0.25f); else sz = std::min(1000.0f, sz * 1.18f + 1); }
+    if (tool == T_MOVE) {
+        const int step = shift ? 10 : 1;
+        int dx = 0, dy = 0;
+        if (kr(ImGuiKey_LeftArrow)) dx = -step; if (kr(ImGuiKey_RightArrow)) dx = step;
+        if (kr(ImGuiKey_UpArrow)) dy = -step; if (kr(ImGuiKey_DownArrow)) dy = step;
+        if (dx || dy) { remember("Nudge"); doc.cur().x += dx; doc.cur().y += dy; changed(); }
+    }
+}
+
+// ---------- the frame ----------
+void frame() {
+    ImGuiIO& io = ImGui::GetIO();
+    const float W = io.DisplaySize.x, H = io.DisplaySize.y;
+    menus();
+    const float top = ImGui::GetFrameHeight(), optH = 38, statusH = 26, leftW = 50, rightW = 310;
+    const ImGuiWindowFlags fixed = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus;
+
+    ImGui::SetNextWindowPos(ImVec2(0, top)); ImGui::SetNextWindowSize(ImVec2(W, optH));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, col4(IM_COL32(0x21, 0x21, 0x21, 255)));
+    ImGui::Begin("options", nullptr, fixed); optionsBar(); ImGui::End();
+    ImGui::PopStyleColor();
+
+    ImGui::SetNextWindowPos(ImVec2(0, top + optH)); ImGui::SetNextWindowSize(ImVec2(leftW, H - top - optH - statusH));
+    ImGui::Begin("tools", nullptr, fixed); toolsPanel(); ImGui::End();
+
+    ImGui::SetNextWindowPos(ImVec2(W - rightW, top + optH)); ImGui::SetNextWindowSize(ImVec2(rightW, H - top - optH - statusH));
+    ImGui::Begin("panels", nullptr, fixed);
+    layersPanel(std::max(120.0f, H - top - optH - statusH - 130));
+    ImGui::End();
+
+    canvasPos = ImVec2(leftW, top + optH); canvasSize = ImVec2(W - leftW - rightW, H - top - optH - statusH);
+    if (fitNext && canvasSize.x > 50) { fit(); fitNext = false; }
+    ImGui::SetNextWindowPos(canvasPos); ImGui::SetNextWindowSize(canvasSize);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::Begin("canvas", nullptr, fixed | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::InvisibleButton("canvasarea", canvasSize, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle);
+    canvasInput();
+    uploadView();
+    drawCanvas();
+    ImGui::End();
+    ImGui::PopStyleVar();
+
+    ImGui::SetNextWindowPos(ImVec2(0, H - statusH)); ImGui::SetNextWindowSize(ImVec2(W, statusH));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10, 4));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, col4(C_BG));
+    ImGui::Begin("status", nullptr, fixed);
+    const ImVec2 c = toCanvas(io.MousePos);
+    ImGui::Text("%.0f%%   %d x %d   %s", zoom * 100, doc.w, doc.h, (c.x >= 0 && c.y >= 0 && c.x < doc.w && c.y < doc.h) ? (std::to_string((int)c.x) + ", " + std::to_string((int)c.y)).c_str() : "");
+    ImGui::SameLine(0, 30);
+    if (now() < toastUntil) ImGui::TextColored(col4(C_PINK), "%s", toast.c_str());
+    else ImGui::TextDisabled("%s", doc.editMask && doc.cur().hasMask ? "Editing the layer MASK" : "");
+    ImGui::End();
+    ImGui::PopStyleColor(); ImGui::PopStyleVar();
+
+    keys();
+    drawDialog();
+    updateThumbs();
+
+    // unsaved changes on the way out
+    if (askQuit) { ImGui::OpenPopup("quit?"); askQuit = false; }
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (ImGui::BeginPopupModal("quit?", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
+        ImGui::Text("Save the changes first?");
+        if (ImGui::Button("Save", ImVec2(90, 0))) { save(); if (!doc.dirty) quit = true; ImGui::CloseCurrentPopup(); }
+        ImGui::SameLine();
+        if (ImGui::Button("Don't save", ImVec2(90, 0))) { quit = true; ImGui::CloseCurrentPopup(); }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(90, 0))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    static bool wasDirty = false;
+    if (doc.dirty != wasDirty) { wasDirty = doc.dirty; setTitle(); }
+}
+
+bool wantsQuit() { return quit; }
+void requestQuit() { if (doc.dirty && hist.canUndo()) askQuit = true; else quit = true; }
+
+void init(SDL_Window* win, const std::string& prefDir) {
+    window = win; prefs = prefDir;
+    applyStyle();
+    const uint8_t chk[16] = {0x66, 0x66, 0x66, 255, 0x88, 0x88, 0x88, 255, 0x88, 0x88, 0x88, 255, 0x66, 0x66, 0x66, 255};
+    checkerTex = makeTex(2, 2, chk, true, true);
+    doc = newDoc(1600, 1000, true);
+    fresh();
+    setTitle();
+}
+
+// --capture: a scripted session so the README's screenshot shows the real thing
+void script(const std::string& what) {
+    if (what == "demo") {
+        // the picture gets a mask from its subject, a pink Multiply layer goes over it, a selection is drawn
+        if (doc.layers.size() == 1 && doc.path.empty()) return;
+        duplicateLayer(doc);
+        doc.layers[0].visible = false;
+        selectSubject(true);
+        doc.layers[0].visible = true;
+        addLayer(doc, emptyLayer(doc, "Pink"));
+        const uint8_t pink[4] = {224, 64, 138, 255};
+        fillSelection(doc, pink, 1.0f, BM_Normal);
+        doc.cur().blend = BM_Multiply; doc.cur().opacity = 0.55f;
+        addMask(doc, 0);
+        Work o = getWork(doc), r = o;
+        for (int y = 0; y < r.h; ++y) for (int x = 0; x < r.w; ++x) { float* q = r.at(x, y); q[0] = q[1] = q[2] = std::min(1.0f, (float)x / r.w * 1.6f); }
+        putWork(doc, o, r);
+        doc.editMask = true;
+        combineSel(doc, shapeEllipse(doc, doc.w / 8, doc.h / 8, doc.w / 3, doc.h / 2), SEL_NEW);
+        changed(); selChanged();
+        tool = T_BRUSH;
+    }
+    if (what == "ops") {
+        FILE* tl = fopen("layertack_timing.txt", "w");
+        auto t0 = std::chrono::steady_clock::now();
+        auto tick = [&](const char* n) { auto t1 = std::chrono::steady_clock::now(); if (tl) fprintf(tl, "%-12s %6.0f ms\n", n, std::chrono::duration<double, std::milli>(t1 - t0).count()); t0 = t1; };
+        // brush with soft and hard edges, blurs, curves, black & white, noise, bucket, lasso, resize: no crashes
+        addLayer(doc, emptyLayer(doc, "Strokes"));
+        const uint8_t pink[3] = {224, 64, 138}, white[3] = {255, 255, 255};
+        for (int k = 0; k < 2; ++k) {
+            Stroke st; strokeBegin(doc, st);
+            for (int i = 0; i <= 40; ++i) strokeTo(doc, st, doc.w * (0.15f + 0.7f * i / 40), doc.h * (0.3f + 0.25f * k) + std::sin(i * 0.3f) * 40, 60, k ? 1.0f : 0.0f, 1.0f, k ? white : pink, false, i == 0);
+            strokeEnd(st);
+        }
+        tick("strokes");
+        combineSel(doc, shapePolygon(doc, {doc.w * 0.1f, doc.h * 0.7f, doc.w * 0.5f, doc.h * 0.62f, doc.w * 0.42f, doc.h * 0.95f, doc.w * 0.12f, doc.h * 0.9f}), SEL_NEW);
+        featherSel(doc, 6);
+        tick("polygon+feather");
+        doc.active = 0;
+        { Work o = getWork(doc), r = o; filterGaussianBlur(r, 12); putWork(doc, o, r); }
+        tick("gauss12");
+        doc.sel.clear();
+        { Work o = getWork(doc), r = o; const float w6[6] = {40, 60, 40, 60, 20, 80}, t[3] = {0, 0, 0}; uint8_t lut[4][256];
+          std::vector<float> xs = {0, 0.25f, 0.75f, 1}, ys = {0, 0.15f, 0.9f, 1}, idx = {0, 1};
+          curveLUT(xs, ys, lut[0]); for (int c = 1; c < 4; ++c) curveLUT(idx, idx, lut[c]);
+          adjCurves(r, lut); filterAddNoise(r, 8, true, true, 7); (void)w6; (void)t; putWork(doc, o, r); }
+        tick("curves+noise");
+        addLayer(doc, emptyLayer(doc, "Bucket"));
+        const uint8_t teal[4] = {40, 180, 170, 255};
+        bucketFill(doc, 5, 5, teal, 10, true, false, 1.0f);
+        tick("bucket");
+        doc.cur().blend = BM_Color; doc.cur().opacity = 0.35f;
+        addMask(doc, 0);
+        doc.editMask = true;
+        { Work o = getWork(doc), r = o; for (int y = 0; y < r.h; ++y) for (int x = 0; x < r.w; ++x) r.at(x, y)[0] = r.at(x, y)[1] = r.at(x, y)[2] = (y > r.h / 2) ? 1.0f : 0.0f; filterGaussianBlur(r, 30); putWork(doc, o, r); }
+        tick("maskblur");
+        doc.editMask = false;
+        { Work o = getWork(doc), r = o; const float w6[6] = {40, 60, 40, 60, 20, 80}, t[3] = {0, 0, 0}; adjBlackWhite(r, w6, false, t); filterBoxBlur(r, 3); putWork(doc, o, r); }
+        tick("bw+box");
+        resizeImage(doc, doc.w * 3 / 4, doc.h * 3 / 4);
+        doc.active = (int)doc.layers.size() - 1; while (doc.active > 0 && doc.cur().name != "Strokes") doc.active--;
+        transformLayer(doc, 0.8f, 0.8f, 25.0f);
+        { Work o = getWork(doc), r = o; adjVibrance(r, 60); putWork(doc, o, r); }
+        tick("resize");
+        combineSel(doc, shapeWand(doc, doc.w / 2, doc.h / 2, 40, true, true), SEL_NEW);
+        tick("wand");
+        if (tl) fclose(tl);
+        changed(); selChanged(); fitNext = true;
+    }
+}
+
+} // namespace App
