@@ -35,7 +35,7 @@
   </div>  
   <br>
 
-# LayerTac
+# LayerTack
 
 
 1. Layer Architecture & Masking
