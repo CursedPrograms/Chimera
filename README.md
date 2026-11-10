@@ -35,7 +35,54 @@
   </div>  
   <br>
 
-# Flask-Python-Template
+# LayerTac
+
+
+1. Layer Architecture & Masking
+Layer Stack Management: Support for unlimited raster layers, layer creation, deletion, reordering, duplication, and opacity control (0–100%).
+
+Merge Operations: Dedicated Merge Down and Flatten Image functionality to bake composite layers into single rasters.
+
+Non-Destructive Layer Masking: Dedicated mask channels supporting black (hide), white (reveal), and grayscale (partial transparency) mask blending workflows.
+
+2. Selection & Segment Detection Tools
+Manual Selection Tools: Freehand Lasso, Polygonal Lasso, and Rectangular/Elliptical Marquee selection.
+
+Segment Detection & Auto-Selection:
+
+Select Subject: Automatic object outline detection and isolation.
+
+Background Removal: One-click automated background extraction and mask generation.
+
+3. Canvas Tools & Painting
+Paint Bucket / Flood Fill: Fast area filling with contiguous tolerance control, pattern sampling, and blend mode integration.
+
+Empty Layer Workflow: Dedicated empty layer generation prepared for instant bucket fills, overlays, and manual stroke application.
+
+Canvas Manipulation: Transform tool to move, scale, rotate, and flip active layer content or selections.
+
+4. Tonal, Color & Adjustment Engine
+Curves Adjustment: Custom tone curve editor supporting multi-point control for precise contrast, highlights, and shadow remap.
+
+Color & Tone Controls: Standardized adjustments for Brightness, Contrast, Saturation, Vibrance, and Hue.
+
+Black & White Converter: Dedicated grayscale engine with channel-specific weight adjustments (R/G/B) for fine tonal control.
+
+5. Filter & Processing Effects
+Blur Engines:
+
+Gaussian Blur: Precision radius blur algorithm for smooth gradients and depth-of-field effects.
+
+Average Blur: Uniform box blur sampling for quick tone smoothing and color averaging.
+
+Photoshop-Style Noise Generator: Gaussian/Uniform noise engine with Monochromatic and RGB color distribution modes.
+
+6. Export & Canvas Utilities
+PNG Engine: Full 32-bit transparent PNG export preserving channel alpha data.
+
+Image Resizing: Bi-cubic canvas and image scale utility with locked aspect ratio options.
+
+Workspace Theme: Standard dark studio UI layout with high-contrast tool palettes and contextual top option bars.
 
 <br>
 ## How to Run:
