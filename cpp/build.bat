@@ -25,6 +25,11 @@ if exist dist\LayerTack rmdir /s /q dist\LayerTack
 mkdir dist\LayerTack
 xcopy /e /i /q /y build\Release\* dist\LayerTack\ >nul
 del /q dist\LayerTack\*.lib 2>nul
+rem Microsoft's Visual C++ runtime goes next to the exe, so it starts on PCs without the redistributable installed
+set "CRT="
+for /f "usebackq delims=" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -find VC\Redist\MSVC\*\x64\Microsoft.VC143.CRT`) do set "CRT=%%i"
+if not defined CRT echo Visual C++ runtime folder not found, is Visual Studio 2022 installed?& goto :error
+for %%f in (vcruntime140.dll vcruntime140_1.dll msvcp140.dll msvcp140_1.dll) do copy /y "%CRT%\%%f" dist\LayerTack\ >nul || goto :error
 copy /y ..\README.md dist\LayerTack\ >nul
 copy /y ..\LICENSE dist\LayerTack\ >nul
 copy /y ..\NOTICE dist\LayerTack\ >nul
