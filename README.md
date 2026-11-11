@@ -85,7 +85,20 @@ modes, selections with Select Subject, tonal adjustments and filters, in a dark 
   uniform smoothing.
 - **Add Noise:** Photoshop-style Gaussian or Uniform noise, monochromatic or per channel.
 
-### 6. Export and canvas utilities
+### 6. Changeling filters (Filter > Changeling)
+The Changelings work on a photo inside LayerTack: **Imago** (another face), **Tiresias** (the other gender),
+**Chronos** (younger or older), **Natio** (born somewhere else), **Cosmeta** (makeup and hair colour) and
+**Tonsor** (a hairstyle from a photo).
+- **Non-destructive:** the result comes in as a new layer above the picture, in the same place, so masks, opacity
+  and blend modes work on it. With a selection, the new layer is masked to it.
+- **On the whole picture or one layer:** transparency is kept.
+- **In the background:** the log shows progress, and **Stop** ends the run.
+- **Needs [Changeling Studio](https://github.com/CursedPrograms/Changeling-Studio)** on the same PC, with the
+  Changelings you want set up. LayerTack finds it next to itself, in the usual places or through
+  `CHANGELING_STUDIO`; otherwise use **Filter > Changeling > Find Changeling Studio...** The steps and their
+  options come from Studio's `chain.py --steps --json`, so new Changelings show up without updating LayerTack.
+
+### 7. Export and canvas utilities
 - **PNG:** 32-bit PNG with full transparency; JPG export (onto white).
 - **Projects:** `.ltk` files keep every layer, mask, blend mode and opacity.
 - **Image Size:** bicubic resampling of every layer and mask, with locked proportions.
@@ -93,7 +106,7 @@ modes, selections with Select Subject, tonal adjustments and filters, in a dark 
 - **Open:** PNG, JPG, BMP, TGA, GIF and flat PSD; drop files on the window to place them as layers.
 - **Undo / redo:** the last 20 steps.
 
-### 7. Workspace
+### 8. Workspace
 The usual layout: menus, a contextual tool options bar, the tools down the left, the canvas in the middle, the
 Layers panel on the right and a status bar, in the Cursed dark theme (solid greys with the Cursed pink). The usual
 shortcuts: V M L W B E G I H, [ and ] for brush size (Shift for hardness), X swaps colours, D resets them, Ctrl+Z,
@@ -121,6 +134,7 @@ The code, in `cpp/src/`:
 - `blend.cpp`: the blend modes
 - `ops.cpp`: adjustments, filters, fills, selections, resizing, transform and the brush
 - `segment.cpp`: Select Subject through ONNX Runtime's C API (loaded at run time)
+- `changeling.cpp`: Filter > Changeling: finds Changeling Studio and runs its `chain.py` in the background
 - `app.cpp`: the window: menus, tools, canvas, Layers panel and dialogs
 - `main.cpp`: SDL2, OpenGL and Dear ImGui
 

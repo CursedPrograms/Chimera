@@ -44,7 +44,7 @@ add_library(imgui STATIC
 target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
 target_link_libraries(imgui PUBLIC SDL2::SDL2 OpenGL::GL)
 
-set(SOURCES src/main.cpp src/app.cpp src/doc.cpp src/ops.cpp src/blend.cpp src/segment.cpp)
+set(SOURCES src/main.cpp src/app.cpp src/doc.cpp src/ops.cpp src/blend.cpp src/segment.cpp src/changeling.cpp)
 if(WIN32)
     list(APPEND SOURCES src/app.rc)
 endif()

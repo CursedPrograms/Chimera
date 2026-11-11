@@ -2,6 +2,7 @@
 // The usual image editor layout, in the Changeling greys with the Cursed pink.
 #include "app.h"
 #include "blend.h"
+#include "changeling.h"
 #include "segment.h"
 #include "util.h"
 
@@ -546,6 +547,150 @@ static void drawDialog() {
     ImGui::EndPopup();
 }
 
+// ---------- Filter > Changeling: the Changelings on the picture, the result as a new layer ----------
+static bool clAsk = false;                       // open the window next frame (a menu can't open it itself)
+static int clStep = -1, clSource = 0;            // which Changeling; 0 the whole picture (merged), 1 this layer
+static Changeling::Job clJob;
+static std::string clIn, clOut, clErr;           // clOut is set while a run's result is still to come
+static int clX = 0, clY = 0, clW = 0, clH = 0;   // where the picture it was given sits on the canvas, its size
+static std::vector<uint8_t> clAlpha;             // and its transparency, put back on the result
+static double clStarted = 0;
+
+static void changelingMenu() {
+    auto& st = Changeling::steps();
+    if (Changeling::stepsLoading()) ImGui::MenuItem("Looking for the Changelings...", nullptr, false, false);
+    else if (st.empty()) ImGui::MenuItem(Changeling::stepsError().c_str(), nullptr, false, false);
+    for (size_t i = 0; i < st.size(); ++i) {
+        if (ImGui::MenuItem((st[i].app + "...").c_str(), nullptr, false, st[i].missing.empty())) { clStep = (int)i; clAsk = true; clErr.clear(); }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+            ImGui::SetTooltip("%s", (st[i].missing.empty() ? st[i].about : st[i].missing).c_str());
+    }
+    ImGui::Separator();
+    if (ImGui::MenuItem("Find Changeling Studio...")) {
+        const std::string f = fileDialog(false, "Changeling Studio's chain.py|chain.py|", nullptr, Changeling::studioDir());
+        if (!f.empty()) { Changeling::setStudioDir(u8path(f).parent_path().u8string()); Changeling::loadSteps(); }
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", Changeling::studioDir().empty() ? "Not found yet" : Changeling::studioDir().c_str());
+    if (ImGui::MenuItem("Look Again")) Changeling::loadSteps();
+}
+
+static void changelingStart() {
+    const Changeling::Step& step = Changeling::steps()[clStep];
+    Image img;
+    if (clSource == 0) { img = Image(doc.w, doc.h); composite(doc, img, {0, 0, doc.w, doc.h}, false); clX = clY = 0; }
+    else {
+        const Layer& l = doc.cur();
+        img = l.img; clX = l.x; clY = l.y;
+        for (int y = 0; y < img.h; ++y) for (int x = 0; x < img.w; ++x) img.at(x, y)[3] = (uint8_t)(img.at(x, y)[3] * l.maskAt(x, y) / 255);
+    }
+    // the Changelings see a photo: flattened onto white; the transparency comes back afterwards
+    clW = img.w; clH = img.h; clAlpha.resize((size_t)img.w * img.h);
+    for (size_t i = 0; i < clAlpha.size(); ++i) {
+        uint8_t* q = &img.px[i * 4]; const int a = q[3]; clAlpha[i] = (uint8_t)a;
+        for (int c = 0; c < 3; ++c) q[c] = (uint8_t)((q[c] * a + 255 * (255 - a) + 127) / 255);
+        q[3] = 255;
+    }
+    const std::string dir = Changeling::workDir();
+    clIn = (u8path(dir) / "in.png").u8string();
+    const std::string out = (u8path(dir) / "out.png").u8string();
+    std::error_code ec; std::filesystem::remove(u8path(out), ec);
+    Doc d = newDoc(img.w, img.h, false); d.layers[0].img = std::move(img);
+    std::string err;
+    if (!saveImage(d, clIn, err)) { clErr = "Couldn't save the picture for it: " + err; return; }
+    if (!Changeling::run(clJob, step, clIn, out)) { clErr = "Couldn't start Changeling Studio's chain.py"; return; }
+    clOut = out; clErr.clear(); clStarted = now();
+}
+
+static void changelingFinish() {
+    const Changeling::Step& step = Changeling::steps()[clStep];
+    Image img; std::string err;
+    const std::string out = clOut; clOut.clear();
+    if (!loadImage(out, img, err)) { clErr = step.app + " didn't make a picture: " + err; return; }
+    Layer l; l.name = step.app; l.img = std::move(img);
+    const bool same = l.img.w == clW && l.img.h == clH;
+    if (same) {                                  // the same picture, changed: in the same place, as transparent as it was
+        l.x = clX; l.y = clY;
+        for (size_t i = 0; i < clAlpha.size(); ++i) l.img.px[i * 4 + 3] = (uint8_t)(l.img.px[i * 4 + 3] * clAlpha[i] / 255);
+    } else { l.x = (doc.w - l.img.w) / 2; l.y = (doc.h - l.img.h) / 2; }   // a crop (Tonsor's face square): centred
+    remember(step.app);
+    addLayer(doc, std::move(l));
+    if (same && doc.hasSel()) { addMask(doc, 2); doc.editMask = false; }   // only where it was selected
+    changed();
+    say(step.app + (same ? ": a new layer" : ": a new layer (" + std::to_string(doc.cur().img.w) + " x " + std::to_string(doc.cur().img.h) + ", centred)"));
+    ImGui::CloseCurrentPopup();
+}
+
+static void drawChangeling() {
+    if (clAsk) { clAsk = false; ImGui::OpenPopup("changeling"); }
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (!ImGui::BeginPopupModal("changeling", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) return;
+    if (clStep < 0 || clStep >= (int)Changeling::steps().size()) { ImGui::CloseCurrentPopup(); ImGui::EndPopup(); return; }
+    Changeling::Step& step = Changeling::steps()[clStep];
+    const auto state = clJob.state();
+    if (!clOut.empty() && state == Changeling::Job::DONE) changelingFinish();
+    else if (!clOut.empty() && state == Changeling::Job::FAILED) {
+        auto ls = clJob.lines(); clErr = ls.empty() ? "It stopped" : ls.back(); clOut.clear();
+    }
+    const bool running = !clOut.empty();
+
+    ImGui::PushStyleColor(ImGuiCol_Text, col4(C_PINK));
+    ImGui::Text("Changeling %s", step.app.c_str());
+    ImGui::PopStyleColor();
+    ImGui::SameLine(); ImGui::TextDisabled("%s", step.about.c_str());
+    ImGui::Separator();
+    ImGui::BeginDisabled(running);
+    ImGui::PushItemWidth(260);
+    const char* sources[] = {"The whole picture (merged)", "This layer"};
+    ImGui::Combo("On", &clSource, sources, 2);
+    for (auto& o : step.options) {
+        ImGui::PushID(o.key.c_str());
+        if (o.kind == "choice") {
+            std::vector<const char*> c; for (auto& s : o.choices) c.push_back(s.c_str());
+            ImGui::Combo(o.label.c_str(), &o.choice, c.data(), (int)c.size());
+        } else if (o.kind == "number") ImGui::SliderFloat(o.label.c_str(), &o.number, o.min, o.max, "%.2f");
+        else if (o.kind == "check") ImGui::Checkbox(o.label.c_str(), &o.check);
+        else {                                    // a photo
+            const std::string name = o.file.empty() ? (o.kind == "file" ? "(pick one)" : "(none)") : u8path(o.file).filename().u8string();
+            if (ImGui::Button("Browse...")) {
+                const std::string f = fileDialog(false, "Pictures|*.png;*.jpg;*.jpeg;*.webp;*.bmp;*.jfif|All files|*.*|", nullptr, o.file);
+                if (!f.empty()) o.file = f;
+            }
+            if (!o.file.empty() && o.kind == "file?") { ImGui::SameLine(); if (ImGui::Button("Clear")) o.file.clear(); }
+            ImGui::SameLine(); ImGui::Text("%s: %s", o.label.c_str(), name.c_str());
+            if (!o.file.empty() && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", o.file.c_str());
+        }
+        ImGui::PopID();
+    }
+    ImGui::PopItemWidth();
+    ImGui::EndDisabled();
+    ImGui::TextDisabled("%s", doc.hasSel() ? "The result comes in as a new layer, masked to the selection." : "The result comes in as a new layer.");
+
+    if (running || !clErr.empty()) {
+        ImGui::BeginChild("log", ImVec2(560, 140), true);
+        auto ls = clJob.lines();
+        const size_t from = ls.size() > 60 ? ls.size() - 60 : 0;
+        for (size_t i = from; i < ls.size(); ++i) ImGui::TextUnformatted(ls[i].c_str());
+        if (running) ImGui::SetScrollHereY(1.0f);
+        ImGui::EndChild();
+    }
+    if (running) ImGui::Text("Working... %.0f s (the first run loads the model: that takes a while)", now() - clStarted);
+    if (!clErr.empty()) ImGui::TextColored(col4(C_PINK), "%s", clErr.c_str());
+    const std::string why = step.notReady();
+    if (!running && !why.empty()) ImGui::TextDisabled("%s", why.c_str());
+
+    ImGui::Separator();
+    if (running) {
+        if (ImGui::Button("Stop", ImVec2(110, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) { clJob.stop(); clErr = "Stopped"; clOut.clear(); }
+    } else {
+        ImGui::BeginDisabled(!why.empty());
+        if (ImGui::Button("Run", ImVec2(110, 0))) changelingStart();
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Close", ImVec2(110, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
 // ---------- the view ----------
 static ImVec2 toScreen(float x, float y) { return ImVec2(canvasPos.x + origin.x + x * zoom, canvasPos.y + origin.y + y * zoom); }
 static ImVec2 toCanvas(ImVec2 s) { return ImVec2((s.x - canvasPos.x - origin.x) / zoom, (s.y - canvasPos.y - origin.y) / zoom); }
@@ -1009,6 +1154,8 @@ static void menus() {
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Noise")) { if (item("Add Noise...")) openDlg(D_NOISE); ImGui::EndMenu(); }
+        ImGui::Separator();
+        if (ImGui::BeginMenu("Changeling")) { changelingMenu(); ImGui::EndMenu(); }
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("View")) {
@@ -1131,6 +1278,7 @@ void frame() {
 
     keys();
     drawDialog();
+    drawChangeling();
     updateThumbs();
 
     // unsaved changes on the way out
@@ -1155,6 +1303,12 @@ void requestQuit() { if (doc.dirty && hist.canUndo()) askQuit = true; else quit 
 void init(SDL_Window* win, const std::string& prefDir) {
     window = win; prefs = prefDir;
     applyStyle();
+    {   // Filter > Changeling: find Changeling Studio and ask it for the steps now, so the menu is ready
+        char* bp = SDL_GetBasePath();
+        Changeling::init(prefDir, bp ? bp : "");
+        SDL_free(bp);
+        Changeling::loadSteps();
+    }
     const uint8_t chk[16] = {0x66, 0x66, 0x66, 255, 0x88, 0x88, 0x88, 255, 0x88, 0x88, 0x88, 255, 0x66, 0x66, 0x66, 255};
     checkerTex = makeTex(2, 2, chk, true, true);
     doc = newDoc(1600, 1000, true);
@@ -1163,7 +1317,32 @@ void init(SDL_Window* win, const std::string& prefDir) {
 }
 
 // --capture: a scripted session so the README's screenshot shows the real thing
+bool busy() { return !clOut.empty() || Changeling::stepsLoading(); }
+
 void script(const std::string& what) {
+    // "changeling:Chronos age=0.8": that Changeling on the whole picture, as Filter > Changeling runs it
+    if (what.rfind("changeling:", 0) == 0) {
+        while (Changeling::stepsLoading()) SDL_Delay(50);
+        std::string rest = what.substr(11), app = rest.substr(0, rest.find(' '));
+        auto& st = Changeling::steps();
+        for (size_t i = 0; i < st.size(); ++i) if (st[i].app == app) clStep = (int)i;
+        if (clStep < 0) { say("No Changeling " + app + ": " + Changeling::stepsError()); return; }
+        for (size_t at = rest.find(' '); at != std::string::npos;) {
+            const size_t next = rest.find(' ', at + 1);
+            const std::string kv = rest.substr(at + 1, next == std::string::npos ? std::string::npos : next - at - 1);
+            const std::string k = kv.substr(0, kv.find('=')), v = kv.find('=') == std::string::npos ? "" : kv.substr(kv.find('=') + 1);
+            for (auto& o : st[clStep].options) if (o.key == k) {
+                if (o.kind == "number") o.number = (float)atof(v.c_str());
+                else if (o.kind == "check") o.check = v == "on" || v == "1" || v == "true";
+                else if (o.kind == "choice") { for (size_t c = 0; c < o.choices.size(); ++c) if (o.choices[c] == v) o.choice = (int)c; }
+                else o.file = v;
+            }
+            at = next;
+        }
+        clSource = 0; clAsk = true;
+        changelingStart();
+        return;
+    }
     if (what == "demo") {
         // the picture gets a mask from its subject, a pink Multiply layer goes over it, a selection is drawn
         if (doc.layers.size() == 1 && doc.path.empty()) return;

@@ -15,4 +15,5 @@ void requestQuit();
 void dropFile(const std::string& path);          // a file dropped on the window
 // for --capture: run a little scripted session (open, select subject, mask...) before the screenshot
 void script(const std::string& what);
+bool busy();                                    // a Changeling still running (--capture waits for it)
 }

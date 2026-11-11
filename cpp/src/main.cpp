@@ -72,7 +72,7 @@ int main(int argc, char** argv) {
     SDL_free(pp);
     if (!file.empty()) App::open(file);
 
-    int frames = 0;
+    int frames = 0, quiet = 0;                   // quiet: frames since a Changeling finished
     while (!App::wantsQuit()) {
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
@@ -95,7 +95,8 @@ int main(int argc, char** argv) {
         ++frames;
         if (!capture.empty()) {
             if (frames == 2 && !scriptName.empty()) App::script(scriptName);
-            if (frames == 8) {
+            quiet = App::busy() ? 0 : quiet + 1;
+            if (frames >= 8 && quiet >= 4) {
                 // the frame, read back and saved as a BMP (SDL writes those itself)
                 std::vector<unsigned char> px((size_t)w * h * 4);
                 glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, px.data());
