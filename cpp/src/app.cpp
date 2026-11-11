@@ -2,6 +2,7 @@
 // The usual image editor layout, in the Changeling greys with the Cursed pink.
 #include "app.h"
 #include "blend.h"
+#include "bathos.h"
 #include "changeling.h"
 #include "segment.h"
 #include "splash.h"
@@ -717,6 +718,113 @@ static void drawChangeling() {
     ImGui::EndPopup();
 }
 
+// ---------- Filter > Bathos: a depth map of the picture (Bathos, Atelier's depth app, as a plugin) ----------
+static bool btAsk = false;
+static int btSource = 0;                         // 0 the whole picture (merged), 1 this layer
+static Bathos::Options btOpt;
+static Changeling::Job btJob;                    // the same background runner as the Changelings
+static std::string btOut, btErr;                 // btOut is set while a run's result is still to come
+static int btX = 0, btY = 0, btW = 0, btH = 0;
+static std::vector<uint8_t> btAlpha;
+static double btStarted = 0;
+
+static void bathosMenu() {
+    const bool have = !Bathos::cli().empty();
+    if (ImGui::MenuItem("Depth Map...", nullptr, false, have)) { btAsk = true; btErr.clear(); }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("%s", have ? "How far away everything is, as a new layer: near is bright, far is dark. Faces get a real 3D shape."
+                                     : "Bathos isn't on this PC: install it, or Find Bathos...");
+    ImGui::Separator();
+    if (ImGui::MenuItem("Find Bathos...")) {
+        const std::string f = fileDialog(false, "bathos-cli|bathos-cli.exe;bathos-cli|", nullptr, Bathos::cli());
+        if (!f.empty()) Bathos::setCli(f);
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", have ? Bathos::cli().c_str() : "Not found yet");
+}
+
+static void bathosStart() {
+    Image img;
+    if (btSource == 0) { img = Image(doc.w, doc.h); composite(doc, img, {0, 0, doc.w, doc.h}, false); btX = btY = 0; }
+    else {
+        const Layer& l = doc.cur();
+        img = l.img; btX = l.x; btY = l.y;
+        for (int y = 0; y < img.h; ++y) for (int x = 0; x < img.w; ++x) img.at(x, y)[3] = (uint8_t)(img.at(x, y)[3] * l.maskAt(x, y) / 255);
+    }
+    // Bathos sees a photo: flattened onto white; the transparency comes back afterwards
+    btW = img.w; btH = img.h; btAlpha.resize((size_t)img.w * img.h);
+    for (size_t i = 0; i < btAlpha.size(); ++i) {
+        uint8_t* q = &img.px[i * 4]; const int a = q[3]; btAlpha[i] = (uint8_t)a;
+        for (int c = 0; c < 3; ++c) q[c] = (uint8_t)((q[c] * a + 255 * (255 - a) + 127) / 255);
+        q[3] = 255;
+    }
+    const std::string dir = Changeling::workDir();
+    const std::string in = (u8path(dir) / "bathos-in.png").u8string(), out = (u8path(dir) / "bathos-out.png").u8string();
+    std::error_code ec; std::filesystem::remove(u8path(out), ec);
+    Doc d = newDoc(img.w, img.h, false); d.layers[0].img = std::move(img);
+    std::string err;
+    if (!saveImage(d, in, err)) { btErr = "Couldn't save the picture for it: " + err; return; }
+    if (!btJob.start(Bathos::args(btOpt, in, out), dir)) { btErr = "Couldn't start bathos-cli"; return; }
+    btOut = out; btErr.clear(); btStarted = now();
+}
+
+static void bathosFinish() {
+    Image img; std::string err;
+    const std::string out = btOut; btOut.clear();
+    if (!loadImage(out, img, err)) { btErr = "Bathos didn't make a depth map: " + err; return; }
+    Layer l; l.name = "Depth (Bathos)"; l.img = std::move(img); l.x = btX; l.y = btY;
+    if (l.img.w == btW && l.img.h == btH)
+        for (size_t i = 0; i < btAlpha.size(); ++i) l.img.px[i * 4 + 3] = (uint8_t)(l.img.px[i * 4 + 3] * btAlpha[i] / 255);
+    remember("Depth Map");
+    addLayer(doc, std::move(l));
+    if (doc.hasSel()) { addMask(doc, 2); doc.editMask = false; }
+    changed();
+    say("Bathos: a depth map as a new layer");
+    ImGui::CloseCurrentPopup();
+}
+
+static void drawBathos() {
+    if (btAsk) { btAsk = false; ImGui::OpenPopup("bathos"); }
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (!ImGui::BeginPopupModal("bathos", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) return;
+    const auto state = btJob.state();
+    if (!btOut.empty() && state == Changeling::Job::DONE) bathosFinish();
+    else if (!btOut.empty() && state == Changeling::Job::FAILED) { auto ls = btJob.lines(); btErr = ls.empty() ? "It stopped" : ls.back(); btOut.clear(); }
+    const bool running = !btOut.empty();
+
+    ImGui::PushStyleColor(ImGuiCol_Text, col4(C_PINK)); ImGui::TextUnformatted("Bathos Depth Map"); ImGui::PopStyleColor();
+    ImGui::SameLine(); ImGui::TextDisabled("near is bright, far is dark");
+    ImGui::Separator();
+    ImGui::BeginDisabled(running);
+    ImGui::PushItemWidth(260);
+    const char* sources[] = {"The whole picture (merged)", "This layer"};
+    ImGui::Combo("On", &btSource, sources, 2);
+    ImGui::SliderInt("Detail", &btOpt.detail, 280, 1036, "%d px");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("What the model sees: more picks out finer shapes but takes longer. 518 is what it was trained on.");
+    ImGui::Checkbox("Refine edges", &btOpt.refine);
+    ImGui::SameLine(); ImGui::Checkbox("Proper faces", &btOpt.faces);
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Fits a 3D face mesh to every face, so noses, eye sockets, cheeks and chins have real depth.");
+    ImGui::BeginDisabled(!btOpt.faces);
+    ImGui::SliderFloat("Face relief", &btOpt.faceRelief, 0.0f, 3.0f, "%.2f");
+    ImGui::EndDisabled();
+    ImGui::Checkbox("Colour ramp", &btOpt.colour);
+    ImGui::SameLine(); ImGui::Checkbox("Far is bright", &btOpt.farBright);
+    ImGui::SliderFloat("Contrast", &btOpt.contrast, 0.3f, 3.0f, "%.2f");
+    ImGui::PopItemWidth();
+    ImGui::EndDisabled();
+    ImGui::TextDisabled("%s", doc.hasSel() ? "The depth map comes in as a new layer, masked to the selection." : "The depth map comes in as a new layer.");
+    if (running) ImGui::Text("Working... %.0f s (the first run loads the depth model)", now() - btStarted);
+    if (!btErr.empty()) ImGui::TextColored(col4(C_PINK), "%s", btErr.c_str());
+    ImGui::Separator();
+    if (running) {
+        if (ImGui::Button("Stop", ImVec2(110, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) { btJob.stop(); btErr = "Stopped"; btOut.clear(); }
+    } else {
+        if (ImGui::Button("Run", ImVec2(110, 0))) bathosStart();
+        ImGui::SameLine();
+        if (ImGui::Button("Close", ImVec2(110, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
 // ---------- the view ----------
 static ImVec2 toScreen(float x, float y) { return ImVec2(canvasPos.x + origin.x + x * zoom, canvasPos.y + origin.y + y * zoom); }
 static ImVec2 toCanvas(ImVec2 s) { return ImVec2((s.x - canvasPos.x - origin.x) / zoom, (s.y - canvasPos.y - origin.y) / zoom); }
@@ -1204,6 +1312,7 @@ static void menus() {
         if (ImGui::BeginMenu("Noise")) { if (item("Add Noise...")) openDlg(D_NOISE); ImGui::EndMenu(); }
         ImGui::Separator();
         if (ImGui::BeginMenu("Changeling")) { changelingMenu(); ImGui::EndMenu(); }
+        if (ImGui::BeginMenu("Bathos")) { bathosMenu(); ImGui::EndMenu(); }
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("View")) {
@@ -1353,6 +1462,7 @@ void frame() {
     keys();
     drawDialog();
     drawChangeling();
+    drawBathos();
     updateThumbs();
 
     // unsaved changes on the way out
@@ -1383,6 +1493,7 @@ void init(SDL_Window* win, const std::string& prefDir, void (*status)(const char
         step("Looking for Changeling Studio...", 0.35f);
         char* bp = SDL_GetBasePath();
         Changeling::init(prefDir, bp ? bp : "");
+        Bathos::init(prefDir, bp ? bp : "");   // Filter > Bathos: Atelier's depth app, when it's on this PC
         SDL_free(bp);
         step(Changeling::studioDir().empty() ? "Changeling Studio isn't on this PC" : "Asking Changeling Studio for its filters...", 0.5f);
         Changeling::loadSteps();
@@ -1397,12 +1508,13 @@ void init(SDL_Window* win, const std::string& prefDir, void (*status)(const char
 }
 
 // --capture: a scripted session so the README's screenshot shows the real thing
-bool busy() { return !clOut.empty() || Changeling::stepsLoading(); }
+bool busy() { return !clOut.empty() || !btOut.empty() || Changeling::stepsLoading(); }
 
 void script(const std::string& what) {
     if (what == "empty") return;                             // the empty start, as it is
     noDoc = false;                                           // the scripts work on the blank document
     if (what == "about") { scriptDlg = D_ABOUT; return; }   // Help > About: the splash art
+    if (what == "bathos") { btSource = 0; btAsk = true; bathosStart(); return; }   // Filter > Bathos > Depth Map on the picture
     // "changeling:Chronos age=0.8": that Changeling on the whole picture, as Filter > Changeling runs it
     if (what.rfind("changeling:", 0) == 0) {
         while (Changeling::stepsLoading()) SDL_Delay(50);

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(LayerTack VERSION 1.1.0 LANGUAGES C CXX)
+project(LayerTack VERSION 1.2.0 LANGUAGES C CXX)
 # LayerTack: an image editor. SDL2 (window, input), OpenGL 3, Dear ImGui (the interface), stb (PNG/JPG), and
 # ONNX Runtime's C header (Select Subject; onnxruntime.dll is loaded at run time, next to the exe).
 # Only SDL2 has to be installed; the rest is fetched here (or taken from external/ when it's there).
@@ -44,7 +44,7 @@ add_library(imgui STATIC
 target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
 target_link_libraries(imgui PUBLIC SDL2::SDL2 OpenGL::GL)
 
-set(SOURCES src/main.cpp src/app.cpp src/doc.cpp src/ops.cpp src/blend.cpp src/segment.cpp src/changeling.cpp src/splash.cpp)
+set(SOURCES src/main.cpp src/app.cpp src/doc.cpp src/ops.cpp src/blend.cpp src/segment.cpp src/changeling.cpp src/bathos.cpp src/splash.cpp)
 if(WIN32)
     list(APPEND SOURCES src/app.rc)
 endif()

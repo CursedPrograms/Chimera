@@ -98,6 +98,14 @@ The Changelings work on a photo inside LayerTack: **Imago** (another face), **Ti
   `CHANGELING_STUDIO`; otherwise use **Filter > Changeling > Find Changeling Studio...** The steps and their
   options come from Studio's `chain.py --steps --json`, so new Changelings show up without updating LayerTack.
 
+### Depth maps (Filter > Bathos)
+**Filter > Bathos > Depth Map** puts the depth of the picture (or a layer) in as a new layer: near is bright, far is
+dark, and faces get a real 3D shape. Detail, edge refine, face relief, colour ramp, far-is-bright and contrast are
+in the dialog; with a selection the new layer is masked to it. It runs
+**[Bathos](https://github.com/CursedPrograms/Bathos)** (Atelier's depth app) in the background: LayerTack finds
+`bathos-cli` next to itself, in its `plugins\Bathos` folder, where Bathos is installed, or in a Bathos folder nearby;
+otherwise use **Filter > Bathos > Find Bathos...**
+
 ### 7. Export and canvas utilities
 - **PNG:** 32-bit PNG with full transparency; JPG export (onto white).
 - **Projects:** `.ltk` files keep every layer, mask, blend mode and opacity.
@@ -137,6 +145,7 @@ The code, in `cpp/src/`:
 - `ops.cpp`: adjustments, filters, fills, selections, resizing, transform and the brush
 - `segment.cpp`: Select Subject through ONNX Runtime's C API (loaded at run time)
 - `changeling.cpp`: Filter > Changeling: finds Changeling Studio and runs its `chain.py` in the background
+- `bathos.cpp`: Filter > Bathos: finds [Bathos](https://github.com/CursedPrograms/Bathos) (`bathos-cli`) and runs it for a depth-map layer
 - `app.cpp`: the window: menus, tools, canvas, Layers panel and dialogs
 - `splash.cpp`: the splash shown while LayerTack loads, and in Help > About
 - `main.cpp`: SDL2, OpenGL and Dear ImGui
