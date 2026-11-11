@@ -37,6 +37,16 @@ if exist dist\LayerTack-win64.zip del dist\LayerTack-win64.zip
 rem Windows' own tar makes a zip with forward slashes, which every unzip tool reads
 "%SystemRoot%\System32\tar.exe" -a -c -f dist\LayerTack-win64.zip -C dist\LayerTack * || goto :error
 echo Built: build\Release\LayerTack.exe and dist\LayerTack-win64.zip
+rem LayerTack installed on this PC (Start menu and Desktop shortcuts): this build replaces that copy too
+set "INST=%LOCALAPPDATA%\Programs\LayerTack"
+if not exist "%INST%\LayerTack.exe" exit /b 0
+tasklist /fi "imagename eq LayerTack.exe" | find /i "LayerTack.exe" >nul
+if not errorlevel 1 (
+    echo LayerTack is open, so the installed copy wasn't updated: close it and build again.
+    exit /b 0
+)
+xcopy /e /i /q /y dist\LayerTack\* "%INST%\" >nul || goto :error
+echo Updated the installed LayerTack: %INST%
 exit /b 0
 :error
 echo Build failed, see above.

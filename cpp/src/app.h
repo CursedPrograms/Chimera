@@ -7,7 +7,8 @@
 struct SDL_Window;
 
 namespace App {
-void init(SDL_Window* win, const std::string& prefDir);
+// status: told each loading step (what, 0..1) for the splash; nullptr: no splash
+void init(SDL_Window* win, const std::string& prefDir, void (*status)(const char* what, float progress) = nullptr);
 bool open(const std::string& path);               // a picture or a .ltk project
 void frame();                                    // draws the whole window (ImGui)
 bool wantsQuit();

@@ -4,6 +4,8 @@
 //   LayerTack [picture or project]
 //   LayerTack --capture out.bmp [picture] [--script demo]    a screenshot from a hidden window, then quit
 #include "app.h"
+#include "changeling.h"
+#include "splash.h"
 
 #include <SDL.h>
 #include <SDL_opengl.h>
@@ -16,18 +18,67 @@
 #include <string>
 #include <vector>
 
+static bool fileExists(const char* f) {
+    if (FILE* t = fopen(f, "rb")) { fclose(t); return true; }
+    return false;
+}
+
+// the interface font, plus the splash's: a light one for the name, a small one for the credits
+static ImFont* addFont(const char* file, float size) {
+    ImGuiIO& io = ImGui::GetIO();
+    static const ImWchar ranges[] = {0x0020, 0x00FF, 0x2190, 0x21FF, 0x2600, 0x26FF, 0};
+    ImFont* font = io.Fonts->AddFontFromFileTTF(file, size, nullptr, ranges);
+    // Segoe UI has no stars or other symbols (the credit's ☆): Windows' symbol font fills them in
+    static const char* symbols = "C:/Windows/Fonts/seguisym.ttf";
+    static const ImWchar symbolRanges[] = {0x2190, 0x21FF, 0x2600, 0x26FF, 0};
+    if (fileExists(symbols)) {
+        ImFontConfig merge;
+        merge.MergeMode = true;
+        io.Fonts->AddFontFromFileTTF(symbols, size, &merge, symbolRanges);
+    }
+    return font;
+}
+
 static void loadFont() {
     ImGuiIO& io = ImGui::GetIO();
     const char* fonts[] = {"C:/Windows/Fonts/segoeui.ttf", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/System/Library/Fonts/Helvetica.ttc"};
     for (const char* f : fonts) {
-        if (FILE* t = fopen(f, "rb")) {
-            fclose(t);
-            static const ImWchar ranges[] = {0x0020, 0x00FF, 0x2190, 0x21FF, 0x2600, 0x26FF, 0};
-            io.Fonts->AddFontFromFileTTF(f, 16.0f, nullptr, ranges);
-            return;
-        }
+        if (!fileExists(f)) continue;
+        addFont(f, 16.0f);
+        const char* light = fileExists("C:/Windows/Fonts/segoeuil.ttf") ? "C:/Windows/Fonts/segoeuil.ttf" : f;
+        ImFont* title = addFont(light, 50.0f);
+        ImFont* small = addFont(f, 13.0f);
+        Splash::setFonts(title, small);
+        return;
     }
     io.Fonts->AddFontDefault();
+}
+
+// ---------- the splash window: shown while LayerTack loads ----------
+static SDL_Window* splashWin = nullptr;
+static Uint32 splashStart = 0;
+static bool splashSkip = false, quitEarly = false;   // skip: clicked or Escape; quitEarly: closed (Alt+F4)
+
+static void splashSay(const char* status, float progress) {
+    if (!splashWin) return;
+    SDL_Event e;
+    while (SDL_PollEvent(&e)) {
+        ImGui_ImplSDL2_ProcessEvent(&e);
+        if (e.type == SDL_QUIT) quitEarly = true;
+        if (e.type == SDL_MOUSEBUTTONDOWN || (e.type == SDL_KEYDOWN && e.key.keysym.sym == SDLK_ESCAPE)) splashSkip = true;
+    }
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplSDL2_NewFrame();
+    ImGui::NewFrame();
+    Splash::draw(ImGui::GetBackgroundDrawList(), 0, 0, status, progress);
+    ImGui::Render();
+    int w, h;
+    SDL_GL_GetDrawableSize(splashWin, &w, &h);
+    glViewport(0, 0, w, h);
+    glClearColor(0.1f, 0.1f, 0.1f, 1);
+    glClear(GL_COLOR_BUFFER_BIT);
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+    SDL_GL_SwapWindow(splashWin);
 }
 
 int main(int argc, char** argv) {
@@ -44,9 +95,8 @@ int main(int argc, char** argv) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-    Uint32 flags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
-    if (!capture.empty()) flags |= SDL_WINDOW_HIDDEN;
-    else flags |= SDL_WINDOW_MAXIMIZED;
+    // hidden until it's ready: the splash shows meanwhile (--capture never shows it)
+    const Uint32 flags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_HIDDEN;
     SDL_Window* win = SDL_CreateWindow("LayerTack", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 960, flags);
     if (!win) return 1;
     SDL_SetWindowMinimumSize(win, 900, 560);
@@ -56,21 +106,60 @@ int main(int argc, char** argv) {
     char* bp = SDL_GetBasePath();
     const std::string base = bp ? bp : "";
     SDL_free(bp);
-    if (SDL_Surface* icon = SDL_LoadBMP((base + "assets/icon.bmp").c_str())) { SDL_SetWindowIcon(win, icon); SDL_FreeSurface(icon); }
+    SDL_Surface* icon = SDL_LoadBMP((base + "assets/icon.bmp").c_str());
+    if (icon) SDL_SetWindowIcon(win, icon);
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr;
     loadFont();
-    ImGui_ImplSDL2_InitForOpenGL(win, gl);
+
+    // the splash: a small borderless window sharing the main window's OpenGL context
+    if (capture.empty()) {
+        splashWin = SDL_CreateWindow("LayerTack", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, (int)Splash::W, (int)Splash::H,
+                                     SDL_WINDOW_OPENGL | SDL_WINDOW_BORDERLESS);
+        if (splashWin && SDL_GL_MakeCurrent(splashWin, gl) != 0) { SDL_DestroyWindow(splashWin); splashWin = nullptr; SDL_GL_MakeCurrent(win, gl); }
+        if (splashWin && icon) SDL_SetWindowIcon(splashWin, icon);
+    }
+    if (icon) SDL_FreeSurface(icon);
+    ImGui_ImplSDL2_InitForOpenGL(splashWin ? splashWin : win, gl);
     ImGui_ImplOpenGL3_Init("#version 330");
-    SDL_EventState(SDL_DROPFILE, SDL_ENABLE);
+    splashStart = SDL_GetTicks();
+    splashSay("Loading the interface...", 0.1f);
 
     char* pp = SDL_GetPrefPath("Cursed Entertainment", "LayerTack");
-    App::init(win, pp ? pp : "");
+    App::init(win, pp ? pp : "", splashWin ? splashSay : nullptr);
     SDL_free(pp);
-    if (!file.empty()) App::open(file);
+    if (!file.empty()) {
+        const std::string name = file.substr(file.find_last_of("/\\") + 1);
+        splashSay(("Opening " + name + "...").c_str(), 0.8f);
+        App::open(file);
+    }
+
+    if (splashWin) {
+        // Filter > Changeling's list comes from Changeling Studio in the background: give it a moment to arrive,
+        // and keep the splash up long enough to be seen. A click or Escape goes straight in.
+        for (;;) {
+            const Uint32 t = SDL_GetTicks() - splashStart;
+            const bool loading = Changeling::stepsLoading();
+            if (splashSkip || quitEarly || (t >= 1500 && (!loading || t >= 4000))) break;
+            if (loading) splashSay("Asking Changeling Studio for its filters...", 0.6f + 0.35f * (t > 4000 ? 1.0f : t / 4000.0f));
+            else splashSay("Ready", 1.0f);
+        }
+        ImGui_ImplSDL2_Shutdown();
+        SDL_DestroyWindow(splashWin);
+        splashWin = nullptr;
+        SDL_GL_MakeCurrent(win, gl);
+        ImGui_ImplSDL2_InitForOpenGL(win, gl);
+    }
+    if (capture.empty()) {
+        SDL_ShowWindow(win);
+        SDL_MaximizeWindow(win);
+        SDL_RaiseWindow(win);
+    }
+    if (quitEarly) App::requestQuit();
+    SDL_EventState(SDL_DROPFILE, SDL_ENABLE);
 
     int frames = 0, quiet = 0;                   // quiet: frames since a Changeling finished
     while (!App::wantsQuit()) {

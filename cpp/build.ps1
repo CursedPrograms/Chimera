@@ -34,3 +34,13 @@ Remove-Item dist\LayerTack-win64.zip -ErrorAction SilentlyContinue
 # Windows' own tar makes a zip with forward slashes, which every unzip tool reads
 Run "$env:SystemRoot\System32\tar.exe" -a -c -f dist\LayerTack-win64.zip -C dist\LayerTack *
 Write-Host "Built: build\Release\LayerTack.exe and dist\LayerTack-win64.zip"
+# LayerTack installed on this PC (Start menu and Desktop shortcuts): this build replaces that copy too
+$inst = Join-Path $env:LOCALAPPDATA "Programs\LayerTack"
+if (Test-Path "$inst\LayerTack.exe") {
+    if (Get-Process LayerTack -ErrorAction SilentlyContinue) {
+        Write-Host "LayerTack is open, so the installed copy wasn't updated: close it and build again."
+    } else {
+        Copy-Item -Recurse -Force dist\LayerTack\* $inst
+        Write-Host "Updated the installed LayerTack: $inst"
+    }
+}

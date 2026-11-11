@@ -125,6 +125,8 @@ Select Subject downloads its model once (U²-Net-p, about 5 MB) the first time y
 
 Windows: Visual Studio 2022 (C++) and CMake, then `cpp/build.bat` (or `build.ps1`). It fetches SDL2 and ONNX
 Runtime into `cpp/external/` once, builds `cpp/build/Release/LayerTack.exe` and packs `cpp/dist/LayerTack-win64.zip`.
+The zip carries Microsoft's Visual C++ runtime, so LayerTack starts on PCs without it installed. If LayerTack is
+installed in `%LOCALAPPDATA%\Programs\LayerTack`, the build updates that copy too (close LayerTack first).
 
 Linux: `cpp/build.sh` (needs cmake, a C++17 compiler and libsdl2-dev; for Select Subject, libonnxruntime.so where
 the loader finds it, and zenity for file dialogs).
@@ -136,6 +138,7 @@ The code, in `cpp/src/`:
 - `segment.cpp`: Select Subject through ONNX Runtime's C API (loaded at run time)
 - `changeling.cpp`: Filter > Changeling: finds Changeling Studio and runs its `chain.py` in the background
 - `app.cpp`: the window: menus, tools, canvas, Layers panel and dialogs
+- `splash.cpp`: the splash shown while LayerTack loads, and in Help > About
 - `main.cpp`: SDL2, OpenGL and Dear ImGui
 
 ## Credits

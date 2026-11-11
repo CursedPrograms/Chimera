@@ -4,6 +4,7 @@
 #include "blend.h"
 #include "changeling.h"
 #include "segment.h"
+#include "splash.h"
 #include "util.h"
 
 #include <SDL.h>
@@ -519,11 +520,12 @@ static void drawDialog() {
         ImGui::TextDisabled("The layer and its mask, round the layer's centre.");
         break;
     case D_RENAME: ImGui::SetKeyboardFocusHere(); if (ImGui::InputText("Name", renameBuf, sizeof renameBuf, ImGuiInputTextFlags_EnterReturnsTrue)) { remember("Rename"); doc.cur().name = renameBuf; closeDlg(true); ImGui::PopItemWidth(); ImGui::EndPopup(); return; } break;
-    case D_ABOUT:
-        ImGui::TextUnformatted("LayerTack: layers, masks, blend modes, selections and adjustments.");
-        ImGui::TextUnformatted("Blend maths ported from PhotoCraft (MIT / Apache-2.0).");
-        ImGui::TextUnformatted("Farica\xe2\x98\x86Kimora \xc2\xa9 Cursed Entertainment");
+    case D_ABOUT: {   // the splash, as it shows while LayerTack loads
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        Splash::draw(ImGui::GetWindowDrawList(), at.x, at.y, nullptr, -1);
+        ImGui::Dummy(ImVec2(Splash::W, Splash::H));
         break;
+    }
     }
     ImGui::PopItemWidth();
     if (needsTarget(dlg)) { if (ImGui::Checkbox("Preview", &dlgPreview)) ch = true; }
@@ -1232,9 +1234,12 @@ static void keys() {
 }
 
 // ---------- the frame ----------
+static int scriptDlg = D_NONE;                  // a dialog a --capture script asked for: opened inside the next frame
+
 void frame() {
     ImGuiIO& io = ImGui::GetIO();
     const float W = io.DisplaySize.x, H = io.DisplaySize.y;
+    if (scriptDlg != D_NONE) { openDlg(scriptDlg); scriptDlg = D_NONE; }
     menus();
     const float top = ImGui::GetFrameHeight(), optH = 38, statusH = 26, leftW = 50, rightW = 310;
     const ImGuiWindowFlags fixed = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus;
@@ -1300,15 +1305,20 @@ void frame() {
 bool wantsQuit() { return quit; }
 void requestQuit() { if (doc.dirty && hist.canUndo()) askQuit = true; else quit = true; }
 
-void init(SDL_Window* win, const std::string& prefDir) {
+void init(SDL_Window* win, const std::string& prefDir, void (*status)(const char* what, float progress)) {
+    auto step = [status](const char* what, float progress) { if (status) status(what, progress); };
     window = win; prefs = prefDir;
+    step("Applying the theme...", 0.2f);
     applyStyle();
     {   // Filter > Changeling: find Changeling Studio and ask it for the steps now, so the menu is ready
+        step("Looking for Changeling Studio...", 0.35f);
         char* bp = SDL_GetBasePath();
         Changeling::init(prefDir, bp ? bp : "");
         SDL_free(bp);
+        step(Changeling::studioDir().empty() ? "Changeling Studio isn't on this PC" : "Asking Changeling Studio for its filters...", 0.5f);
         Changeling::loadSteps();
     }
+    step("Getting the canvas ready...", 0.6f);
     const uint8_t chk[16] = {0x66, 0x66, 0x66, 255, 0x88, 0x88, 0x88, 255, 0x88, 0x88, 0x88, 255, 0x66, 0x66, 0x66, 255};
     checkerTex = makeTex(2, 2, chk, true, true);
     doc = newDoc(1600, 1000, true);
@@ -1320,6 +1330,7 @@ void init(SDL_Window* win, const std::string& prefDir) {
 bool busy() { return !clOut.empty() || Changeling::stepsLoading(); }
 
 void script(const std::string& what) {
+    if (what == "about") { scriptDlg = D_ABOUT; return; }   // Help > About: the splash art
     // "changeling:Chronos age=0.8": that Changeling on the whole picture, as Filter > Changeling runs it
     if (what.rfind("changeling:", 0) == 0) {
         while (Changeling::stepsLoading()) SDL_Delay(50);
