@@ -22,13 +22,16 @@ static std::string num(float v) { char b[32]; snprintf(b, sizeof b, "%.2f", v); 
 std::vector<std::string> args(const Options& o, const std::string& inPng, const std::string& outPng) {
     std::vector<std::string> a = {found};
     for (const auto& f : o.faces) { a.push_back("-s"); a.push_back(f); }
-    a.insert(a.end(), {"-t", inPng, "-o", outPng, "--swapper", o.swapper == 1 ? "hyperswap" : "inswapper",
-                       "--boost", std::to_string(o.boost), "--weight", num(o.likeness)});
-    static const char* enh[] = {"none", "gfpgan", "codeformer", "gpen"};
-    a.push_back("--enhancer"); a.push_back(enh[o.enhancer < 0 || o.enhancer > 3 ? 1 : o.enhancer]);
-    a.push_back("--blend"); a.push_back(num(o.blend));
-    if (o.occlusion) a.push_back("--occlusion");
-    if (o.which == 1) { a.push_back("--faces"); a.push_back("largest"); }
+    // mimic-cli takes FaceFusion's option names
+    static const char* enh[] = {"none", "gfpgan_1.4", "codeformer", "gpen_bfr_512"};
+    const bool enhance = o.enhancer > 0 && o.enhancer <= 3;
+    a.insert(a.end(), {"-t", inPng, "-o", outPng, "--output-image-quality", "100", "--processors", "face_swapper"});
+    if (enhance) a.push_back("face_enhancer");
+    a.insert(a.end(), {"--face-swapper-model", o.swapper == 1 ? "hyperswap_1a_256" : "inswapper_128",
+                       "--face-swapper-pixel-boost", std::to_string(o.boost), "--face-swapper-weight", num(o.likeness)});
+    if (enhance) { a.insert(a.end(), {"--face-enhancer-model", enh[o.enhancer], "--face-enhancer-blend", std::to_string((int)(o.blend * 100 + 0.5f))}); }
+    if (o.occlusion) a.insert(a.end(), {"--face-mask-types", "box", "occlusion"});
+    if (o.which == 1) a.insert(a.end(), {"--face-selector-mode", "one", "--face-selector-order", "large-small"});
     return a;
 }
 
