@@ -3,6 +3,7 @@
 #include "app.h"
 #include "blend.h"
 #include "bathos.h"
+#include "mimicplug.h"
 #include "changeling.h"
 #include "segment.h"
 #include "splash.h"
@@ -718,6 +719,69 @@ static void drawChangeling() {
     ImGui::EndPopup();
 }
 
+// ---------- Atelier plugins (Bathos, Mimic): the picture out to their command-line tool, the result back as a layer ----------
+struct PluginRun {
+    Changeling::Job job;                          // the same background runner as the Changelings
+    std::string out, err;                         // out is set while a run's result is still to come
+    int x = 0, y = 0, w = 0, h = 0;
+    std::vector<uint8_t> alpha;
+    double started = 0;
+};
+
+// the whole picture (source 0) or this layer, flattened onto white, saved for the tool; false + err when it can't
+static bool pluginInput(PluginRun& r, int source, const std::string& name, std::string& inPath) {
+    Image img;
+    if (source == 0) { img = Image(doc.w, doc.h); composite(doc, img, {0, 0, doc.w, doc.h}, false); r.x = r.y = 0; }
+    else {
+        const Layer& l = doc.cur();
+        img = l.img; r.x = l.x; r.y = l.y;
+        for (int y = 0; y < img.h; ++y) for (int x = 0; x < img.w; ++x) img.at(x, y)[3] = (uint8_t)(img.at(x, y)[3] * l.maskAt(x, y) / 255);
+    }
+    r.w = img.w; r.h = img.h; r.alpha.resize((size_t)img.w * img.h);
+    for (size_t i = 0; i < r.alpha.size(); ++i) {
+        uint8_t* q = &img.px[i * 4]; const int a = q[3]; r.alpha[i] = (uint8_t)a;
+        for (int c = 0; c < 3; ++c) q[c] = (uint8_t)((q[c] * a + 255 * (255 - a) + 127) / 255);
+        q[3] = 255;
+    }
+    const std::string dir = Changeling::workDir();
+    inPath = (u8path(dir) / (name + "-in.png")).u8string();
+    r.out = (u8path(dir) / (name + "-out.png")).u8string();
+    std::error_code ec; std::filesystem::remove(u8path(r.out), ec);
+    Doc d = newDoc(img.w, img.h, false); d.layers[0].img = std::move(img);
+    std::string err;
+    if (!saveImage(d, inPath, err)) { r.err = "Couldn't save the picture for it: " + err; r.out.clear(); return false; }
+    return true;
+}
+
+static void pluginStart(PluginRun& r, const std::vector<std::string>& args) {
+    if (!r.job.start(args, Changeling::workDir())) { r.err = "Couldn't start " + u8path(args[0]).filename().u8string(); r.out.clear(); return; }
+    r.err.clear(); r.started = now();
+}
+
+// the result as a new layer (in the same place, as transparent as it was, masked to the selection)
+static void pluginFinish(PluginRun& r, const std::string& layerName, const std::string& what) {
+    Image img; std::string err;
+    const std::string out = r.out; r.out.clear();
+    if (!loadImage(out, img, err)) { r.err = what + " didn't make a picture: " + err; return; }
+    Layer l; l.name = layerName; l.img = std::move(img); l.x = r.x; l.y = r.y;
+    if (l.img.w == r.w && l.img.h == r.h)
+        for (size_t i = 0; i < r.alpha.size(); ++i) l.img.px[i * 4 + 3] = (uint8_t)(l.img.px[i * 4 + 3] * r.alpha[i] / 255);
+    remember(what);
+    addLayer(doc, std::move(l));
+    if (doc.hasSel()) { addMask(doc, 2); doc.editMask = false; }
+    changed();
+    say(what + ": a new layer");
+    ImGui::CloseCurrentPopup();
+}
+
+// a running plugin's state each frame: finished, failed, or still going
+static bool pluginPoll(PluginRun& r, const std::string& layerName, const std::string& what) {
+    const auto state = r.job.state();
+    if (!r.out.empty() && state == Changeling::Job::DONE) pluginFinish(r, layerName, what);
+    else if (!r.out.empty() && state == Changeling::Job::FAILED) { auto ls = r.job.lines(); r.err = ls.empty() ? "It stopped" : ls.back(); r.out.clear(); }
+    return !r.out.empty();
+}
+
 // ---------- Filter > Bathos: a depth map of the picture (Bathos, Atelier's depth app, as a plugin) ----------
 static bool btAsk = false;
 static int btSource = 0;                         // 0 the whole picture (merged), 1 this layer
@@ -819,6 +883,86 @@ static void drawBathos() {
         if (ImGui::Button("Stop", ImVec2(110, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) { btJob.stop(); btErr = "Stopped"; btOut.clear(); }
     } else {
         if (ImGui::Button("Run", ImVec2(110, 0))) bathosStart();
+        ImGui::SameLine();
+        if (ImGui::Button("Close", ImVec2(110, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+}
+
+// ---------- Filter > Mimic: one person's face onto the picture (Mimic, Atelier's face-swap app, as a plugin) ----------
+static bool mmAsk = false;
+static int mmSource = 0;
+static MimicPlug::Options mmOpt;
+static PluginRun mmRun;
+
+static void mimicMenu() {
+    const bool have = !MimicPlug::cli().empty();
+    if (ImGui::MenuItem("Face Swap...", nullptr, false, have)) { mmAsk = true; mmRun.err.clear(); }
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled))
+        ImGui::SetTooltip("%s", have ? "Put one person's face onto the faces in the picture, as a new layer."
+                                     : "Mimic isn't on this PC: install it, or Find Mimic...");
+    ImGui::Separator();
+    if (ImGui::MenuItem("Find Mimic...")) {
+        const std::string f = fileDialog(false, "mimic-cli|mimic-cli.exe;mimic-cli|", nullptr, MimicPlug::cli());
+        if (!f.empty()) MimicPlug::setCli(f);
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", have ? MimicPlug::cli().c_str() : "Not found yet");
+}
+
+static void mimicStart() {
+    std::string in;
+    if (!pluginInput(mmRun, mmSource, "mimic", in)) return;
+    pluginStart(mmRun, MimicPlug::args(mmOpt, in, mmRun.out));
+}
+
+static void drawMimic() {
+    if (mmAsk) { mmAsk = false; ImGui::OpenPopup("mimic"); }
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (!ImGui::BeginPopupModal("mimic", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) return;
+    const bool running = pluginPoll(mmRun, "Mimic", "Mimic");
+    ImGui::PushStyleColor(ImGuiCol_Text, col4(C_PINK)); ImGui::TextUnformatted("Mimic Face Swap"); ImGui::PopStyleColor();
+    ImGui::SameLine(); ImGui::TextDisabled("only use faces you have the right to use");
+    ImGui::Separator();
+    ImGui::BeginDisabled(running);
+    ImGui::PushItemWidth(260);
+    const char* sources[] = {"The whole picture (merged)", "This layer"};
+    ImGui::Combo("On", &mmSource, sources, 2);
+    if (ImGui::Button("Pictures of the face to become...")) {
+        const std::string f = fileDialog(false, "Pictures|*.png;*.jpg;*.jpeg;*.bmp;*.tga|All files|*.*|", nullptr, mmOpt.faces.empty() ? "" : mmOpt.faces.back());
+        if (!f.empty()) mmOpt.faces.push_back(f);
+    }
+    ImGui::SameLine();
+    if (mmOpt.faces.empty()) ImGui::TextDisabled("(none yet)");
+    else {
+        ImGui::Text("%d picture%s", (int)mmOpt.faces.size(), mmOpt.faces.size() == 1 ? "" : "s");
+        if (ImGui::IsItemHovered()) { std::string t; for (auto& f : mmOpt.faces) t += u8path(f).filename().u8string() + "\n"; ImGui::SetTooltip("%s", t.c_str()); }
+        ImGui::SameLine(); if (ImGui::SmallButton("Clear")) mmOpt.faces.clear();
+    }
+    const char* swappers[] = {"inswapper (fast)", "HyperSwap (sharper, CPU)"};
+    ImGui::Combo("Swap", &mmOpt.swapper, swappers, 2);
+    ImGui::SliderInt("Pixel boost", &mmOpt.boost, 1, 4, mmOpt.boost == 1 ? "off" : "%dx");
+    ImGui::SliderFloat("Likeness", &mmOpt.likeness, 0.0f, 1.0f, "%.2f");
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("0: more of the face to become. 1: more of the picture's own look.");
+    const char* enh[] = {"None", "GFPGAN 1.4", "CodeFormer", "GPEN 512"};
+    ImGui::Combo("Restore", &mmOpt.enhancer, enh, 4);
+    ImGui::BeginDisabled(mmOpt.enhancer == 0);
+    ImGui::SliderFloat("Blend", &mmOpt.blend, 0.0f, 1.0f, "%.2f");
+    ImGui::EndDisabled();
+    const char* which[] = {"Every face", "The biggest face"};
+    ImGui::Combo("Faces", &mmOpt.which, which, 2);
+    ImGui::Checkbox("Keep what's in front (hands, hair, glasses)", &mmOpt.occlusion);
+    ImGui::PopItemWidth();
+    ImGui::EndDisabled();
+    ImGui::TextDisabled("%s", doc.hasSel() ? "The result comes in as a new layer, masked to the selection." : "The result comes in as a new layer.");
+    if (running) ImGui::Text("Working... %.0f s (the first run loads the face models)", now() - mmRun.started);
+    if (!mmRun.err.empty()) ImGui::TextColored(col4(C_PINK), "%s", mmRun.err.c_str());
+    ImGui::Separator();
+    if (running) {
+        if (ImGui::Button("Stop", ImVec2(110, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) { mmRun.job.stop(); mmRun.err = "Stopped"; mmRun.out.clear(); }
+    } else {
+        ImGui::BeginDisabled(mmOpt.faces.empty());
+        if (ImGui::Button("Run", ImVec2(110, 0))) mimicStart();
+        ImGui::EndDisabled();
         ImGui::SameLine();
         if (ImGui::Button("Close", ImVec2(110, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) ImGui::CloseCurrentPopup();
     }
@@ -1313,6 +1457,7 @@ static void menus() {
         ImGui::Separator();
         if (ImGui::BeginMenu("Changeling")) { changelingMenu(); ImGui::EndMenu(); }
         if (ImGui::BeginMenu("Bathos")) { bathosMenu(); ImGui::EndMenu(); }
+        if (ImGui::BeginMenu("Mimic")) { mimicMenu(); ImGui::EndMenu(); }
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("View")) {
@@ -1463,6 +1608,7 @@ void frame() {
     drawDialog();
     drawChangeling();
     drawBathos();
+    drawMimic();
     updateThumbs();
 
     // unsaved changes on the way out
@@ -1494,6 +1640,7 @@ void init(SDL_Window* win, const std::string& prefDir, void (*status)(const char
         char* bp = SDL_GetBasePath();
         Changeling::init(prefDir, bp ? bp : "");
         Bathos::init(prefDir, bp ? bp : "");   // Filter > Bathos: Atelier's depth app, when it's on this PC
+        MimicPlug::init(prefDir, bp ? bp : "");   // Filter > Mimic: Atelier's face-swap app
         SDL_free(bp);
         step(Changeling::studioDir().empty() ? "Changeling Studio isn't on this PC" : "Asking Changeling Studio for its filters...", 0.5f);
         Changeling::loadSteps();
@@ -1508,13 +1655,14 @@ void init(SDL_Window* win, const std::string& prefDir, void (*status)(const char
 }
 
 // --capture: a scripted session so the README's screenshot shows the real thing
-bool busy() { return !clOut.empty() || !btOut.empty() || Changeling::stepsLoading(); }
+bool busy() { return !clOut.empty() || !btOut.empty() || !mmRun.out.empty() || Changeling::stepsLoading(); }
 
 void script(const std::string& what) {
     if (what == "empty") return;                             // the empty start, as it is
     noDoc = false;                                           // the scripts work on the blank document
     if (what == "about") { scriptDlg = D_ABOUT; return; }   // Help > About: the splash art
     if (what == "bathos") { btSource = 0; btAsk = true; bathosStart(); return; }   // Filter > Bathos > Depth Map on the picture
+    if (what.rfind("mimic:", 0) == 0) { mmOpt.faces = {what.substr(6)}; mmSource = 0; mmAsk = true; mimicStart(); return; }
     // "changeling:Chronos age=0.8": that Changeling on the whole picture, as Filter > Changeling runs it
     if (what.rfind("changeling:", 0) == 0) {
         while (Changeling::stepsLoading()) SDL_Delay(50);
