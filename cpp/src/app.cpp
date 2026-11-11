@@ -43,6 +43,25 @@ static const ImU32 C_BG = IM_COL32(0x1a, 0x1a, 0x1a, 255), C_PANEL = IM_COL32(0x
 
 static ImVec4 col4(ImU32 c) { return ImGui::ColorConvertU32ToFloat4(c); }
 
+// ---------- layer colour tags: PhotoCraft's set and colours (Photoshop's labels), in its menu order ----------
+// swatch: the menu's square; eye: the darker shade that fills the layer row's eye column
+struct LabelColour { const char* name; ImU32 swatch, eye; };
+static const LabelColour LABELS[] = {
+    {"No Colour", 0, 0},
+    {"Red", IM_COL32(0xFC, 0x5D, 0x5B, 255), IM_COL32(0x9F, 0x2F, 0x30, 255)},
+    {"Orange", IM_COL32(0xF7, 0x97, 0x44, 255), IM_COL32(0x93, 0x4F, 0x0C, 255)},
+    {"Yellow", IM_COL32(0xDC, 0xD6, 0x4B, 255), IM_COL32(0x99, 0x78, 0x0C, 255)},
+    {"Green", IM_COL32(0x85, 0xDC, 0x6A, 255), IM_COL32(0x4E, 0x71, 0x2E, 255)},
+    {"Seafoam", IM_COL32(0x1C, 0x84, 0x88, 255), IM_COL32(0x0B, 0x54, 0x4F, 255)},
+    {"Blue", IM_COL32(0x78, 0xAD, 0xF6, 255), IM_COL32(0x41, 0x5B, 0x87, 255)},
+    {"Indigo", IM_COL32(0x54, 0x4B, 0xE7, 255), IM_COL32(0x36, 0x34, 0x8E, 255)},
+    {"Magenta", IM_COL32(0xCC, 0x1A, 0x7E, 255), IM_COL32(0x98, 0x1B, 0x51, 255)},
+    {"Fuchsia", IM_COL32(0xB0, 0x14, 0xC0, 255), IM_COL32(0x71, 0x0F, 0x74, 255)},
+    {"Violet", IM_COL32(0x91, 0x76, 0xD5, 255), IM_COL32(0x5D, 0x3F, 0x8E, 255)},
+    {"Gray", IM_COL32(0x9C, 0x9C, 0x9C, 255), IM_COL32(0x57, 0x57, 0x57, 255)},
+};
+static const int LABEL_COUNT = (int)(sizeof LABELS / sizeof LABELS[0]);
+
 static void applyStyle() {
     ImGuiStyle& s = ImGui::GetStyle();
     s.WindowRounding = 0; s.FrameRounding = 2; s.GrabRounding = 2; s.PopupRounding = 2; s.ScrollbarRounding = 2;
@@ -67,6 +86,9 @@ static SDL_Window* window = nullptr;
 static std::string prefs;
 static Doc doc;
 static History hist;
+// No picture yet: LayerTack starts empty and waits for one to be dropped (or File > New / Open). The first picture
+// sets the canvas size. doc still holds a blank document underneath, so nothing has to cope with having none.
+static bool noDoc = true;
 static Image view;                               // the composite on screen
 static GLuint viewTex = 0, checkerTex = 0;
 static int texW = 0, texH = 0;
@@ -216,6 +238,7 @@ static void setTitle() {
 }
 
 static void fresh() {
+    noDoc = false;
     hist = History();
     showMask = false; dirty = {0, 0, doc.w, doc.h}; texW = -1;
     docVersion++; selVersion++; fitNext = true;
@@ -245,7 +268,8 @@ static void placeAsLayer(const std::string& path) {
 }
 
 void dropFile(const std::string& path) {
-    if (doc.layers.empty() || path.size() > 4 && path.substr(path.size() - 4) == ".ltk") open(path);
+    // nothing open yet: the picture opens, and the canvas takes its size; later pictures come in as layers
+    if (noDoc || doc.layers.empty() || path.size() > 4 && path.substr(path.size() - 4) == ".ltk") open(path);
     else placeAsLayer(path);
 }
 
@@ -837,7 +861,8 @@ static void drawCanvas() {
         for (size_t i = 0; i + 3 < v.size(); i += 2) dl->AddLine(toScreen(v[i], v[i + 1]), toScreen(v[i + 2], v[i + 3]), C_PINK, 1.5f);
         if (toMouse && v.size() >= 2) dl->AddLine(toScreen(v[v.size() - 2], v.back()), io.MousePos, C_PINK, 1.0f);
     };
-    if (!lasso.empty()) path(lasso, false);
+    // the Lasso draws nothing while you drag: its selection appears when you let go. The Polygonal Lasso shows its
+    // points, since it's built click by click.
     if (!poly.empty()) path(poly, true);
     // the brush outline
     if ((tool == T_BRUSH || tool == T_ERASER) && ImGui::IsWindowHovered()) {
@@ -970,6 +995,22 @@ static void optionsBar() {
     ImGui::PopItemWidth();
 }
 
+// The colour tags for the active layer: a swatch and its name each, the current one ticked (PhotoCraft's menu)
+static void labelMenu() {
+    Layer& l = doc.cur();
+    for (int c = 0; c < LABEL_COUNT; ++c) {
+        if (c == 1) ImGui::Separator();
+        ImGui::PushID(c);
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        if (ImGui::Selectable("##tag", l.label == c, 0, ImVec2(170, 18)) && l.label != c) { remember("Layer Colour"); l.label = c; doc.dirty = true; }
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        if (c > 0) dl->AddRectFilled(ImVec2(p.x + 2, p.y + 2), ImVec2(p.x + 16, p.y + 16), LABELS[c].swatch);
+        else dl->AddRect(ImVec2(p.x + 2, p.y + 2), ImVec2(p.x + 16, p.y + 16), C_DIM);
+        dl->AddText(ImVec2(p.x + 24, p.y + 1), C_TEXT, LABELS[c].name);
+        ImGui::PopID();
+    }
+}
+
 static void layersPanel(float height) {
     Layer& cur = doc.cur();
     ImGui::TextColored(col4(C_PINK), "LAYERS");
@@ -996,10 +1037,14 @@ static void layersPanel(float height) {
         const float w = ImGui::GetContentRegionAvail().x, h = 48;
         const bool active = i == doc.active;
         dl->AddRectFilled(a, ImVec2(a.x + w, a.y + h), active ? IM_COL32(0x3a, 0x20, 0x2e, 255) : C_PANEL);
+        // its colour tag fills the eye column (as in PhotoCraft); right-click the eye column to set it
+        if (l.label > 0 && l.label < LABEL_COUNT) dl->AddRectFilled(a, ImVec2(a.x + 27, a.y + h), LABELS[l.label].eye);
         dl->AddLine(ImVec2(a.x, a.y + h), ImVec2(a.x + w, a.y + h), C_LINE);
         // the eye
         ImGui::SetCursorScreenPos(ImVec2(a.x + 4, a.y + 14));
         if (ImGui::InvisibleButton("eye", ImVec2(20, 20))) { remember("Visibility"); l.visible = !l.visible; changed(); }
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Show / hide; right-click for the layer's colour tag");
+        if (ImGui::BeginPopupContextItem("tag")) { doc.active = i; labelMenu(); ImGui::EndPopup(); }
         if (l.visible) { dl->AddEllipse(ImVec2(a.x + 14, a.y + 24), 8, 5, C_TEXT, 0, 16, 1.5f); dl->AddCircleFilled(ImVec2(a.x + 14, a.y + 24), 2.5f, C_TEXT); }
         else dl->AddRect(ImVec2(a.x + 7, a.y + 17), ImVec2(a.x + 21, a.y + 31), C_LINE);
         // the layer's picture; click edits the pixels
@@ -1062,16 +1107,16 @@ static void menus() {
     if (ImGui::BeginMenu("File")) {
         if (item("New...", "Ctrl+N")) openDlg(D_NEW);
         if (item("Open...", "Ctrl+O")) { const std::string p = fileDialog(false, OPEN_FILTER, nullptr, ""); if (!p.empty()) open(p); }
-        if (item("Place as Layer...", "Ctrl+Shift+O")) { const std::string p = fileDialog(false, OPEN_FILTER, nullptr, ""); if (!p.empty()) placeAsLayer(p); }
+        if (item("Place as Layer...", "Ctrl+Shift+O", !noDoc)) { const std::string p = fileDialog(false, OPEN_FILTER, nullptr, ""); if (!p.empty()) placeAsLayer(p); }
         ImGui::Separator();
-        if (item("Save Project", "Ctrl+S")) save();
-        if (item("Save Project As...")) saveAs(true);
-        if (item("Export PNG / JPG...", "Ctrl+Shift+S")) saveAs(false);
+        if (item("Save Project", "Ctrl+S", !noDoc)) save();
+        if (item("Save Project As...", nullptr, !noDoc)) saveAs(true);
+        if (item("Export PNG / JPG...", "Ctrl+Shift+S", !noDoc)) saveAs(false);
         ImGui::Separator();
         if (item("Quit", "Ctrl+Q")) requestQuit();
         ImGui::EndMenu();
     }
-    if (ImGui::BeginMenu("Edit")) {
+    if (ImGui::BeginMenu("Edit", !noDoc)) {
         if (item(hist.canUndo() ? ("Undo " + hist.undoNames.back()).c_str() : "Undo", "Ctrl+Z", hist.canUndo())) { hist.doUndo(doc); changed(); selChanged(); }
         if (item(hist.canRedo() ? ("Redo " + hist.redoNames.back()).c_str() : "Redo", "Ctrl+Shift+Z", hist.canRedo())) { hist.doRedo(doc); changed(); selChanged(); }
         ImGui::Separator();
@@ -1084,7 +1129,7 @@ static void menus() {
         if (item("Flip Vertical")) { remember("Flip"); flipLayer(doc, false); changed(); }
         ImGui::EndMenu();
     }
-    if (ImGui::BeginMenu("Image")) {
+    if (ImGui::BeginMenu("Image", !noDoc)) {
         if (ImGui::BeginMenu("Adjustments")) {
             if (item("Brightness/Contrast...")) openDlg(D_BC);
             if (item("Levels...", "Ctrl+L")) openDlg(D_LEVELS);
@@ -1103,11 +1148,12 @@ static void menus() {
         if (item("Canvas Size...", "Ctrl+Alt+C")) openDlg(D_CANVAS);
         ImGui::EndMenu();
     }
-    if (ImGui::BeginMenu("Layer")) {
+    if (ImGui::BeginMenu("Layer", !noDoc)) {
         if (item("New Layer", "Ctrl+Shift+N")) { remember("New Layer"); addLayer(doc, emptyLayer(doc, "Layer " + std::to_string(doc.layers.size()))); changed(); }
         if (item("Duplicate Layer", "Ctrl+J")) { remember("Duplicate"); duplicateLayer(doc); changed(); }
         if (item("Delete Layer", nullptr, doc.layers.size() > 1)) { remember("Delete Layer"); deleteLayer(doc); changed(); }
         if (item("Rename Layer...")) openDlg(D_RENAME);
+        if (ImGui::BeginMenu("Layer Colour")) { labelMenu(); ImGui::EndMenu(); }
         ImGui::Separator();
         if (ImGui::BeginMenu("Layer Mask")) {
             if (item("Reveal All", nullptr, !mask)) { remember("Add Mask"); addMask(doc, 0); changed(); }
@@ -1135,7 +1181,7 @@ static void menus() {
         if (item("Flatten Image")) { remember("Flatten"); flatten(doc); changed(); }
         ImGui::EndMenu();
     }
-    if (ImGui::BeginMenu("Select")) {
+    if (ImGui::BeginMenu("Select", !noDoc)) {
         if (item("All", "Ctrl+A")) { remember("Select All"); selectAll(); }
         if (item("Deselect", "Ctrl+D", doc.hasSel())) { remember("Deselect"); deselect(); }
         if (item("Inverse", "Ctrl+Shift+I")) { remember("Inverse"); invertSel(doc); selChanged(); }
@@ -1148,7 +1194,7 @@ static void menus() {
         if (item("Load from Mask / Transparency")) { remember("Load Selection"); selectionFromMask(doc); selChanged(); }
         ImGui::EndMenu();
     }
-    if (ImGui::BeginMenu("Filter")) {
+    if (ImGui::BeginMenu("Filter", !noDoc)) {
         if (ImGui::BeginMenu("Blur")) {
             if (item("Average")) { remember("Average"); Work o = getWork(doc), r = o; filterAverage(doc, r); putWork(doc, o, r); changed(); }
             if (item("Box Blur...")) openDlg(D_BOX);
@@ -1178,6 +1224,12 @@ static void keys() {
     const bool ctrl = io.KeyCtrl, shift = io.KeyShift, alt = io.KeyAlt;
     auto k = [](ImGuiKey key) { return ImGui::IsKeyPressed(key, false); };
     auto kr = [](ImGuiKey key) { return ImGui::IsKeyPressed(key, true); };
+    if (noDoc) {   // nothing open: only New, Open and Quit
+        if (ctrl && k(ImGuiKey_N) && !shift) openDlg(D_NEW);
+        else if (ctrl && k(ImGuiKey_O) && !shift) { const std::string p = fileDialog(false, OPEN_FILTER, nullptr, ""); if (!p.empty()) open(p); }
+        else if (ctrl && k(ImGuiKey_Q)) requestQuit();
+        return;
+    }
     if (ctrl) {
         if (k(ImGuiKey_Z)) { if (shift) hist.doRedo(doc); else hist.doUndo(doc); changed(); selChanged(); }
         else if (k(ImGuiKey_Y)) { hist.doRedo(doc); changed(); selChanged(); }
@@ -1254,7 +1306,8 @@ void frame() {
 
     ImGui::SetNextWindowPos(ImVec2(W - rightW, top + optH)); ImGui::SetNextWindowSize(ImVec2(rightW, H - top - optH - statusH));
     ImGui::Begin("panels", nullptr, fixed);
-    layersPanel(std::max(120.0f, H - top - optH - statusH - 130));
+    if (noDoc) { ImGui::SeparatorText("LAYERS"); ImGui::TextDisabled("No picture open yet."); }
+    else layersPanel(std::max(120.0f, H - top - optH - statusH - 130));
     ImGui::End();
 
     canvasPos = ImVec2(leftW, top + optH); canvasSize = ImVec2(W - leftW - rightW, H - top - optH - statusH);
@@ -1263,9 +1316,24 @@ void frame() {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
     ImGui::Begin("canvas", nullptr, fixed | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::InvisibleButton("canvasarea", canvasSize, ImGuiButtonFlags_MouseButtonLeft | ImGuiButtonFlags_MouseButtonMiddle);
-    canvasInput();
-    uploadView();
-    drawCanvas();
+    if (noDoc) {
+        // the empty workspace: a dashed drop area and how to start
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(canvasPos, ImVec2(canvasPos.x + canvasSize.x, canvasPos.y + canvasSize.y), C_WELL);
+        const ImVec2 mid(canvasPos.x + canvasSize.x / 2, canvasPos.y + canvasSize.y / 2);
+        const float bw = std::min(520.0f, canvasSize.x - 60), bh = std::min(260.0f, canvasSize.y - 60);
+        const ImVec2 b0(mid.x - bw / 2, mid.y - bh / 2), b1(mid.x + bw / 2, mid.y + bh / 2);
+        for (float x = b0.x; x < b1.x; x += 14) { dl->AddLine(ImVec2(x, b0.y), ImVec2(std::min(x + 7, b1.x), b0.y), C_LINE, 2); dl->AddLine(ImVec2(x, b1.y), ImVec2(std::min(x + 7, b1.x), b1.y), C_LINE, 2); }
+        for (float y = b0.y; y < b1.y; y += 14) { dl->AddLine(ImVec2(b0.x, y), ImVec2(b0.x, std::min(y + 7, b1.y)), C_LINE, 2); dl->AddLine(ImVec2(b1.x, y), ImVec2(b1.x, std::min(y + 7, b1.y)), C_LINE, 2); }
+        auto centred = [&](float y, ImU32 col, const char* s) { const ImVec2 ts = ImGui::CalcTextSize(s); dl->AddText(ImVec2(mid.x - ts.x / 2, y), col, s); };
+        centred(mid.y - 24, C_TEXT, "Drop a picture here to start");
+        centred(mid.y + 2, C_DIM, "The canvas takes the picture's size.");
+        centred(mid.y + 26, C_DIM, "Or File > New (Ctrl+N), File > Open (Ctrl+O)");
+    } else {
+        canvasInput();
+        uploadView();
+        drawCanvas();
+    }
     ImGui::End();
     ImGui::PopStyleVar();
 
@@ -1274,7 +1342,8 @@ void frame() {
     ImGui::PushStyleColor(ImGuiCol_WindowBg, col4(C_BG));
     ImGui::Begin("status", nullptr, fixed);
     const ImVec2 c = toCanvas(io.MousePos);
-    ImGui::Text("%.0f%%   %d x %d   %s", zoom * 100, doc.w, doc.h, (c.x >= 0 && c.y >= 0 && c.x < doc.w && c.y < doc.h) ? (std::to_string((int)c.x) + ", " + std::to_string((int)c.y)).c_str() : "");
+    if (noDoc) ImGui::TextDisabled("No picture open");
+    else ImGui::Text("%.0f%%   %d x %d   %s", zoom * 100, doc.w, doc.h, (c.x >= 0 && c.y >= 0 && c.x < doc.w && c.y < doc.h) ? (std::to_string((int)c.x) + ", " + std::to_string((int)c.y)).c_str() : "");
     ImGui::SameLine(0, 30);
     if (now() < toastUntil) ImGui::TextColored(col4(C_PINK), "%s", toast.c_str());
     else ImGui::TextDisabled("%s", doc.editMask && doc.cur().hasMask ? "Editing the layer MASK" : "");
@@ -1323,6 +1392,7 @@ void init(SDL_Window* win, const std::string& prefDir, void (*status)(const char
     checkerTex = makeTex(2, 2, chk, true, true);
     doc = newDoc(1600, 1000, true);
     fresh();
+    noDoc = true;                                // the blank stays hidden until a picture comes (or File > New)
     setTitle();
 }
 
@@ -1330,6 +1400,8 @@ void init(SDL_Window* win, const std::string& prefDir, void (*status)(const char
 bool busy() { return !clOut.empty() || Changeling::stepsLoading(); }
 
 void script(const std::string& what) {
+    if (what == "empty") return;                             // the empty start, as it is
+    noDoc = false;                                           // the scripts work on the blank document
     if (what == "about") { scriptDlg = D_ABOUT; return; }   // Help > About: the splash art
     // "changeling:Chronos age=0.8": that Changeling on the whole picture, as Filter > Changeling runs it
     if (what.rfind("changeling:", 0) == 0) {

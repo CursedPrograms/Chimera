@@ -34,6 +34,7 @@ struct Layer {
     bool visible = true;
     float opacity = 1.0f;
     int blend = 0;                               // a BlendMode
+    int label = 0;                               // its colour tag, PhotoCraft's set (0 = none; see labelName)
     uint8_t maskAt(int lx, int ly) const { return hasMask && maskOn ? mask[(size_t)ly * img.w + lx] : 255; }
 };
 

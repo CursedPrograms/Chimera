@@ -292,6 +292,7 @@ bool openDoc(const std::string& path, Doc& d, std::string& err) {
             l.opacity = r.f(); l.blend = r.i32();
             const uint32_t flags = r.u32();
             l.visible = flags & 1; l.hasMask = flags & 2; l.maskOn = flags & 4;
+            l.label = (flags >> 8) & 15;                 // the colour tag (projects from before it: 0, none)
             auto png = r.bytes();
             int w, h, c;
             uint8_t* px = stbi_load_from_memory(png.data(), (int)png.size(), &w, &h, &c, 4);
@@ -349,7 +350,7 @@ bool saveProject(const Doc& d, const std::string& path, std::string& err) {
         putBytes(o, (const uint8_t*)l.name.data(), l.name.size());
         putU32(o, (uint32_t)l.x); putU32(o, (uint32_t)l.y);
         putF(o, l.opacity); putU32(o, l.blend);
-        putU32(o, (l.visible ? 1 : 0) | (l.hasMask ? 2 : 0) | (l.maskOn ? 4 : 0));
+        putU32(o, (l.visible ? 1 : 0) | (l.hasMask ? 2 : 0) | (l.maskOn ? 4 : 0) | ((uint32_t)(l.label & 15) << 8));
         std::vector<uint8_t> png;
         stbi_write_png_to_func(toVec, &png, l.img.w, l.img.h, 4, l.img.px.data(), l.img.w * 4);
         putBytes(o, png.data(), png.size());
