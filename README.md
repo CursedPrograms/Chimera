@@ -40,7 +40,14 @@ modes, selections with Select Subject, tonal adjustments and filters, in a dark 
 - **Non-destructive layer masks:** a mask channel on any layer: black hides, white reveals, greys give partial
   transparency. Add one that reveals all, hides all, or follows the selection; paint it with the brush; fill, blur
   (feather), curve or level it like any picture; invert it, switch it off (Shift-click), view it on its own
-  (Alt-click), turn it into a selection, apply it or delete it.
+  (Alt-click), turn it into a selection, apply it or delete it. While a mask is the target the colours turn black
+  and white, and your own come back when you go back to the pixels.
+- **Adjustment layers:** Photoshop's 15 adjustments as layers that change everything below them and stay editable:
+  Brightness/Contrast, Levels, Curves, Exposure, Vibrance, Hue/Saturation, Color Balance, Black & White, Photo
+  Filter, Channel Mixer, Invert, Posterize, Threshold, Gradient Map and Selective Color. Their settings are in the
+  Properties panel above the layers; each has its own mask, opacity and blend mode, they're saved in `.ltk`
+  projects, and Merge Down bakes one into the layer below (Layer > New Adjustment Layer, or **Adj** under the
+  layers).
 - **Blend modes:** all 27 of Photoshop's layer modes, with its exact maths: Normal, Dissolve, Darken, Multiply,
   Color Burn, Linear Burn, Darker Color, Lighten, Screen, Color Dodge, Linear Dodge (Add), Lighter Color, Overlay,
   Soft Light, Hard Light, Vivid Light, Linear Light, Pin Light, Hard Mix, Difference, Exclusion, Subtract, Divide,
@@ -55,6 +62,11 @@ modes, selections with Select Subject, tonal adjustments and filters, in a dark 
   selection.
 - **Remove Background:** the same detection as a layer mask in one click, so the edge can still be refined with
   the brush.
+- **Select and Mask** (Alt+Ctrl+R): edges that follow the picture, for hair and fur. Radius and Smart Radius
+  let the picture decide the edge, then Smooth, Feather, Contrast and Shift Edge; Decontaminate Colors takes the old
+  background's colour out of the soft edge. View it Overlay, On Black, On White, Black & White or On Layers, and
+  send it to the selection, the layer mask, or a new layer (cut out or masked). It starts from the selection or the
+  layer's mask, so Select Subject then Select and Mask cuts out a person, hair and all.
 - **Refine:** Inverse, Feather, Grow / Shrink, and Load Selection from a mask or the layer's transparency.
 
 ### 3. Canvas tools and painting
@@ -106,6 +118,12 @@ in the dialog; with a selection the new layer is masked to it. It runs
 `bathos-cli` next to itself, in its `plugins\Bathos` folder, where Bathos is installed, or in a Bathos folder nearby;
 otherwise use **Filter > Bathos > Find Bathos...**
 
+### Face swap (Filter > Mimic)
+**Filter > Mimic** swaps a face from a photo onto the picture (or a layer) and puts the result in as a new layer,
+masked to the selection when there is one. It runs **[Mimic](https://github.com/CursedPrograms/Mimic)** (Atelier's
+face swapper) in the background: LayerTack finds `mimic-cli` next to itself, in its `plugins\Mimic` folder, where
+Mimic is installed, or in a Mimic folder nearby; otherwise use **Filter > Mimic > Find Mimic...**
+
 ### 7. Export and canvas utilities
 - **PNG:** 32-bit PNG with full transparency; JPG export (onto white).
 - **Projects:** `.ltk` files keep every layer, mask, blend mode and opacity.
@@ -145,6 +163,10 @@ The code, in `cpp/src/`:
 - `ops.cpp`: adjustments, filters, fills, selections, resizing, transform and the brush
 - `segment.cpp`: Select Subject through ONNX Runtime's C API (loaded at run time)
 - `changeling.cpp`: Filter > Changeling: finds Changeling Studio and runs its `chain.py` in the background
+- `adjust.cpp`: adjustment layers: the 15 adjustments' maths
+- `refine.cpp`: Select and Mask: guided-filter edges, smooth, feather, contrast, shift edge, decontaminate
+- `mimicplug.cpp`: Filter > Mimic: finds [Mimic](https://github.com/CursedPrograms/Mimic) (`mimic-cli`) and runs it for a face-swap layer
+- `atelier.cpp`: finds the other Atelier apps LayerTack uses as plugins
 - `bathos.cpp`: Filter > Bathos: finds [Bathos](https://github.com/CursedPrograms/Bathos) (`bathos-cli`) and runs it for a depth-map layer
 - `app.cpp`: the window: menus, tools, canvas, Layers panel and dialogs
 - `splash.cpp`: the splash shown while LayerTack loads, and in Help > About
@@ -152,7 +174,9 @@ The code, in `cpp/src/`:
 
 ## Credits
 
-The blend-mode maths is ported from [PhotoCraft](https://github.com/storytold/photocraft) (MIT OR Apache-2.0).
+The blend modes, the adjustment layers and Select and Mask are ported from
+[PhotoCraft](https://github.com/storytold/photocraft) (MIT OR Apache-2.0); Select and Mask's soft edges are He, Sun
+and Tang's guided filter.
 Built with [Dear ImGui](https://github.com/ocornut/imgui), [SDL2](https://www.libsdl.org),
 [stb](https://github.com/nothings/stb) and [ONNX Runtime](https://github.com/microsoft/onnxruntime); Select Subject
 uses [U²-Net](https://github.com/xuebinqin/U-2-Net). See [NOTICE](NOTICE).

@@ -1,9 +1,12 @@
 LayerTack
 Copyright (c) 2024-2026 Cursed Entertainment. MIT License (see LICENSE).
 
-The blend modes (cpp/src/blend.cpp) are ported from PhotoCraft,
-https://github.com/storytold/photocraft (crates/color/src/blend.rs and
-crates/compose/src/psblend.rs), licensed MIT OR Apache-2.0.
+The blend modes (cpp/src/blend.cpp), the adjustment layers (cpp/src/adjust.cpp)
+and Select and Mask (cpp/src/refine.cpp) are ported from PhotoCraft,
+https://github.com/storytold/photocraft (crates/color/src/blend.rs,
+crates/compose/src/psblend.rs, crates/compose/src/adjust*.rs,
+crates/doc/src/adjust.rs and crates/algo/src/matting.rs), licensed
+MIT OR Apache-2.0.
 Copyright (c) the PhotoCraft contributors.
 
 Third-party code built into LayerTack:
