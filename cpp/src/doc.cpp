@@ -78,6 +78,14 @@ void moveLayer(Doc& d, int dir) {
     d.dirty = true;
 }
 
+void addAdjustmentLayer(Doc& d, int kind) {
+    Layer l = emptyLayer(d, adjName(kind));
+    l.adj = Adjustment::make(kind);
+    addLayer(d, std::move(l));
+    addMask(d, d.hasSel() ? 2 : 0);
+    d.editMask = false;
+}
+
 void expandToCanvas(Doc& d, Layer& l) {
     const int x0 = std::min(0, l.x), y0 = std::min(0, l.y);
     const int x1 = std::max(d.w, l.x + l.img.w), y1 = std::max(d.h, l.y + l.img.h);
@@ -113,6 +121,32 @@ static void drawLayer(const Layer& l, std::vector<float>& buf, Rect r, int mode,
     }
 }
 
+// an adjustment layer over the float buffer: what's below, adjusted, then blended back through the layer's mask and
+// opacity with its blend mode; transparency is left as it was
+static void drawAdjust(const Layer& l, std::vector<float>& buf, Rect r, int mode, float opacity) {
+    const int lx0 = std::max(r.x0, l.x), ly0 = std::max(r.y0, l.y);
+    const int lx1 = std::min(r.x1, l.x + l.img.w), ly1 = std::min(r.y1, l.y + l.img.h);
+    if (lx1 <= lx0 || ly1 <= ly0) return;
+    AdjPrepared* prep = adjPrepare(l.adj);
+    const int rw = r.x1 - r.x0;
+    const bool masked = l.hasMask && l.maskOn;
+    for (int y = ly0; y < ly1; ++y) {
+        float* b = &buf[((size_t)(y - r.y0) * rw + (lx0 - r.x0)) * 4];
+        const uint8_t* m = masked ? &l.mask[(size_t)(y - l.y) * l.img.w + (lx0 - l.x)] : nullptr;
+        for (int x = lx0; x < lx1; ++x, b += 4) {
+            const float mk = (m ? *m++ / 255.0f : 1.0f) * opacity;
+            if (b[3] <= 0.0f || mk <= 0.0f) continue;
+            float c[3] = {b[0], b[1], b[2]};
+            adjApply(l.adj, prep, c, x, y);
+            const float s[4] = {c[0], c[1], c[2], mk};
+            const float a = b[3];
+            compositePixel(mode, b, s, x, y);
+            b[3] = a;
+        }
+    }
+    adjFree(prep);
+}
+
 void composite(const Doc& d, Image& out, Rect r, bool showMask) {
     if (out.w != d.w || out.h != d.h) out = Image(d.w, d.h);
     r = r.clip(d.w, d.h);
@@ -132,7 +166,10 @@ void composite(const Doc& d, Image& out, Rect r, bool showMask) {
     const int rw = r.x1 - r.x0;
     std::vector<float> buf((size_t)rw * (r.y1 - r.y0) * 4, 0.0f);
     for (const Layer& l : d.layers)
-        if (l.visible && l.opacity > 0.0f) drawLayer(l, buf, r, l.blend, l.opacity);
+        if (l.visible && l.opacity > 0.0f) {
+            if (l.isAdjust()) drawAdjust(l, buf, r, l.blend, l.opacity);
+            else drawLayer(l, buf, r, l.blend, l.opacity);
+        }
     for (int y = r.y0; y < r.y1; ++y) {
         const float* b = &buf[(size_t)(y - r.y0) * rw * 4];
         uint8_t* o = out.at(r.x0, y);
@@ -143,6 +180,26 @@ void composite(const Doc& d, Image& out, Rect r, bool showMask) {
 // merge layer `top` into `bottom` (both canvas-covering), keeping bottom's blend
 static void mergeInto(Doc& d, Layer& bottom, const Layer& top) {
     expandToCanvas(d, bottom);
+    if (top.isAdjust()) {
+        AdjPrepared* prep = adjPrepare(top.adj);
+        for (int y = 0; y < bottom.img.h; ++y)
+            for (int x = 0; x < bottom.img.w; ++x) {
+                const int cx = x + bottom.x, cy = y + bottom.y, tx = cx - top.x, ty = cy - top.y;
+                if (tx < 0 || ty < 0 || tx >= top.img.w || ty >= top.img.h) continue;
+                uint8_t* q = bottom.img.at(x, y);
+                if (!q[3]) continue;
+                const float mk = top.maskAt(tx, ty) / 255.0f * top.opacity * (bottom.hasMask && bottom.maskOn ? bottom.mask[(size_t)y * bottom.img.w + x] / 255.0f : 1.0f);
+                if (mk <= 0) continue;
+                float b[4] = {q[0] / 255.0f, q[1] / 255.0f, q[2] / 255.0f, 1.0f};
+                float c[3] = {b[0], b[1], b[2]};
+                adjApply(top.adj, prep, c, cx, cy);
+                const float s[4] = {c[0], c[1], c[2], mk};
+                compositePixel(top.blend, b, s, cx, cy);
+                for (int i = 0; i < 3; ++i) q[i] = to8(b[i]);
+            }
+        adjFree(prep);
+        return;
+    }
     if (bottom.hasMask) { // bake the bottom's mask first, so what you see is what you get
         for (size_t i = 0; i < bottom.mask.size(); ++i) bottom.img.px[i * 4 + 3] = (uint8_t)(bottom.img.px[i * 4 + 3] * bottom.mask[i] / 255);
         bottom.hasMask = false; bottom.mask.clear();
@@ -166,7 +223,7 @@ static void mergeInto(Doc& d, Layer& bottom, const Layer& top) {
 }
 
 void mergeDown(Doc& d) {
-    if (d.active == 0) return;
+    if (d.active == 0 || d.layers[d.active - 1].isAdjust()) return;   // (Photoshop won't merge onto an adjustment layer either)
     Layer top = d.layers[d.active];
     mergeInto(d, d.layers[d.active - 1], top);
     d.layers.erase(d.layers.begin() + d.active);
@@ -304,6 +361,10 @@ bool openDoc(const std::string& path, Doc& d, std::string& err) {
                 if (!m || w != l.img.w || h != l.img.h) { err = "A mask in the project is damaged"; return false; }
                 l.mask.assign(m, m + (size_t)w * h); stbi_image_free(m);
             }
+            if (flags & (1u << 12)) {   // an adjustment layer's settings
+                auto ab = r.bytes();
+                if (!l.adj.load(std::string(ab.begin(), ab.end()))) { err = "An adjustment layer in the project is damaged"; return false; }
+            }
             n.layers.push_back(std::move(l));
         }
         if (!r.ok || n.layers.empty()) { err = "The project is damaged"; return false; }
@@ -350,7 +411,7 @@ bool saveProject(const Doc& d, const std::string& path, std::string& err) {
         putBytes(o, (const uint8_t*)l.name.data(), l.name.size());
         putU32(o, (uint32_t)l.x); putU32(o, (uint32_t)l.y);
         putF(o, l.opacity); putU32(o, l.blend);
-        putU32(o, (l.visible ? 1 : 0) | (l.hasMask ? 2 : 0) | (l.maskOn ? 4 : 0) | ((uint32_t)(l.label & 15) << 8));
+        putU32(o, (l.visible ? 1 : 0) | (l.hasMask ? 2 : 0) | (l.maskOn ? 4 : 0) | ((uint32_t)(l.label & 15) << 8) | (l.isAdjust() ? 1u << 12 : 0));
         std::vector<uint8_t> png;
         stbi_write_png_to_func(toVec, &png, l.img.w, l.img.h, 4, l.img.px.data(), l.img.w * 4);
         putBytes(o, png.data(), png.size());
@@ -359,6 +420,7 @@ bool saveProject(const Doc& d, const std::string& path, std::string& err) {
             stbi_write_png_to_func(toVec, &mp, l.img.w, l.img.h, 1, l.mask.data(), l.img.w);
             putBytes(o, mp.data(), mp.size());
         }
+        if (l.isAdjust()) { const std::string a = l.adj.save(); putBytes(o, (const uint8_t*)a.data(), a.size()); }
     }
     if (!writeFile(path, o)) { err = "Can't write " + path; return false; }
     return true;

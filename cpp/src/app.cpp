@@ -184,7 +184,7 @@ static void makeThumb(GLuint& t, const Layer& l, bool mask) {
 }
 
 static void updateThumbs() {
-    if (thumbVersion == docVersion || now() - thumbAt < 0.25) return;
+    if (thumbVersion == docVersion || (thumbs.size() == doc.layers.size() && now() - thumbAt < 0.25)) return;   // new or removed layers: at once
     thumbVersion = docVersion; thumbAt = now();
     thumbs.resize(doc.layers.size(), 0); mthumbs.resize(doc.layers.size(), 0);
     for (size_t i = 0; i < doc.layers.size(); ++i) {
@@ -1263,6 +1263,222 @@ static void labelMenu() {
     }
 }
 
+// ---------- the Properties panel: the active adjustment layer's settings, live ----------
+// one undo step per slider drag: remembered as the drag starts
+static bool adjEdit(bool changedNow) {
+    if (ImGui::IsItemActivated()) remember("Adjustment");
+    if (changedNow) changed();
+    return changedNow;
+}
+static bool adjSlider(const char* id, float* v, float lo, float hi, const char* fmt, const char* tip = nullptr) {
+    const bool c = ImGui::SliderFloat(id, v, lo, hi, fmt);
+    if (tip && ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip);
+    if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) { /* right-click: back to 0 handled by callers that want it */ }
+    return adjEdit(c);
+}
+static bool adjCheck(const char* label, bool* v) { if (ImGui::Checkbox(label, v)) { remember("Adjustment"); changed(); return true; } return false; }
+static bool adjColor(const char* id, float* rgb) { return adjEdit(ImGui::ColorEdit3(id, rgb, ImGuiColorEditFlags_NoInputs)); }
+
+// Curves: a little editor; click adds a point, drag moves it, right-click removes it
+static void curveEditor(std::vector<float>& pts, ImU32 col) {
+    const float side = ImGui::GetContentRegionAvail().x;
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const ImVec2 a = ImGui::GetCursorScreenPos(), b(a.x + side, a.y + side);
+    dl->AddRectFilled(a, b, C_WELL);
+    for (int i = 1; i < 4; ++i) { dl->AddLine(ImVec2(a.x + side * i / 4, a.y), ImVec2(a.x + side * i / 4, b.y), C_LINE); dl->AddLine(ImVec2(a.x, a.y + side * i / 4), ImVec2(b.x, a.y + side * i / 4), C_LINE); }
+    dl->AddLine(ImVec2(a.x, b.y), ImVec2(b.x, a.y), C_LINE);
+    if (pts.size() < 4) pts = {0, 0, 1, 1};
+    Adjustment tmp = Adjustment::make(ADJ_CURVES);
+    tmp.curve[0] = pts;
+    AdjPrepared* prep = adjPrepare(tmp);
+    ImVec2 prev;
+    for (int x = 0; x <= 64; ++x) {
+        float c[3] = {x / 64.0f, x / 64.0f, x / 64.0f};
+        adjApply(tmp, prep, c, 0, 0);
+        const ImVec2 pt(a.x + side * x / 64.0f, b.y - side * c[0]);
+        if (x) dl->AddLine(prev, pt, col, 2.0f);
+        prev = pt;
+    }
+    adjFree(prep);
+    static int dragging = -1;
+    ImGui::InvisibleButton("curve", ImVec2(side, side));
+    const ImVec2 m = ImGui::GetIO().MousePos;
+    const float mx = std::clamp((m.x - a.x) / side, 0.0f, 1.0f), my = std::clamp((b.y - m.y) / side, 0.0f, 1.0f);
+    int hit = -1;
+    for (size_t i = 0; i + 1 < pts.size(); i += 2)
+        if (std::fabs(pts[i] - mx) * side < 8 && std::fabs(pts[i + 1] - my) * side < 8) hit = (int)i;
+    for (size_t i = 0; i + 1 < pts.size(); i += 2) dl->AddCircleFilled(ImVec2(a.x + side * pts[i], b.y - side * pts[i + 1]), (int)i == hit ? 6.0f : 4.5f, (int)i == hit ? C_PINK : C_TEXT);
+    if (ImGui::IsItemActivated()) {
+        remember("Curves");
+        if (hit >= 0) dragging = hit;
+        else { pts.push_back(mx); pts.push_back(my); dragging = (int)pts.size() - 2; changed(); }
+    }
+    if (ImGui::IsItemActive() && dragging >= 0 && dragging + 1 < (int)pts.size()) { pts[dragging] = mx; pts[dragging + 1] = my; changed(); }
+    if (ImGui::IsItemDeactivated()) dragging = -1;
+    if (ImGui::IsItemClicked(ImGuiMouseButton_Right) && hit >= 0 && pts.size() > 4) { remember("Curves"); pts.erase(pts.begin() + hit, pts.begin() + hit + 2); changed(); }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Click to add a point, drag to move it, right-click to remove it");
+}
+
+static void propertiesPanel() {
+    Layer& l = doc.cur();
+    Adjustment& a = l.adj;
+    ImGui::TextColored(col4(C_PINK), "PROPERTIES");
+    ImGui::SameLine(); ImGui::TextDisabled("%s", adjName(a.kind));
+    ImGui::PushItemWidth(-1);
+    static int channel = 0, range = 0, tone = 1, outCh = 0, sel = 0;
+    switch (a.kind) {
+        case ADJ_BRIGHTNESS_CONTRAST:
+            adjSlider("##b", &a.v[0], -150, 150, "Brightness %.0f");
+            adjSlider("##c", &a.v[1], a.flag ? -100.0f : -50.0f, 100, "Contrast %.0f");
+            adjCheck("Use Legacy", &a.flag);
+            break;
+        case ADJ_LEVELS: {
+            const char* chs[] = {"RGB", "Red", "Green", "Blue"};
+            ImGui::Combo("##ch", &channel, chs, 4);
+            LevelsCh& c = a.levels[channel];
+            float ib = c.inBlack * 255, iw = c.inWhite * 255, ob = c.outBlack * 255, ow = c.outWhite * 255;
+            if (adjSlider("##ib", &ib, 0, 253, "Input black %.0f")) c.inBlack = std::min(ib, iw - 2) / 255;
+            if (adjSlider("##g", &c.gamma, 0.1f, 9.99f, "Gamma %.2f")) changed();
+            if (adjSlider("##iw", &iw, 2, 255, "Input white %.0f")) c.inWhite = std::max(iw, ib + 2) / 255;
+            if (adjSlider("##ob", &ob, 0, 255, "Output black %.0f")) c.outBlack = ob / 255;
+            if (adjSlider("##ow", &ow, 0, 255, "Output white %.0f")) c.outWhite = ow / 255;
+            break;
+        }
+        case ADJ_CURVES: {
+            const char* chs[] = {"RGB", "Red", "Green", "Blue"};
+            ImGui::Combo("##ch", &channel, chs, 4);
+            static const ImU32 cols[4] = {C_TEXT, IM_COL32(240, 80, 80, 255), IM_COL32(90, 220, 110, 255), IM_COL32(90, 150, 255, 255)};
+            curveEditor(a.curve[channel], cols[channel]);
+            if (ImGui::Button("Reset this curve", ImVec2(-1, 0))) { remember("Curves"); a.curve[channel].clear(); changed(); }
+            break;
+        }
+        case ADJ_EXPOSURE:
+            adjSlider("##e", &a.v[0], -20, 20, "Exposure %.2f");
+            adjSlider("##o", &a.v[1], -0.5f, 0.5f, "Offset %.4f");
+            adjSlider("##g", &a.v[2], 0.01f, 9.99f, "Gamma %.2f");
+            break;
+        case ADJ_VIBRANCE:
+            adjSlider("##v", &a.v[0], -100, 100, "Vibrance %.0f", "Dull colours move most; skin tones are spared");
+            adjSlider("##s", &a.v[1], -100, 100, "Saturation %.0f");
+            break;
+        case ADJ_HUE_SATURATION: {
+            const char* rs[] = {"Master", "Reds", "Yellows", "Greens", "Cyans", "Blues", "Magentas"};
+            ImGui::BeginDisabled(a.flag);
+            ImGui::Combo("##range", &range, rs, 7);
+            ImGui::EndDisabled();
+            if (range == 0 || a.flag) {
+                adjSlider("##h", &a.v[0], a.flag ? 0.0f : -180.0f, a.flag ? 360.0f : 180.0f, "Hue %.0f");
+                adjSlider("##s", &a.v[1], a.flag ? 0.0f : -100.0f, 100, "Saturation %.0f");
+                adjSlider("##l", &a.v[2], -100, 100, "Lightness %.0f");
+            } else {
+                HueRange& r = a.ranges[range - 1];
+                adjSlider("##h", &r.hue, -180, 180, "Hue %.0f");
+                adjSlider("##s", &r.sat, -100, 100, "Saturation %.0f");
+                adjSlider("##l", &r.light, -100, 100, "Lightness %.0f");
+            }
+            if (adjCheck("Colorize", &a.flag) && a.flag) { a.v[1] = std::max(a.v[1], 25.0f); }
+            break;
+        }
+        case ADJ_COLOR_BALANCE: {
+            const char* ts[] = {"Shadows", "Midtones", "Highlights"};
+            ImGui::Combo("##tone", &tone, ts, 3);
+            adjSlider("##cr", &a.balance[tone][0], -100, 100, "Cyan %.0f Red");
+            adjSlider("##mg", &a.balance[tone][1], -100, 100, "Magenta %.0f Green");
+            adjSlider("##yb", &a.balance[tone][2], -100, 100, "Yellow %.0f Blue");
+            adjCheck("Preserve Luminosity", &a.flag);
+            break;
+        }
+        case ADJ_BLACK_WHITE: {
+            const char* ns[] = {"Reds %.0f%%", "Yellows %.0f%%", "Greens %.0f%%", "Cyans %.0f%%", "Blues %.0f%%", "Magentas %.0f%%"};
+            for (int i = 0; i < 6; ++i) { ImGui::PushID(i); adjSlider("##bw", &a.bw[i], -200, 300, ns[i]); ImGui::PopID(); }
+            adjCheck("Tint", &a.flag);
+            if (a.flag) { ImGui::SameLine(); adjColor("##tint", a.tint); }
+            break;
+        }
+        case ADJ_PHOTO_FILTER: {
+            struct P { const char* n; float c[3]; };
+            static const P presets[] = {{"Warming (85)", {0.925f, 0.541f, 0.0f}}, {"Warming (LBA)", {0.98f, 0.588f, 0.0f}}, {"Warming (81)", {0.922f, 0.694f, 0.075f}},
+                                        {"Cooling (80)", {0.0f, 0.427f, 1.0f}}, {"Cooling (LBB)", {0.0f, 0.365f, 1.0f}}, {"Cooling (82)", {0.0f, 0.71f, 1.0f}},
+                                        {"Red", {0.918f, 0.102f, 0.102f}}, {"Orange", {0.953f, 0.518f, 0.09f}}, {"Yellow", {0.976f, 0.89f, 0.11f}},
+                                        {"Green", {0.098f, 0.788f, 0.098f}}, {"Cyan", {0.114f, 0.796f, 0.918f}}, {"Blue", {0.114f, 0.208f, 0.918f}},
+                                        {"Violet", {0.608f, 0.114f, 0.918f}}, {"Magenta", {0.89f, 0.094f, 0.89f}}, {"Sepia", {0.675f, 0.478f, 0.2f}},
+                                        {"Cursed pink", {0.878f, 0.251f, 0.541f}}};
+            if (ImGui::BeginCombo("##preset", "Filter...")) {
+                for (const auto& pr : presets) if (ImGui::Selectable(pr.n)) { remember("Photo Filter"); memcpy(a.color, pr.c, sizeof a.color); changed(); }
+                ImGui::EndCombo();
+            }
+            adjColor("Colour", a.color);
+            float dens = a.v[0] * 100;
+            if (adjSlider("##d", &dens, 0, 100, "Density %.0f%%")) a.v[0] = dens / 100;
+            adjCheck("Preserve Luminosity", &a.flag);
+            break;
+        }
+        case ADJ_CHANNEL_MIXER: {
+            const char* os[] = {"Output: Red", "Output: Green", "Output: Blue"};
+            ImGui::BeginDisabled(a.flag); ImGui::Combo("##out", &outCh, os, 3); ImGui::EndDisabled();
+            const int r = a.flag ? 0 : outCh;
+            float v[4] = {a.mixer[r][0] * 100, a.mixer[r][1] * 100, a.mixer[r][2] * 100, a.mixer[r][3] * 100};
+            const char* ns[] = {"Red %.0f%%", "Green %.0f%%", "Blue %.0f%%", "Constant %.0f%%"};
+            for (int i = 0; i < 4; ++i) { ImGui::PushID(i); if (adjSlider("##m", &v[i], -200, 200, ns[i])) a.mixer[r][i] = v[i] / 100; ImGui::PopID(); }
+            if (adjCheck("Monochrome", &a.flag) && a.flag) { a.mixer[0][0] = 0.4f; a.mixer[0][1] = 0.4f; a.mixer[0][2] = 0.2f; }
+            break;
+        }
+        case ADJ_INVERT: ImGui::TextDisabled("Invert has no settings."); break;
+        case ADJ_POSTERIZE: adjSlider("##p", &a.v[0], 2, 255, "Levels %.0f"); a.v[0] = std::round(a.v[0]); break;
+        case ADJ_THRESHOLD: { float t = a.v[0] * 255; if (adjSlider("##t", &t, 1, 255, "Threshold level %.0f")) a.v[0] = std::round(t) / 255; break; }
+        case ADJ_GRADIENT_MAP: {
+            if (ImGui::BeginCombo("##gpreset", "Gradient...")) {
+                struct G { const char* n; std::vector<std::array<float, 4>> s; };
+                static const G gs[] = {{"Black, White", {{0, 0, 0, 0}, {1, 1, 1, 1}}},
+                                       {"Cursed duotone", {{0, 0.1f, 0.1f, 0.1f}, {1, 0.878f, 0.251f, 0.541f}}},
+                                       {"Sepia", {{0, 0.12f, 0.07f, 0.03f}, {0.5f, 0.6f, 0.43f, 0.26f}, {1, 1, 0.96f, 0.88f}}},
+                                       {"Infrared", {{0, 0.1f, 0.0f, 0.3f}, {0.5f, 0.9f, 0.2f, 0.4f}, {1, 1, 0.95f, 0.6f}}},
+                                       {"Teal and orange", {{0, 0.02f, 0.18f, 0.22f}, {0.5f, 0.5f, 0.5f, 0.48f}, {1, 1, 0.68f, 0.35f}}}};
+                for (const auto& g : gs) if (ImGui::Selectable(g.n)) { remember("Gradient Map"); a.stops = g.s; changed(); }
+                ImGui::EndCombo();
+            }
+            for (size_t i = 0; i < a.stops.size(); ++i) {
+                ImGui::PushID((int)i);
+                float col[3] = {a.stops[i][1], a.stops[i][2], a.stops[i][3]};
+                if (adjColor("##sc", col)) { a.stops[i][1] = col[0]; a.stops[i][2] = col[1]; a.stops[i][3] = col[2]; }
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 30);
+                float pos = a.stops[i][0] * 100;
+                if (adjSlider("##sp", &pos, 0, 100, "stop at %.0f%%")) a.stops[i][0] = pos / 100;
+                ImGui::SameLine();
+                if (a.stops.size() > 2 && ImGui::SmallButton("x")) { remember("Gradient Map"); a.stops.erase(a.stops.begin() + i); changed(); ImGui::PopID(); break; }
+                ImGui::PopID();
+            }
+            std::sort(a.stops.begin(), a.stops.end(), [](const auto& x, const auto& y) { return x[0] < y[0]; });
+            if (ImGui::Button("Add a stop", ImVec2(-1, 0))) { remember("Gradient Map"); a.stops.push_back({0.5f, 0.5f, 0.5f, 0.5f}); changed(); }
+            adjCheck("Reverse", &a.flag); ImGui::SameLine(); adjCheck("Dither", &a.flag2);
+            break;
+        }
+        case ADJ_SELECTIVE_COLOR: {
+            const char* cs[] = {"Reds", "Yellows", "Greens", "Cyans", "Blues", "Magentas", "Whites", "Neutrals", "Blacks"};
+            ImGui::Combo("##sel", &sel, cs, 9);
+            const char* ns[] = {"Cyan %.0f%%", "Magenta %.0f%%", "Yellow %.0f%%", "Black %.0f%%"};
+            for (int i = 0; i < 4; ++i) { ImGui::PushID(i); adjSlider("##sc", &a.selective[sel][i], -100, 100, ns[i]); ImGui::PopID(); }
+            bool rel = a.flag;
+            if (ImGui::RadioButton("Relative", rel)) { remember("Selective Color"); a.flag = true; changed(); }
+            ImGui::SameLine();
+            if (ImGui::RadioButton("Absolute", !rel)) { remember("Selective Color"); a.flag = false; changed(); }
+            break;
+        }
+        default: break;
+    }
+    ImGui::PopItemWidth();
+    ImGui::TextDisabled("Paint its mask to choose where it applies.");
+    ImGui::Separator();
+}
+
+static void newAdjustmentMenu() {
+    for (int k = ADJ_BRIGHTNESS_CONTRAST; k < ADJ_COUNT; ++k) {
+        if (k == ADJ_VIBRANCE || k == ADJ_BLACK_WHITE || k == ADJ_INVERT) ImGui::Separator();
+        if (ImGui::MenuItem((std::string(adjName(k)) + "...").c_str())) { remember("New " + std::string(adjName(k))); addAdjustmentLayer(doc, k); changed(); }
+    }
+}
+
 static void layersPanel(float height) {
     Layer& cur = doc.cur();
     ImGui::TextColored(col4(C_PINK), "LAYERS");
@@ -1301,9 +1517,16 @@ static void layersPanel(float height) {
         else dl->AddRect(ImVec2(a.x + 7, a.y + 17), ImVec2(a.x + 21, a.y + 31), C_LINE);
         // the layer's picture; click edits the pixels
         const ImVec2 tp(a.x + 28, a.y + 4);
-        if (i < (int)thumbs.size() && thumbs[i]) dl->AddImage((ImTextureID)(intptr_t)thumbs[i], tp, ImVec2(tp.x + 40, tp.y + 40));
+        if (l.isAdjust()) {   // Photoshop's adjustment sign: a circle, half dark, half light
+            const ImVec2 c(tp.x + 20, tp.y + 20);
+            dl->AddRectFilled(tp, ImVec2(tp.x + 40, tp.y + 40), C_WELL);
+            dl->AddCircleFilled(c, 12, C_TEXT, 32);
+            dl->PathClear(); dl->PathArcTo(c, 12, 1.5708f, 4.7124f, 24); dl->PathFillConvex(IM_COL32(0x33, 0x33, 0x33, 255));
+            dl->AddCircle(c, 12, C_TEXT, 32, 1.5f);
+        } else if (i < (int)thumbs.size() && thumbs[i]) dl->AddImage((ImTextureID)(intptr_t)thumbs[i], tp, ImVec2(tp.x + 40, tp.y + 40));
         ImGui::SetCursorScreenPos(tp);
-        if (ImGui::InvisibleButton("px", ImVec2(40, 40))) { doc.active = i; doc.editMask = false; if (showMask) { showMask = false; changed(); } }
+        if (ImGui::InvisibleButton("px", ImVec2(40, 40))) { doc.active = i; doc.editMask = l.isAdjust() && l.hasMask; if (showMask) { showMask = false; changed(); } }
+        if (l.isAdjust() && ImGui::IsItemHovered()) ImGui::SetTooltip("%s adjustment: its settings are in Properties above", adjName(l.adj.kind));
         if (active && !doc.editMask) dl->AddRect(ImVec2(tp.x - 2, tp.y - 2), ImVec2(tp.x + 42, tp.y + 42), C_PINK, 0, 0, 2);
         float nameX = tp.x + 48;
         // the mask: click edits it, Shift+click turns it off, Alt+click shows it
@@ -1325,7 +1548,7 @@ static void layersPanel(float height) {
         }
         // the name; double-click renames
         ImGui::SetCursorScreenPos(ImVec2(nameX, a.y));
-        if (ImGui::InvisibleButton("name", ImVec2(std::max(10.0f, a.x + w - nameX), h))) { doc.active = i; doc.editMask = false; }
+        if (ImGui::InvisibleButton("name", ImVec2(std::max(10.0f, a.x + w - nameX), h))) { doc.active = i; doc.editMask = l.isAdjust() && l.hasMask; }
         if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) openDlg(D_RENAME);
         dl->AddText(ImVec2(nameX, a.y + 9), l.visible ? C_TEXT : C_DIM, l.name.c_str());
         char info[64];
@@ -1342,9 +1565,11 @@ static void layersPanel(float height) {
         if (!cur.hasMask) { remember("Add Mask"); addMask(doc, doc.hasSel() ? 2 : (ImGui::GetIO().KeyAlt ? 1 : 0)); changed(); }
         else say("The layer has a mask already");
     }
+    if (btn("Adj", "New adjustment layer")) ImGui::OpenPopup("newadj");
+    if (ImGui::BeginPopup("newadj")) { newAdjustmentMenu(); ImGui::EndPopup(); }
     if (btn("Dup", "Duplicate (Ctrl+J)")) { remember("Duplicate"); duplicateLayer(doc); changed(); }
-    if (btn("Up", "Move the layer up")) { remember("Reorder"); moveLayer(doc, 1); changed(); }
-    if (btn("Down", "Move the layer down")) { remember("Reorder"); moveLayer(doc, -1); changed(); }
+    if (btn("↑", "Move the layer up")) { remember("Reorder"); moveLayer(doc, 1); changed(); }
+    if (btn("↓", "Move the layer down")) { remember("Reorder"); moveLayer(doc, -1); changed(); }
     if (btn("Merge", "Merge down (Ctrl+E)")) { remember("Merge Down"); mergeDown(doc); changed(); }
     if (btn("Del", "Delete the layer")) { remember("Delete Layer"); deleteLayer(doc); changed(); }
     ImGui::NewLine();
@@ -1405,6 +1630,7 @@ static void menus() {
         if (item("Duplicate Layer", "Ctrl+J")) { remember("Duplicate"); duplicateLayer(doc); changed(); }
         if (item("Delete Layer", nullptr, doc.layers.size() > 1)) { remember("Delete Layer"); deleteLayer(doc); changed(); }
         if (item("Rename Layer...")) openDlg(D_RENAME);
+        if (ImGui::BeginMenu("New Adjustment Layer")) { newAdjustmentMenu(); ImGui::EndMenu(); }
         if (ImGui::BeginMenu("Layer Colour")) { labelMenu(); ImGui::EndMenu(); }
         ImGui::Separator();
         if (ImGui::BeginMenu("Layer Mask")) {
@@ -1561,7 +1787,15 @@ void frame() {
     ImGui::SetNextWindowPos(ImVec2(W - rightW, top + optH)); ImGui::SetNextWindowSize(ImVec2(rightW, H - top - optH - statusH));
     ImGui::Begin("panels", nullptr, fixed);
     if (noDoc) { ImGui::SeparatorText("LAYERS"); ImGui::TextDisabled("No picture open yet."); }
-    else layersPanel(std::max(120.0f, H - top - optH - statusH - 130));
+    else {
+        float props = 0;
+        if (doc.cur().isAdjust()) {
+            const float before = ImGui::GetCursorPosY();
+            propertiesPanel();
+            props = ImGui::GetCursorPosY() - before;
+        }
+        layersPanel(std::max(120.0f, H - top - optH - statusH - 130 - props));
+    }
     ImGui::End();
 
     canvasPos = ImVec2(leftW, top + optH); canvasSize = ImVec2(W - leftW - rightW, H - top - optH - statusH);
@@ -1661,6 +1895,18 @@ void script(const std::string& what) {
     if (what == "empty") return;                             // the empty start, as it is
     noDoc = false;                                           // the scripts work on the blank document
     if (what == "about") { scriptDlg = D_ABOUT; return; }   // Help > About: the splash art
+    if (what.rfind("adjust:", 0) == 0) {
+        const int k = atoi(what.c_str() + 7);
+        addAdjustmentLayer(doc, k);
+        Adjustment& a = doc.cur().adj;
+        if (k == ADJ_HUE_SATURATION) { a.v[0] = 120; a.v[1] = 30; }
+        else if (k == ADJ_CURVES) { a.curve[0] = {0, 0, 0.25f, 0.15f, 0.75f, 0.85f, 1, 1}; }
+        else if (k == ADJ_GRADIENT_MAP) { a.stops = {{0, 0.1f, 0.1f, 0.1f}, {1, 0.878f, 0.251f, 0.541f}}; }
+        else if (k == ADJ_BRIGHTNESS_CONTRAST) { a.v[0] = 40; a.v[1] = 30; }
+        else if (k == ADJ_VIBRANCE) { a.v[0] = 80; }
+        changed();
+        return;
+    }
     if (what == "bathos") { btSource = 0; btAsk = true; bathosStart(); return; }   // Filter > Bathos > Depth Map on the picture
     if (what.rfind("mimic:", 0) == 0) { mmOpt.faces = {what.substr(6)}; mmSource = 0; mmAsk = true; mimicStart(); return; }
     // "changeling:Chronos age=0.8": that Changeling on the whole picture, as Filter > Changeling runs it
