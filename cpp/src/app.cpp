@@ -2343,6 +2343,7 @@ void script(const std::string& what) {
         return;
     }
     if (what.rfind("tab:", 0) == 0) { open(what.substr(4)); return; }
+    if (what.rfind("dlg:", 0) == 0) { scriptDlg = atoi(what.c_str() + 4); return; }   // a dialog by its number, with its starting values
     if (what.rfind("tabback:", 0) == 0) { open(what.substr(8)); switchTab(0); return; }   // and back to the first
     if (what == "bathos") { btSource = 0; btAsk = true; bathosStart(); return; }   // Filter > Bathos > Depth Map on the picture
     if (what.rfind("mimic:", 0) == 0) { mmOpt.faces = {what.substr(6)}; mmSource = 0; mmAsk = true; mimicStart(); return; }
