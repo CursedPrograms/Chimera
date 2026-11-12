@@ -442,6 +442,7 @@ static void clearSelection() {
 // ---------- dialogs (adjustments and filters with a live preview) ----------
 enum Dlg { D_NONE, D_NEW, D_IMGSIZE, D_CANVAS, D_BC, D_HS, D_BW, D_CURVES, D_LEVELS, D_GAUSS, D_BOX, D_NOISE, D_FEATHER, D_GROW, D_THRESH, D_RENAME, D_ABOUT, D_TRANSFORM, D_REFINE,
           D_UNSHARP, D_HIGHPASS, D_TWIRL, D_PINCH, D_SPHERIZE, D_WAVE, D_RIPPLE, D_POLAR, D_MOSAIC, D_EMBOSS,   // previewed filters
+          D_MOTION, D_RADIAL, D_MEDIAN, D_CRYSTAL, D_POINTIL,
           D_EXPAND, D_CONTRACT, D_SMOOTH, D_BORDER };
 static int dlg = D_NONE; static bool dlgOpen = false;
 static Doc dlgBackup; static Work dlgOrig; static bool dlgPreview = true, dlgDirty = false;
@@ -452,7 +453,7 @@ static char renameBuf[128];
 // Select and Mask: what it started from, the picture, the answer so far
 static std::vector<float> rfSrc, rfRgb, rfOut; static RefineCache rfCache;
 
-static bool needsTarget(int d) { return (d >= D_BC && d <= D_THRESH && d != D_FEATHER && d != D_GROW) || (d >= D_UNSHARP && d <= D_EMBOSS); }
+static bool needsTarget(int d) { return (d >= D_BC && d <= D_THRESH && d != D_FEATHER && d != D_GROW) || (d >= D_UNSHARP && d <= D_POINTIL); }
 
 static void openDlg(int d) {
     if (needsTarget(d) && !doc.cur().visible) { say("The layer is hidden"); }
@@ -478,6 +479,11 @@ static void openDlg(int d) {
     case D_POLAR: pi[0] = 0; break;
     case D_MOSAIC: p[0] = 10; break;
     case D_EMBOSS: p[0] = 135; p[1] = 3; p[2] = 100; break;
+    case D_MOTION: p[0] = 0; p[1] = 10; break;
+    case D_RADIAL: p[0] = 10; pi[0] = 0; pi[1] = 0; p[1] = 0.5f; p[2] = 0.5f; break;
+    case D_MEDIAN: pi[0] = 2; break;
+    case D_CRYSTAL: p[0] = 10; pi[0] = 1; break;
+    case D_POINTIL: p[0] = 6; pi[0] = 1; break;
     case D_EXPAND: case D_CONTRACT: p[0] = 4; break;
     case D_SMOOTH: pi[0] = 4; break;
     case D_BORDER: p[0] = 8; break;
@@ -613,6 +619,11 @@ static void preview() {
         case D_POLAR: fxPolar(r, fxBounds(doc, r), pi[0] == 0); break;
         case D_MOSAIC: fxMosaic(r, fxBounds(doc, r), p[0]); break;
         case D_EMBOSS: fxEmboss(r, p[0], p[1], p[2]); break;
+        case D_MOTION: fxMotionBlur(r, p[0], p[1]); break;
+        case D_RADIAL: fxRadialBlur(r, fxBounds(doc, r), p[0], pi[0] == 1, pi[1], p[1], p[2]); break;
+        case D_MEDIAN: fxMedian(r, pi[0]); break;
+        case D_CRYSTAL: fxCrystallize(r, fxBounds(doc, r), p[0], (unsigned)pi[0]); break;
+        case D_POINTIL: fxPointillize(r, fxBounds(doc, r), p[0], (unsigned)pi[0], bgc); break;
         }
     }
     putWork(doc, dlgOrig, r);
@@ -683,6 +694,7 @@ static void drawDialog() {
     const char* titles[] = {"", "New", "Image Size", "Canvas Size", "Brightness/Contrast", "Hue/Saturation", "Black & White", "Curves",
                             "Levels", "Gaussian Blur", "Box Blur", "Add Noise", "Feather Selection", "Grow / Shrink Selection", "Threshold", "Rename Layer", "About LayerTack", "Free Transform", "Select and Mask",
                             "Unsharp Mask", "High Pass", "Twirl", "Pinch", "Spherize", "Wave", "Ripple", "Polar Coordinates", "Mosaic", "Emboss",
+                            "Motion Blur", "Radial Blur", "Median", "Crystallize", "Pointillize",
                             "Expand Selection", "Contract Selection", "Smooth Selection", "Border Selection"};
     if (dlg == D_REFINE) {   // beside the canvas, so the edge stays in view
         const ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -798,6 +810,25 @@ static void drawDialog() {
         ImGui::SliderFloat("Angle", &p[0], -180, 180, "%.0f deg"); ch |= ImGui::IsItemDeactivatedAfterEdit();
         ImGui::SliderFloat("Height (px)", &p[1], 1, 10, "%.0f"); ch |= ImGui::IsItemDeactivatedAfterEdit();
         ImGui::SliderFloat("Amount (%)", &p[2], 1, 500, "%.0f"); ch |= ImGui::IsItemDeactivatedAfterEdit();
+        break;
+    case D_MOTION:
+        ImGui::SliderFloat("Angle", &p[0], -180, 180, "%.0f deg"); ch |= ImGui::IsItemDeactivatedAfterEdit();
+        ImGui::SliderFloat("Distance (px)", &p[1], 1, 2000, "%.0f", ImGuiSliderFlags_Logarithmic); ch |= ImGui::IsItemDeactivatedAfterEdit();
+        break;
+    case D_RADIAL: {
+        ImGui::SliderFloat("Amount", &p[0], 1, 100, "%.0f"); ch |= ImGui::IsItemDeactivatedAfterEdit();
+        ch |= ImGui::RadioButton("Spin", &pi[0], 0); ImGui::SameLine(); ch |= ImGui::RadioButton("Zoom", &pi[0], 1);
+        const char* q[] = {"Draft", "Good", "Best"};
+        ch |= ImGui::Combo("Quality", &pi[1], q, 3);
+        ImGui::SliderFloat("Centre across", &p[1], 0, 1, "%.2f"); ch |= ImGui::IsItemDeactivatedAfterEdit();
+        ImGui::SliderFloat("Centre down", &p[2], 0, 1, "%.2f"); ch |= ImGui::IsItemDeactivatedAfterEdit();
+        break;
+    }
+    case D_MEDIAN: ImGui::SliderInt("Radius (px)", &pi[0], 1, 100); ch |= ImGui::IsItemDeactivatedAfterEdit(); break;
+    case D_CRYSTAL: case D_POINTIL:
+        ImGui::SliderFloat("Cell size (px)", &p[0], dlg == D_CRYSTAL ? 3.0f : 3.0f, 300, "%.0f", ImGuiSliderFlags_Logarithmic); ch |= ImGui::IsItemDeactivatedAfterEdit();
+        if (ImGui::Button("Randomize")) { pi[0] = (int)(SDL_GetTicks() * 2654435761u >> 8); ch = true; }
+        if (dlg == D_POINTIL) ImGui::TextDisabled("The dots sit on the background colour.");
         break;
     case D_EXPAND: ImGui::SliderFloat("Expand by (px)", &p[0], 1, 500, "%.0f", ImGuiSliderFlags_Logarithmic); break;
     case D_CONTRACT: ImGui::SliderFloat("Contract by (px)", &p[0], 1, 500, "%.0f", ImGuiSliderFlags_Logarithmic); break;
@@ -1986,6 +2017,8 @@ static void menus() {
             if (item("Average")) { remember("Average"); Work o = getWork(doc), r = o; filterAverage(doc, r); putWork(doc, o, r); changed(); }
             if (item("Box Blur...")) openDlg(D_BOX);
             if (item("Gaussian Blur...")) openDlg(D_GAUSS);
+            if (item("Motion Blur...")) openDlg(D_MOTION);
+            if (item("Radial Blur...")) openDlg(D_RADIAL);
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Distort")) {
@@ -1997,8 +2030,24 @@ static void menus() {
             if (item("Wave...")) openDlg(D_WAVE);
             ImGui::EndMenu();
         }
-        if (ImGui::BeginMenu("Noise")) { if (item("Add Noise...")) openDlg(D_NOISE); ImGui::EndMenu(); }
-        if (ImGui::BeginMenu("Pixelate")) { if (item("Mosaic...")) openDlg(D_MOSAIC); ImGui::EndMenu(); }
+        if (ImGui::BeginMenu("Noise")) { if (item("Add Noise...")) openDlg(D_NOISE); if (item("Median...")) openDlg(D_MEDIAN); ImGui::EndMenu(); }
+        if (ImGui::BeginMenu("Pixelate")) {
+            if (item("Crystallize...")) openDlg(D_CRYSTAL);
+            if (item("Mosaic...")) openDlg(D_MOSAIC);
+            if (item("Pointillize...")) openDlg(D_POINTIL);
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Render")) {
+            // between the foreground and background colours, new every time
+            const bool diff = item("Difference Clouds");
+            if (item("Clouds") || diff) {
+                remember(diff ? "Difference Clouds" : "Clouds");
+                Work o = getWork(doc), r = o;
+                fxClouds(r, fxBounds(doc, r), fg, bgc, SDL_GetTicks() * 2654435761u, diff);
+                putWork(doc, o, r); changed();
+            }
+            ImGui::EndMenu();
+        }
         if (ImGui::BeginMenu("Sharpen")) { if (item("Unsharp Mask...")) openDlg(D_UNSHARP); ImGui::EndMenu(); }
         if (ImGui::BeginMenu("Stylize")) {
             if (item("Emboss...")) openDlg(D_EMBOSS);

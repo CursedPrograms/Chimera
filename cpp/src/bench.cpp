@@ -39,6 +39,13 @@ int main(int argc, char** argv) {
         run("emboss", [](Work& w, FxBox) { fxEmboss(w, 135, 3, 200); });
         run("findedges", [](Work& w, FxBox) { fxFindEdges(w); });
         run("solarize", [](Work& w, FxBox) { fxSolarize(w); });
+        run("motion", [](Work& w, FxBox) { fxMotionBlur(w, 20, 60); });
+        run("radialspin", [](Work& w, FxBox b) { fxRadialBlur(w, b, 15, false, 1, 0.5f, 0.5f); });
+        run("radialzoom", [](Work& w, FxBox b) { fxRadialBlur(w, b, 30, true, 1, 0.5f, 0.5f); });
+        run("median", [](Work& w, FxBox) { fxMedian(w, 8); });
+        run("clouds", [](Work& w, FxBox b) { const uint8_t f[3] = {224, 64, 138}, k[3] = {26, 26, 26}; fxClouds(w, b, f, k, 5, false); });
+        run("crystallize", [](Work& w, FxBox b) { fxCrystallize(w, b, 18, 1); });
+        run("pointillize", [](Work& w, FxBox b) { const uint8_t k[3] = {255, 255, 255}; fxPointillize(w, b, 8, 1, k); });
         // Select > Modify on an ellipse, timed
         Doc e = d; e.sel = shapeEllipse(e, e.w / 4, e.h / 4, e.w * 3 / 4, e.h * 3 / 4);
         auto t1 = std::chrono::steady_clock::now();

@@ -31,3 +31,11 @@ void selExpand(Doc& d, float px);
 void selContract(Doc& d, float px);
 void selSmooth(Doc& d, int radius);
 void selBorder(Doc& d, float width);
+
+// ---- Blur, Noise, Render, Pixelate (fx2.cpp)
+void fxMotionBlur(Work& w, float angle, float distance);                       // degrees, px
+void fxRadialBlur(Work& w, FxBox b, float amount, bool zoom, int quality, float cx, float cy);   // amount 1..100; quality 0 draft, 1 good, 2 best; centre 0..1 of the box
+void fxMedian(Work& w, int radius);
+void fxClouds(Work& w, FxBox b, const uint8_t fg[3], const uint8_t bg[3], unsigned seed, bool difference);
+void fxCrystallize(Work& w, FxBox b, float cell, unsigned seed);
+void fxPointillize(Work& w, FxBox b, float cell, unsigned seed, const uint8_t bg[3]);
