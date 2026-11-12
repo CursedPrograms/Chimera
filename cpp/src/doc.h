@@ -66,8 +66,8 @@ void moveLayer(Doc& d, int dir);                 // +1 up, -1 down
 void mergeDown(Doc& d);
 void mergeVisible(Doc& d);
 void flatten(Doc& d);
-void expandToCanvas(Doc& d, Layer& l);
-void addAdjustmentLayer(Doc& d, int kind);       // above the active one: canvas-sized, a white mask (from the selection if any)           // grow a layer to cover the whole canvas (keeps its pixels)
+void expandToCanvas(Doc& d, Layer& l);           // grow a layer to cover the whole canvas (keeps its pixels)
+void addAdjustmentLayer(Doc& d, int kind);       // above the active one: canvas-sized, a white mask (from the selection if any)
 
 // ---- masks: the heart of it
 void addMask(Doc& d, int how);                   // 0 reveal all, 1 hide all, 2 from the selection

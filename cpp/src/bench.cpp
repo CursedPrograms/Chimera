@@ -1,6 +1,7 @@
 // LayerTack - a timing check of the operations (not shipped): ltbench picture.png
 #include "doc.h"
 #include "ops.h"
+#include "refine.h"
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -13,6 +14,25 @@ int main(int argc, char** argv) {
     auto t0 = std::chrono::steady_clock::now();
     auto tick = [&](const char* n) { auto t1 = std::chrono::steady_clock::now(); printf("%-14s %7.1f ms\n", n, std::chrono::duration<double, std::milli>(t1 - t0).count()); t0 = t1; };
     printf("%d x %d\n", d.w, d.h);
+    if (argc > 2 && std::string(argv[2]) == "refine") {
+        // Select and Mask on an ellipse round the middle: the time of each stage, and nothing outside 0..1
+        Image comp; composite(d, comp, {0, 0, d.w, d.h}, false);
+        std::vector<float> rgb((size_t)d.w * d.h * 3), m((size_t)d.w * d.h);
+        for (size_t i = 0; i < m.size(); ++i) for (int c = 0; c < 3; ++c) rgb[i * 3 + c] = comp.px[i * 4 + c] / 255.0f;
+        for (int y = 0; y < d.h; ++y) for (int x = 0; x < d.w; ++x) { const float u = (x - d.w / 2.0f) / (d.w * 0.3f), v = (y - d.h / 2.0f) / (d.h * 0.4f); m[(size_t)y * d.w + x] = u * u + v * v < 1 ? 1.0f : 0.0f; }
+        tick("setup");
+        RefineCache cache; RefineParams rp; rp.radius = 12; rp.smart = true;
+        auto a1 = refineMask(rgb, m, d.w, d.h, rp, &cache); tick("edge r12 smart");
+        rp.feather = 40; rp.smooth = 30; rp.contrast = 20; rp.shift = -30;
+        auto a2 = refineMask(rgb, m, d.w, d.h, rp, &cache); tick("cached + rest");
+        rp.radius = 120; rp.smart = false;
+        auto a3 = refineMask(rgb, m, d.w, d.h, rp, &cache); tick("edge r120");
+        decontaminate(comp.px.data(), a3, d.w, d.h, 120, 80); tick("decontaminate");
+        int bad = 0; size_t soft = 0;
+        for (auto* a : {&a1, &a2, &a3}) for (float v : *a) { bad += !(v >= 0 && v <= 1); soft += v > 0.02f && v < 0.98f; }
+        printf("soft pixels %zu, out of range %d\n", soft, bad);
+        return bad ? 1 : 0;
+    }
     if (argc > 3 && std::string(argv[2]) == "adj") {
         // every adjustment kind: through a .ltk project and back, the same picture; merged down, the same picture
         auto diff = [](const Doc& a, const Doc& b) {

@@ -2,6 +2,7 @@
 // The usual image editor layout, in the Changeling greys with the Cursed pink.
 #include "app.h"
 #include "blend.h"
+#include "refine.h"
 #include "bathos.h"
 #include "mimicplug.h"
 #include "changeling.h"
@@ -357,13 +358,15 @@ static void clearSelection() {
 }
 
 // ---------- dialogs (adjustments and filters with a live preview) ----------
-enum Dlg { D_NONE, D_NEW, D_IMGSIZE, D_CANVAS, D_BC, D_HS, D_BW, D_CURVES, D_LEVELS, D_GAUSS, D_BOX, D_NOISE, D_FEATHER, D_GROW, D_THRESH, D_RENAME, D_ABOUT, D_TRANSFORM };
+enum Dlg { D_NONE, D_NEW, D_IMGSIZE, D_CANVAS, D_BC, D_HS, D_BW, D_CURVES, D_LEVELS, D_GAUSS, D_BOX, D_NOISE, D_FEATHER, D_GROW, D_THRESH, D_RENAME, D_ABOUT, D_TRANSFORM, D_REFINE };
 static int dlg = D_NONE; static bool dlgOpen = false;
 static Doc dlgBackup; static Work dlgOrig; static bool dlgPreview = true, dlgDirty = false;
 static float p[8]; static bool pb[3]; static int pi[4];
 static float bwW[6] = {40, 60, 40, 60, 20, 80}; static float bwTint[3] = {0.88f, 0.69f, 0.5f};
 static std::vector<float> cx[4], cy[4]; static int curveCh = 0, curveDrag = -1;
 static char renameBuf[128];
+// Select and Mask: what it started from, the picture, the answer so far
+static std::vector<float> rfSrc, rfRgb, rfOut; static RefineCache rfCache;
 
 static bool needsTarget(int d) { return d >= D_BC && d <= D_THRESH && d != D_FEATHER && d != D_GROW; }
 
@@ -386,13 +389,103 @@ static void openDlg(int d) {
     case D_BW: { const float def[6] = {40, 60, 40, 60, 20, 80}; memcpy(bwW, def, sizeof def); break; }
     case D_RENAME: snprintf(renameBuf, sizeof renameBuf, "%s", doc.cur().name.c_str()); break;
     case D_TRANSFORM: pi[0] = pi[1] = 100; pb[0] = true; p[0] = 0; dlgBackup = doc; break;
+    case D_REFINE: {
+        const Layer& l = doc.cur();
+        rfSrc.assign((size_t)doc.w * doc.h, 0.0f);
+        if (doc.hasSel()) { for (size_t i = 0; i < rfSrc.size(); ++i) rfSrc[i] = doc.sel[i] / 255.0f; pi[1] = 0; }
+        else if (l.hasMask) {
+            for (int y = 0; y < doc.h; ++y)
+                for (int x = 0; x < doc.w; ++x) {
+                    const int lx = x - l.x, ly = y - l.y;
+                    if (lx >= 0 && ly >= 0 && lx < l.img.w && ly < l.img.h) rfSrc[(size_t)y * doc.w + x] = l.mask[(size_t)ly * l.img.w + lx] / 255.0f;
+                }
+            pi[1] = 1;
+        } else { say("Select something first (Select > Subject is a good start), or give the layer a mask"); dlgOpen = false; dlg = D_NONE; return; }
+        Image comp; composite(doc, comp, {0, 0, doc.w, doc.h}, false);
+        rfRgb.resize((size_t)doc.w * doc.h * 3);
+        for (size_t i = 0; i < (size_t)doc.w * doc.h; ++i) for (int c = 0; c < 3; ++c) rfRgb[i * 3 + c] = comp.px[i * 4 + c] / 255.0f;
+        rfCache = RefineCache();
+        p[0] = 8; pb[0] = true; p[5] = 50; pi[0] = 0;
+        dlgBackup = doc;
+        break;
+    }
     default: break;
     }
     if (needsTarget(d)) { dlgBackup = doc; dlgOrig = getWork(doc); }
     ImGui::OpenPopup("dlg");
 }
 
+static RefineParams refineParams() { RefineParams r; r.radius = p[0]; r.smart = pb[0]; r.smooth = p[1]; r.feather = p[2]; r.contrast = p[3]; r.shift = p[4]; return r; }
+
+// the coverage made into a layer's mask (layer coordinates)
+static void maskFromCanvas(Layer& l, const std::vector<float>& a) {
+    if (!l.hasMask) { l.mask.assign((size_t)l.img.w * l.img.h, 255); l.hasMask = true; l.maskOn = true; }
+    for (int y = 0; y < l.img.h; ++y)
+        for (int x = 0; x < l.img.w; ++x) {
+            const int cx = x + l.x, cy = y + l.y;
+            l.mask[(size_t)y * l.img.w + x] = cx >= 0 && cy >= 0 && cx < doc.w && cy < doc.h ? to8(a[(size_t)cy * doc.w + cx]) : 0;
+        }
+}
+
+static void refinePreview() {
+    rfOut = refineMask(rfRgb, rfSrc, doc.w, doc.h, refineParams(), &rfCache);
+    doc = dlgBackup;
+    if (dlgPreview) {
+        // the view: 0 overlay (red where it's out), 1 on black, 2 on white, 3 black & white, 4 on transparency
+        Layer v = emptyLayer(doc, "Select and Mask");
+        const int view = pi[0];
+        std::vector<uint8_t> cut;
+        if (view == 4) { cut.assign((size_t)doc.w * doc.h * 4, 0); for (size_t i = 0; i < cut.size() / 4; ++i) for (int c = 0; c < 3; ++c) cut[i * 4 + c] = to8(rfRgb[i * 3 + c]); }
+        if (view == 4 && pb[1]) decontaminate(cut.data(), rfOut, doc.w, doc.h, p[0], p[5]);
+        for (int y = 0; y < doc.h; ++y)
+            for (int x = 0; x < doc.w; ++x) {
+                const size_t i = (size_t)y * doc.w + x;
+                const float a = rfOut[i];
+                uint8_t* o = v.img.at(x, y);
+                const float* c = &rfRgb[i * 3];
+                o[3] = 255;
+                switch (view) {
+                case 0: for (int k = 0; k < 3; ++k) { const float red = k == 0 ? 1.0f : 0.0f; o[k] = to8(c[k] * a + (c[k] * 0.5f + red * 0.5f) * (1 - a)); } break;
+                case 1: for (int k = 0; k < 3; ++k) o[k] = to8(c[k] * a); break;
+                case 2: for (int k = 0; k < 3; ++k) o[k] = to8(c[k] * a + (1 - a)); break;
+                case 3: o[0] = o[1] = o[2] = to8(a); break;
+                default: memcpy(o, &cut[i * 4], 3); o[3] = to8(a); break;
+                }
+            }
+        if (view == 4) for (auto& l : doc.layers) l.visible = false;
+        addLayer(doc, std::move(v));
+        doc.editMask = false;
+    }
+    changed();
+}
+
+// OK: the answer goes where Output To says
+static void refineApply() {
+    doc = dlgBackup;
+    int out = pi[1];
+    if (pb[1] && out < 2) out = 3;                 // clean colours need pixels of their own (as Photoshop)
+    if (out == 0) { doc.sel.resize((size_t)doc.w * doc.h); for (size_t i = 0; i < rfOut.size(); ++i) doc.sel[i] = to8(rfOut[i]); selChanged(); }
+    else if (out == 1) { maskFromCanvas(doc.cur(), rfOut); doc.editMask = false; }
+    else {
+        Layer l = doc.cur();
+        if (l.isAdjust()) { say("Pick a layer with pixels for a new layer"); return; }
+        expandToCanvas(doc, l);
+        if (l.hasMask) { for (size_t i = 0; i < l.mask.size(); ++i) l.img.px[i * 4 + 3] = (uint8_t)(l.img.px[i * 4 + 3] * l.mask[i] / 255); l.hasMask = false; l.mask.clear(); }
+        if (pb[1]) decontaminate(l.img.px.data(), rfOut, doc.w, doc.h, p[0], p[5]);
+        l.name = doc.cur().name + (out == 3 ? " (masked)" : " (cut out)");
+        if (out == 2) { for (size_t i = 0; i < rfOut.size(); ++i) l.img.px[i * 4 + 3] = (uint8_t)(l.img.px[i * 4 + 3] * to8(rfOut[i]) / 255); }
+        else { maskFromCanvas(l, rfOut); }
+        doc.cur().visible = false;               // the original stays, hidden, as Photoshop leaves it
+        addLayer(doc, std::move(l));
+        if (out == 3) doc.sel.clear();
+        selChanged();
+    }
+    hist.push(dlgBackup, "Select and Mask");
+    changed();
+}
+
 static void preview() {
+    if (dlg == D_REFINE) { refinePreview(); return; }
     if (dlg == D_TRANSFORM) {
         // from the layer as it was, every time
         doc.layers[doc.active] = dlgBackup.layers[doc.active];
@@ -420,6 +513,10 @@ static void preview() {
 }
 
 static void closeDlg(bool ok) {
+    if (dlg == D_REFINE) {
+        if (!ok) { doc = dlgBackup; changed(); }
+        dlgBackup = Doc(); rfSrc.clear(); rfRgb.clear(); rfOut.clear(); rfCache = RefineCache();
+    }
     if (dlg == D_TRANSFORM) {
         if (ok) hist.push(dlgBackup, "Free Transform");
         else { doc.layers[doc.active] = dlgBackup.layers[doc.active]; changed(); }
@@ -477,8 +574,13 @@ static void curvesWidget() {
 static void drawDialog() {
     if (!dlgOpen) return;
     const char* titles[] = {"", "New", "Image Size", "Canvas Size", "Brightness/Contrast", "Hue/Saturation", "Black & White", "Curves",
-                            "Levels", "Gaussian Blur", "Box Blur", "Add Noise", "Feather Selection", "Grow / Shrink Selection", "Threshold", "Rename Layer", "About LayerTack", "Free Transform"};
-    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+                            "Levels", "Gaussian Blur", "Box Blur", "Add Noise", "Feather Selection", "Grow / Shrink Selection", "Threshold", "Rename Layer", "About LayerTack", "Free Transform", "Select and Mask"};
+    if (dlg == D_REFINE) {   // beside the canvas, so the edge stays in view
+        const ImGuiViewport* vp = ImGui::GetMainViewport();
+        ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + vp->Size.x - 340, vp->Pos.y + 90), ImGuiCond_Appearing, ImVec2(1, 0));
+    } else ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    static const ImVec4 dim = ImGui::GetStyleColorVec4(ImGuiCol_ModalWindowDimBg);
+    ImGui::GetStyle().Colors[ImGuiCol_ModalWindowDimBg] = dlg == D_REFINE ? ImVec4(0, 0, 0, 0) : dim;   // no dimming over the edge being judged
     if (!ImGui::BeginPopupModal("dlg", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) return;
     ImGui::PushStyleColor(ImGuiCol_Text, col4(C_PINK));
     ImGui::TextUnformatted(titles[dlg]);
@@ -550,6 +652,29 @@ static void drawDialog() {
     case D_FEATHER: ImGui::SliderFloat("Radius (px)", &p[0], 0.1f, 250, "%.1f", ImGuiSliderFlags_Logarithmic); break;
     case D_GROW: ImGui::SliderInt("Pixels (- shrinks)", &pi[0], -100, 100); break;
     case D_THRESH: ch |= ImGui::SliderFloat("Level", &p[0], 1, 255, "%.0f"); break;
+    case D_REFINE: {
+        const char* views[] = {"Overlay", "On Black", "On White", "Black & White", "On Layers"};
+        ch |= ImGui::Combo("View", &pi[0], views, 5);
+        ImGui::TextDisabled("EDGE DETECTION");
+        ImGui::SliderFloat("Radius (px)", &p[0], 0, 250, "%.1f", ImGuiSliderFlags_Logarithmic); ch |= ImGui::IsItemDeactivatedAfterEdit();
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("How far from the edge the picture decides: wide for hair and fur");
+        ch |= ImGui::Checkbox("Smart Radius", &pb[0]);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("The band follows the picture: narrow on hard edges, wide on soft ones");
+        ImGui::TextDisabled("GLOBAL REFINEMENTS");
+        ch |= ImGui::SliderFloat("Smooth", &p[1], 0, 100, "%.0f");
+        ch |= ImGui::SliderFloat("Feather (px)", &p[2], 0, 250, "%.1f", ImGuiSliderFlags_Logarithmic);
+        ch |= ImGui::SliderFloat("Contrast (%)", &p[3], 0, 100, "%.0f");
+        ch |= ImGui::SliderFloat("Shift Edge (%)", &p[4], -100, 100, "%.0f");
+        ImGui::TextDisabled("OUTPUT");
+        ch |= ImGui::Checkbox("Decontaminate Colors", &pb[1]);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Takes the old background's colour out of the soft edge (makes a new layer)");
+        if (pb[1]) ch |= ImGui::SliderFloat("Amount (%)", &p[5], 0, 100, "%.0f");
+        const char* outs[] = {"Selection", "Layer Mask", "New Layer", "New Layer with Layer Mask"};
+        if (pb[1] && pi[1] < 2) pi[1] = 3;
+        ImGui::Combo("Output To", &pi[1], outs, 4);
+        if (ImGui::Checkbox("Preview", &dlgPreview)) ch = true;
+        break;
+    }
     case D_TRANSFORM:
         ImGui::SliderInt(pb[0] ? "Scale (%)" : "Width (%)", &pi[0], 1, 400); ch |= ImGui::IsItemDeactivatedAfterEdit();
         if (!pb[0]) { ImGui::SliderInt("Height (%)", &pi[1], 1, 400); ch |= ImGui::IsItemDeactivatedAfterEdit(); }
@@ -582,6 +707,7 @@ static void drawDialog() {
         case D_FEATHER: remember("Feather"); featherSel(doc, p[0]); selChanged(); break;
         case D_GROW: remember(pi[0] > 0 ? "Grow" : "Shrink"); growSel(doc, pi[0]); selChanged(); break;
         case D_RENAME: remember("Rename"); doc.cur().name = renameBuf; break;
+        case D_REFINE: refineApply(); break;
         }
         closeDlg(true);
     }
@@ -1114,7 +1240,7 @@ static void drawCanvas() {
     // marching ants
     if (antsVersion != selVersion) { ants = selOutline(doc); antsVersion = selVersion; }
     const int phase = (int)(now() * 8);
-    for (size_t i = 0; i + 3 < ants.size(); i += 4) {
+    for (size_t i = 0; dlg != D_REFINE && i + 3 < ants.size(); i += 4) {   // (Select and Mask shows the edge itself)
         const ImVec2 p0 = toScreen((float)ants[i], (float)ants[i + 1]), p1 = toScreen((float)ants[i + 2], (float)ants[i + 3]);
         const bool on = (((ants[i] + ants[i + 1]) / 4 + phase) & 1) != 0;
         dl->AddLine(p0, p1, on ? IM_COL32(255, 255, 255, 255) : IM_COL32(0, 0, 0, 255), 1.0f);
@@ -1686,6 +1812,7 @@ static void menus() {
         ImGui::Separator();
         if (item("Feather...", "Shift+F6", doc.hasSel())) openDlg(D_FEATHER);
         if (item("Grow / Shrink...", nullptr, doc.hasSel())) openDlg(D_GROW);
+        if (item("Select and Mask...", "Alt+Ctrl+R", doc.hasSel() || doc.cur().hasMask)) openDlg(D_REFINE);
         if (item("Load from Mask / Transparency")) { remember("Load Selection"); selectionFromMask(doc); selChanged(); }
         ImGui::EndMenu();
     }
@@ -1739,6 +1866,7 @@ static void keys() {
         else if (k(ImGuiKey_I)) { if (shift) { remember("Inverse"); invertSel(doc); selChanged(); } else if (alt) openDlg(D_IMGSIZE); else { remember("Invert"); Work o = getWork(doc), r = o; adjInvert(r); putWork(doc, o, r); changed(); } }
         else if (k(ImGuiKey_C) && alt) openDlg(D_CANVAS);
         else if (k(ImGuiKey_T)) openDlg(D_TRANSFORM);
+        else if (k(ImGuiKey_R) && alt) { if (doc.hasSel() || doc.cur().hasMask) openDlg(D_REFINE); }
         else if (k(ImGuiKey_J)) { remember("Duplicate"); duplicateLayer(doc); changed(); }
         else if (k(ImGuiKey_E)) { if (shift) { remember("Merge Visible"); mergeVisible(doc); } else { remember("Merge Down"); mergeDown(doc); } changed(); }
         else if (k(ImGuiKey_M)) openDlg(D_CURVES);
@@ -1784,11 +1912,12 @@ static void keys() {
 
 // ---------- the frame ----------
 static int scriptDlg = D_NONE;                  // a dialog a --capture script asked for: opened inside the next frame
+static int scriptView = 0;                       // and Select and Mask's view, for it
 
 void frame() {
     ImGuiIO& io = ImGui::GetIO();
     const float W = io.DisplaySize.x, H = io.DisplaySize.y;
-    if (scriptDlg != D_NONE) { openDlg(scriptDlg); scriptDlg = D_NONE; }
+    if (scriptDlg != D_NONE) { openDlg(scriptDlg); if (dlg == D_REFINE) { pi[0] = scriptView; p[0] = 12; } scriptDlg = D_NONE; }
     menus();
     const float top = ImGui::GetFrameHeight(), optH = 38, statusH = 26, leftW = 50, rightW = 310;
     const ImGuiWindowFlags fixed = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus;
@@ -1923,6 +2052,12 @@ void script(const std::string& what) {
         else if (k == ADJ_BRIGHTNESS_CONTRAST) { a.v[0] = 40; a.v[1] = 30; }
         else if (k == ADJ_VIBRANCE) { a.v[0] = 80; }
         changed();
+        return;
+    }
+    if (what.rfind("refine", 0) == 0) {   // "refine" or "refine:<view>"
+        selectSubject(false);
+        scriptDlg = D_REFINE;
+        scriptView = what.size() > 7 ? atoi(what.c_str() + 7) : 0;
         return;
     }
     if (what == "bathos") { btSource = 0; btAsk = true; bathosStart(); return; }   // Filter > Bathos > Depth Map on the picture
