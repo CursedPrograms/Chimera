@@ -2,6 +2,7 @@
 #include "doc.h"
 #include "ops.h"
 #include "refine.h"
+#include "fx.h"
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
@@ -14,6 +15,39 @@ int main(int argc, char** argv) {
     auto t0 = std::chrono::steady_clock::now();
     auto tick = [&](const char* n) { auto t1 = std::chrono::steady_clock::now(); printf("%-14s %7.1f ms\n", n, std::chrono::duration<double, std::milli>(t1 - t0).count()); t0 = t1; };
     printf("%d x %d\n", d.w, d.h);
+    if (argc > 3 && std::string(argv[2]) == "fx") {
+        // every Sharpen / Distort / Stylize filter once, timed, saved as <dir>/fx_<name>.jpg
+        auto run = [&](const char* name, auto f) {
+            Doc e = d; Work o = getWork(e), r = o;
+            auto t1 = std::chrono::steady_clock::now();
+            f(r, fxBounds(e, r));
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count();
+            putWork(e, o, r);
+            std::string out = std::string(argv[3]) + "/fx_" + name + ".jpg";
+            if (!saveImage(e, out, err)) printf("%s\n", err.c_str());
+            printf("%-12s %7.1f ms\n", name, ms);
+        };
+        run("unsharp", [](Work& w, FxBox) { fxUnsharp(w, 200, 3, 0); });
+        run("highpass", [](Work& w, FxBox) { fxHighPass(w, 8); });
+        run("twirl", [](Work& w, FxBox b) { fxTwirl(w, b, 120); });
+        run("pinch", [](Work& w, FxBox b) { fxPinch(w, b, 80); });
+        run("spherize", [](Work& w, FxBox b) { fxSpherize(w, b, 100, 0); });
+        run("wave", [](Work& w, FxBox b) { fxWave(w, b, 5, 10, 120, 5, 35, 0, 1); });
+        run("ripple", [](Work& w, FxBox b) { fxRipple(w, b, 300, 1); });
+        run("polar", [](Work& w, FxBox b) { fxPolar(w, b, true); });
+        run("mosaic", [](Work& w, FxBox b) { fxMosaic(w, b, 24); });
+        run("emboss", [](Work& w, FxBox) { fxEmboss(w, 135, 3, 200); });
+        run("findedges", [](Work& w, FxBox) { fxFindEdges(w); });
+        run("solarize", [](Work& w, FxBox) { fxSolarize(w); });
+        // Select > Modify on an ellipse, timed
+        Doc e = d; e.sel = shapeEllipse(e, e.w / 4, e.h / 4, e.w * 3 / 4, e.h * 3 / 4);
+        auto t1 = std::chrono::steady_clock::now();
+        selExpand(e, 100); selContract(e, 50); selSmooth(e, 20); selBorder(e, 30);
+        printf("%-12s %7.1f ms\n", "sel modify", std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t1).count());
+        int any = 0; for (uint8_t v : e.sel) any += v > 128;
+        printf("border pixels %d\n", any);
+        return 0;
+    }
     if (argc > 2 && std::string(argv[2]) == "refine") {
         // Select and Mask on an ellipse round the middle: the time of each stage, and nothing outside 0..1
         Image comp; composite(d, comp, {0, 0, d.w, d.h}, false);

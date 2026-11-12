@@ -28,3 +28,6 @@ std::vector<float> refineMask(const std::vector<float>& rgb, const std::vector<f
 // fringe pixels (soft alpha) move towards the colour of nearby fully covered ones, by amount 0..100.
 // rgba: 8-bit straight, canvas-sized.
 void decontaminate(uint8_t* rgba, const std::vector<float>& alpha, int w, int h, float radius, float amount);
+
+// how far each pixel is from the nearest seed pixel (exact Euclidean distance; seeds are 0)
+std::vector<float> distanceTo(const std::vector<uint8_t>& seed, int w, int h);

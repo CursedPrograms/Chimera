@@ -3,6 +3,7 @@
 #include "app.h"
 #include "blend.h"
 #include "refine.h"
+#include "fx.h"
 #include "bathos.h"
 #include "mimicplug.h"
 #include "changeling.h"
@@ -439,7 +440,9 @@ static void clearSelection() {
 }
 
 // ---------- dialogs (adjustments and filters with a live preview) ----------
-enum Dlg { D_NONE, D_NEW, D_IMGSIZE, D_CANVAS, D_BC, D_HS, D_BW, D_CURVES, D_LEVELS, D_GAUSS, D_BOX, D_NOISE, D_FEATHER, D_GROW, D_THRESH, D_RENAME, D_ABOUT, D_TRANSFORM, D_REFINE };
+enum Dlg { D_NONE, D_NEW, D_IMGSIZE, D_CANVAS, D_BC, D_HS, D_BW, D_CURVES, D_LEVELS, D_GAUSS, D_BOX, D_NOISE, D_FEATHER, D_GROW, D_THRESH, D_RENAME, D_ABOUT, D_TRANSFORM, D_REFINE,
+          D_UNSHARP, D_HIGHPASS, D_TWIRL, D_PINCH, D_SPHERIZE, D_WAVE, D_RIPPLE, D_POLAR, D_MOSAIC, D_EMBOSS,   // previewed filters
+          D_EXPAND, D_CONTRACT, D_SMOOTH, D_BORDER };
 static int dlg = D_NONE; static bool dlgOpen = false;
 static Doc dlgBackup; static Work dlgOrig; static bool dlgPreview = true, dlgDirty = false;
 static float p[8]; static bool pb[3]; static int pi[4];
@@ -449,7 +452,7 @@ static char renameBuf[128];
 // Select and Mask: what it started from, the picture, the answer so far
 static std::vector<float> rfSrc, rfRgb, rfOut; static RefineCache rfCache;
 
-static bool needsTarget(int d) { return d >= D_BC && d <= D_THRESH && d != D_FEATHER && d != D_GROW; }
+static bool needsTarget(int d) { return (d >= D_BC && d <= D_THRESH && d != D_FEATHER && d != D_GROW) || (d >= D_UNSHARP && d <= D_EMBOSS); }
 
 static void openDlg(int d) {
     if (needsTarget(d) && !doc.cur().visible) { say("The layer is hidden"); }
@@ -465,6 +468,19 @@ static void openDlg(int d) {
     case D_FEATHER: p[0] = 8; break;
     case D_GROW: pi[0] = 4; break;
     case D_THRESH: p[0] = 128; break;
+    case D_UNSHARP: p[0] = 100; p[1] = 2; p[2] = 0; break;
+    case D_HIGHPASS: p[0] = 10; break;
+    case D_TWIRL: p[0] = 50; break;
+    case D_PINCH: p[0] = 50; break;
+    case D_SPHERIZE: p[0] = 100; pi[0] = 0; break;
+    case D_WAVE: pi[0] = 5; p[0] = 10; p[1] = 120; p[2] = 5; p[3] = 35; pi[1] = 0; pi[2] = 1; break;
+    case D_RIPPLE: p[0] = 100; pi[0] = 1; break;
+    case D_POLAR: pi[0] = 0; break;
+    case D_MOSAIC: p[0] = 10; break;
+    case D_EMBOSS: p[0] = 135; p[1] = 3; p[2] = 100; break;
+    case D_EXPAND: case D_CONTRACT: p[0] = 4; break;
+    case D_SMOOTH: pi[0] = 4; break;
+    case D_BORDER: p[0] = 8; break;
     case D_LEVELS: p[0] = 0; p[1] = 255; p[2] = 1; p[3] = 0; p[4] = 255; break;
     case D_CURVES: for (int c = 0; c < 4; ++c) { cx[c] = {0, 1}; cy[c] = {0, 1}; } curveCh = 0; break;
     case D_BW: { const float def[6] = {40, 60, 40, 60, 20, 80}; memcpy(bwW, def, sizeof def); break; }
@@ -587,6 +603,16 @@ static void preview() {
         case D_BOX: filterBoxBlur(r, (int)p[0]); break;
         case D_NOISE: filterAddNoise(r, p[0], pb[0], pb[1], 1234); break;
         case D_THRESH: adjThreshold(r, p[0] / 255); break;
+        case D_UNSHARP: fxUnsharp(r, p[0], p[1], p[2]); break;
+        case D_HIGHPASS: fxHighPass(r, p[0]); break;
+        case D_TWIRL: fxTwirl(r, fxBounds(doc, r), p[0]); break;
+        case D_PINCH: fxPinch(r, fxBounds(doc, r), p[0]); break;
+        case D_SPHERIZE: fxSpherize(r, fxBounds(doc, r), p[0], pi[0]); break;
+        case D_WAVE: fxWave(r, fxBounds(doc, r), pi[0], p[0], p[1], p[2], p[3], pi[1], (unsigned)pi[2]); break;
+        case D_RIPPLE: fxRipple(r, fxBounds(doc, r), p[0], pi[0]); break;
+        case D_POLAR: fxPolar(r, fxBounds(doc, r), pi[0] == 0); break;
+        case D_MOSAIC: fxMosaic(r, fxBounds(doc, r), p[0]); break;
+        case D_EMBOSS: fxEmboss(r, p[0], p[1], p[2]); break;
         }
     }
     putWork(doc, dlgOrig, r);
@@ -655,7 +681,9 @@ static void curvesWidget() {
 static void drawDialog() {
     if (!dlgOpen) return;
     const char* titles[] = {"", "New", "Image Size", "Canvas Size", "Brightness/Contrast", "Hue/Saturation", "Black & White", "Curves",
-                            "Levels", "Gaussian Blur", "Box Blur", "Add Noise", "Feather Selection", "Grow / Shrink Selection", "Threshold", "Rename Layer", "About LayerTack", "Free Transform", "Select and Mask"};
+                            "Levels", "Gaussian Blur", "Box Blur", "Add Noise", "Feather Selection", "Grow / Shrink Selection", "Threshold", "Rename Layer", "About LayerTack", "Free Transform", "Select and Mask",
+                            "Unsharp Mask", "High Pass", "Twirl", "Pinch", "Spherize", "Wave", "Ripple", "Polar Coordinates", "Mosaic", "Emboss",
+                            "Expand Selection", "Contract Selection", "Smooth Selection", "Border Selection"};
     if (dlg == D_REFINE) {   // beside the canvas, so the edge stays in view
         const ImGuiViewport* vp = ImGui::GetMainViewport();
         ImGui::SetNextWindowPos(ImVec2(vp->Pos.x + vp->Size.x - 340, vp->Pos.y + 90), ImGuiCond_Appearing, ImVec2(1, 0));
@@ -733,6 +761,48 @@ static void drawDialog() {
     case D_FEATHER: ImGui::SliderFloat("Radius (px)", &p[0], 0.1f, 250, "%.1f", ImGuiSliderFlags_Logarithmic); break;
     case D_GROW: ImGui::SliderInt("Pixels (- shrinks)", &pi[0], -100, 100); break;
     case D_THRESH: ch |= ImGui::SliderFloat("Level", &p[0], 1, 255, "%.0f"); break;
+    case D_UNSHARP:
+        ImGui::SliderFloat("Amount (%)", &p[0], 1, 500, "%.0f"); ch |= ImGui::IsItemDeactivatedAfterEdit();
+        ImGui::SliderFloat("Radius (px)", &p[1], 0.1f, 250, "%.1f", ImGuiSliderFlags_Logarithmic); ch |= ImGui::IsItemDeactivatedAfterEdit();
+        ImGui::SliderFloat("Threshold (levels)", &p[2], 0, 255, "%.0f"); ch |= ImGui::IsItemDeactivatedAfterEdit();
+        break;
+    case D_HIGHPASS: ImGui::SliderFloat("Radius (px)", &p[0], 0.1f, 250, "%.1f", ImGuiSliderFlags_Logarithmic); ch |= ImGui::IsItemDeactivatedAfterEdit(); break;
+    case D_TWIRL: ImGui::SliderFloat("Angle", &p[0], -999, 999, "%.0f deg"); ch |= ImGui::IsItemDeactivatedAfterEdit(); break;
+    case D_PINCH: ImGui::SliderFloat("Amount (%)", &p[0], -100, 100, "%.0f"); ch |= ImGui::IsItemDeactivatedAfterEdit(); break;
+    case D_SPHERIZE: {
+        ImGui::SliderFloat("Amount (%)", &p[0], -100, 100, "%.0f"); ch |= ImGui::IsItemDeactivatedAfterEdit();
+        const char* modes[] = {"Normal", "Horizontal only", "Vertical only"};
+        ch |= ImGui::Combo("Mode", &pi[0], modes, 3);
+        break;
+    }
+    case D_WAVE: {
+        ImGui::SliderInt("Generators", &pi[0], 1, 64); ch |= ImGui::IsItemDeactivatedAfterEdit();
+        ImGui::SliderFloat("Wavelength min", &p[0], 1, 998, "%.0f"); ch |= ImGui::IsItemDeactivatedAfterEdit();
+        ImGui::SliderFloat("Wavelength max", &p[1], 2, 999, "%.0f"); ch |= ImGui::IsItemDeactivatedAfterEdit();
+        ImGui::SliderFloat("Amplitude min", &p[2], 0, 998, "%.0f"); ch |= ImGui::IsItemDeactivatedAfterEdit();
+        ImGui::SliderFloat("Amplitude max", &p[3], 1, 999, "%.0f"); ch |= ImGui::IsItemDeactivatedAfterEdit();
+        const char* types[] = {"Sine", "Triangle", "Square"};
+        ch |= ImGui::Combo("Type", &pi[1], types, 3);
+        if (ImGui::Button("Randomize")) { pi[2] = (int)(SDL_GetTicks() * 2654435761u >> 8); ch = true; }
+        break;
+    }
+    case D_RIPPLE: {
+        ImGui::SliderFloat("Amount (%)", &p[0], -999, 999, "%.0f"); ch |= ImGui::IsItemDeactivatedAfterEdit();
+        const char* sizes[] = {"Small", "Medium", "Large"};
+        ch |= ImGui::Combo("Size", &pi[0], sizes, 3);
+        break;
+    }
+    case D_POLAR: ch |= ImGui::RadioButton("Rectangular to Polar", &pi[0], 0); ch |= ImGui::RadioButton("Polar to Rectangular", &pi[0], 1); break;
+    case D_MOSAIC: ImGui::SliderFloat("Cell size (px)", &p[0], 2, 200, "%.0f", ImGuiSliderFlags_Logarithmic); ch |= ImGui::IsItemDeactivatedAfterEdit(); break;
+    case D_EMBOSS:
+        ImGui::SliderFloat("Angle", &p[0], -180, 180, "%.0f deg"); ch |= ImGui::IsItemDeactivatedAfterEdit();
+        ImGui::SliderFloat("Height (px)", &p[1], 1, 10, "%.0f"); ch |= ImGui::IsItemDeactivatedAfterEdit();
+        ImGui::SliderFloat("Amount (%)", &p[2], 1, 500, "%.0f"); ch |= ImGui::IsItemDeactivatedAfterEdit();
+        break;
+    case D_EXPAND: ImGui::SliderFloat("Expand by (px)", &p[0], 1, 500, "%.0f", ImGuiSliderFlags_Logarithmic); break;
+    case D_CONTRACT: ImGui::SliderFloat("Contract by (px)", &p[0], 1, 500, "%.0f", ImGuiSliderFlags_Logarithmic); break;
+    case D_SMOOTH: ImGui::SliderInt("Sample radius (px)", &pi[0], 1, 500); break;
+    case D_BORDER: ImGui::SliderFloat("Width (px)", &p[0], 1, 200, "%.0f", ImGuiSliderFlags_Logarithmic); break;
     case D_REFINE: {
         const char* views[] = {"Overlay", "On Black", "On White", "Black & White", "On Layers"};
         ch |= ImGui::Combo("View", &pi[0], views, 5);
@@ -786,7 +856,11 @@ static void drawDialog() {
         case D_IMGSIZE: if (pi[0] > 0 && pi[1] > 0 && pi[0] <= 16384 && pi[1] <= 16384) { remember("Image Size"); resizeImage(doc, pi[0], pi[1]); changed(); selChanged(); fitNext = true; } break;
         case D_CANVAS: if (pi[0] > 0 && pi[1] > 0 && pi[0] <= 16384 && pi[1] <= 16384) { remember("Canvas Size"); resizeCanvas(doc, pi[0], pi[1], pi[2], pi[3]); changed(); selChanged(); fitNext = true; } break;
         case D_FEATHER: remember("Feather"); featherSel(doc, p[0]); selChanged(); break;
-        case D_GROW: remember(pi[0] > 0 ? "Grow" : "Shrink"); growSel(doc, pi[0]); selChanged(); break;
+        case D_GROW: remember(pi[0] > 0 ? "Grow" : "Shrink"); if (pi[0] > 0) selExpand(doc, (float)pi[0]); else selContract(doc, (float)-pi[0]); selChanged(); break;
+        case D_EXPAND: remember("Expand"); selExpand(doc, p[0]); selChanged(); break;
+        case D_CONTRACT: remember("Contract"); selContract(doc, p[0]); selChanged(); break;
+        case D_SMOOTH: remember("Smooth"); selSmooth(doc, pi[0]); selChanged(); break;
+        case D_BORDER: remember("Border"); selBorder(doc, p[0]); selChanged(); break;
         case D_RENAME: remember("Rename"); doc.cur().name = renameBuf; break;
         case D_REFINE: refineApply(); break;
         }
@@ -1895,6 +1969,14 @@ static void menus() {
         ImGui::Separator();
         if (item("Feather...", "Shift+F6", doc.hasSel())) openDlg(D_FEATHER);
         if (item("Grow / Shrink...", nullptr, doc.hasSel())) openDlg(D_GROW);
+        if (ImGui::BeginMenu("Modify", doc.hasSel())) {
+            if (item("Border...")) openDlg(D_BORDER);
+            if (item("Smooth...")) openDlg(D_SMOOTH);
+            if (item("Expand...")) openDlg(D_EXPAND);
+            if (item("Contract...")) openDlg(D_CONTRACT);
+            if (item("Feather...", "Shift+F6")) openDlg(D_FEATHER);
+            ImGui::EndMenu();
+        }
         if (item("Select and Mask...", "Alt+Ctrl+R", doc.hasSel() || doc.cur().hasMask)) openDlg(D_REFINE);
         if (item("Load from Mask / Transparency")) { remember("Load Selection"); selectionFromMask(doc); selChanged(); }
         ImGui::EndMenu();
@@ -1906,7 +1988,25 @@ static void menus() {
             if (item("Gaussian Blur...")) openDlg(D_GAUSS);
             ImGui::EndMenu();
         }
+        if (ImGui::BeginMenu("Distort")) {
+            if (item("Pinch...")) openDlg(D_PINCH);
+            if (item("Polar Coordinates...")) openDlg(D_POLAR);
+            if (item("Ripple...")) openDlg(D_RIPPLE);
+            if (item("Spherize...")) openDlg(D_SPHERIZE);
+            if (item("Twirl...")) openDlg(D_TWIRL);
+            if (item("Wave...")) openDlg(D_WAVE);
+            ImGui::EndMenu();
+        }
         if (ImGui::BeginMenu("Noise")) { if (item("Add Noise...")) openDlg(D_NOISE); ImGui::EndMenu(); }
+        if (ImGui::BeginMenu("Pixelate")) { if (item("Mosaic...")) openDlg(D_MOSAIC); ImGui::EndMenu(); }
+        if (ImGui::BeginMenu("Sharpen")) { if (item("Unsharp Mask...")) openDlg(D_UNSHARP); ImGui::EndMenu(); }
+        if (ImGui::BeginMenu("Stylize")) {
+            if (item("Emboss...")) openDlg(D_EMBOSS);
+            if (item("Find Edges")) { remember("Find Edges"); Work o = getWork(doc), r = o; fxFindEdges(r); putWork(doc, o, r); changed(); }
+            if (item("Solarize")) { remember("Solarize"); Work o = getWork(doc), r = o; fxSolarize(r); putWork(doc, o, r); changed(); }
+            ImGui::EndMenu();
+        }
+        if (ImGui::BeginMenu("Other")) { if (item("High Pass...")) openDlg(D_HIGHPASS); ImGui::EndMenu(); }
         ImGui::Separator();
         if (ImGui::BeginMenu("Changeling")) { changelingMenu(); ImGui::EndMenu(); }
         if (ImGui::BeginMenu("Bathos")) { bathosMenu(); ImGui::EndMenu(); }

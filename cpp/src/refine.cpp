@@ -342,3 +342,5 @@ void decontaminate(uint8_t* rgba, const std::vector<float>& alpha, int w, int h,
             }
         }
 }
+
+std::vector<float> distanceTo(const std::vector<uint8_t>& seed, int w, int h) { return edt(seed, w, h); }
