@@ -450,6 +450,8 @@ static float p[8]; static bool pb[3]; static int pi[4];
 static float bwW[6] = {40, 60, 40, 60, 20, 80}; static float bwTint[3] = {0.88f, 0.69f, 0.5f};
 static std::vector<float> cx[4], cy[4]; static int curveCh = 0, curveDrag = -1;
 static char renameBuf[128];
+static bool scriptOk = false;
+static bool dlgOpening = false;                    // a --capture script presses OK
 // Select and Mask: what it started from, the picture, the answer so far
 static std::vector<float> rfSrc, rfRgb, rfOut; static RefineCache rfCache;
 
@@ -515,7 +517,7 @@ static void openDlg(int d) {
     default: break;
     }
     if (needsTarget(d)) { dlgBackup = doc; dlgOrig = getWork(doc); }
-    ImGui::OpenPopup("dlg");
+    dlgOpening = true;                           // opened by drawDialog: a popup opened inside a menu gets the menu's ID and never shows
 }
 
 static RefineParams refineParams() { RefineParams r; r.radius = p[0]; r.smart = pb[0]; r.smooth = p[1]; r.feather = p[2]; r.contrast = p[3]; r.shift = p[4]; return r; }
@@ -691,6 +693,7 @@ static void curvesWidget() {
 
 static void drawDialog() {
     if (!dlgOpen) return;
+    if (dlgOpening) { ImGui::OpenPopup("dlg"); dlgOpening = false; }
     const char* titles[] = {"", "New", "Image Size", "Canvas Size", "Brightness/Contrast", "Hue/Saturation", "Black & White", "Curves",
                             "Levels", "Gaussian Blur", "Box Blur", "Add Noise", "Feather Selection", "Grow / Shrink Selection", "Threshold", "Rename Layer", "About LayerTack", "Free Transform", "Select and Mask",
                             "Unsharp Mask", "High Pass", "Twirl", "Pinch", "Spherize", "Wave", "Ripple", "Polar Coordinates", "Mosaic", "Emboss",
@@ -881,7 +884,8 @@ static void drawDialog() {
     if (needsTarget(dlg)) { if (ImGui::Checkbox("Preview", &dlgPreview)) ch = true; }
     if (ch || dlgDirty) { dlgDirty = false; preview(); }
     ImGui::Separator();
-    if (ImGui::Button("OK", ImVec2(110, 0)) || ImGui::IsKeyPressed(ImGuiKey_Enter) && dlg != D_RENAME) {
+    if (ImGui::Button("OK", ImVec2(110, 0)) || (ImGui::IsKeyPressed(ImGuiKey_Enter) && dlg != D_RENAME) || scriptOk) {
+        scriptOk = false;
         switch (dlg) {
         case D_NEW: if (pi[0] > 0 && pi[1] > 0 && pi[0] <= 16384 && pi[1] <= 16384) { newTab(); doc = newDoc(pi[0], pi[1], pb[0]); fresh(); setTitle(); } break;
         case D_IMGSIZE: if (pi[0] > 0 && pi[1] > 0 && pi[0] <= 16384 && pi[1] <= 16384) { remember("Image Size"); resizeImage(doc, pi[0], pi[1]); changed(); selChanged(); fitNext = true; } break;
@@ -2146,12 +2150,13 @@ static void keys() {
 
 // ---------- the frame ----------
 static int scriptDlg = D_NONE;                  // a dialog a --capture script asked for: opened inside the next frame
+static int scriptSize[2] = {0, 0};   // size: the sizes (then OK is pressed for it)
 static int scriptView = 0;                       // and Select and Mask's view, for it
 
 void frame() {
     ImGuiIO& io = ImGui::GetIO();
     const float W = io.DisplaySize.x, H = io.DisplaySize.y;
-    if (scriptDlg != D_NONE) { openDlg(scriptDlg); if (dlg == D_REFINE) { pi[0] = scriptView; p[0] = 12; } scriptDlg = D_NONE; }
+    if (scriptDlg != D_NONE) { openDlg(scriptDlg); if (dlg == D_REFINE) { pi[0] = scriptView; p[0] = 12; } if (scriptSize[0] > 0) { pi[0] = scriptSize[0]; pi[1] = scriptSize[1]; scriptSize[0] = 0; scriptOk = true; } scriptDlg = D_NONE; }
     menus();
     const float top = ImGui::GetFrameHeight(), optH = 38, statusH = 26, leftW = 50, rightW = 310;
     const ImGuiWindowFlags fixed = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus;
@@ -2268,7 +2273,9 @@ void frame() {
         if (ImGui::Button("Cancel", ImVec2(90, 0))) ImGui::CloseCurrentPopup();
         ImGui::EndPopup();
     }
-    if (tabClose >= 0) { ImGui::OpenPopup("close?"); }
+    static int tabAsked = -1;
+    if (tabClose >= 0 && tabAsked != tabClose) { ImGui::OpenPopup("close?"); }
+    tabAsked = tabClose;
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     if (ImGui::BeginPopupModal("close?", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
         ImGui::Text("Save the changes to %s first?", tabName(curTab).c_str());
@@ -2344,6 +2351,7 @@ void script(const std::string& what) {
     }
     if (what.rfind("tab:", 0) == 0) { open(what.substr(4)); return; }
     if (what.rfind("dlg:", 0) == 0) { scriptDlg = atoi(what.c_str() + 4); return; }   // a dialog by its number, with its starting values
+    if (what.rfind("size:", 0) == 0) { int w = 0, h = 0, c = 0; sscanf(what.c_str() + 5, "%d,%d,%d", &w, &h, &c); scriptDlg = c ? D_CANVAS : D_IMGSIZE; scriptSize[0] = w; scriptSize[1] = h; return; }   // Image (or Canvas) Size to w x h, as its OK does
     if (what.rfind("tabback:", 0) == 0) { open(what.substr(8)); switchTab(0); return; }   // and back to the first
     if (what == "bathos") { btSource = 0; btAsk = true; bathosStart(); return; }   // Filter > Bathos > Depth Map on the picture
     if (what.rfind("mimic:", 0) == 0) { mmOpt.faces = {what.substr(6)}; mmSource = 0; mmAsk = true; mimicStart(); return; }
