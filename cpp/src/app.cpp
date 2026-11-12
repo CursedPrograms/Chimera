@@ -183,6 +183,23 @@ static void makeThumb(GLuint& t, const Layer& l, bool mask) {
     else { glBindTexture(GL_TEXTURE_2D, t); glPixelStorei(GL_UNPACK_ROW_LENGTH, 0); glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, S, S, GL_RGBA, GL_UNSIGNED_BYTE, px.data()); }
 }
 
+// painting a mask: the colours go black and white (as Photoshop and PhotoCraft do), and come back for the pixels
+static void maskColours() {
+    static bool was = false;
+    static uint8_t keepFg[4], keepBg[4];
+    const bool on = doc.editMask && !doc.layers.empty() && doc.cur().hasMask;
+    if (on && !was) {
+        memcpy(keepFg, fg, 4); memcpy(keepBg, bgc, 4);
+        const bool grey = fg[0] == fg[1] && fg[1] == fg[2] && bgc[0] == bgc[1] && bgc[1] == bgc[2];
+        if (!grey) { memset(fg, 255, 3); memset(bgc, 0, 3); }   // white reveals first; X swaps to black
+    } else if (!on && was) {
+        memcpy(fg, keepFg, 4); memcpy(bgc, keepBg, 4);
+    }
+    if (on)   // a colour picked while on the mask counts as its grey
+        for (uint8_t* c : {fg, bgc}) { const uint8_t g = (uint8_t)((c[0] * 299 + c[1] * 587 + c[2] * 114) / 1000); c[0] = c[1] = c[2] = g; }
+    was = on;
+}
+
 static void updateThumbs() {
     if (thumbVersion == docVersion || (thumbs.size() == doc.layers.size() && now() - thumbAt < 0.25)) return;   // new or removed layers: at once
     thumbVersion = docVersion; thumbAt = now();
@@ -1844,6 +1861,7 @@ void frame() {
     drawBathos();
     drawMimic();
     updateThumbs();
+    maskColours();
 
     // unsaved changes on the way out
     if (askQuit) { ImGui::OpenPopup("quit?"); askQuit = false; }
