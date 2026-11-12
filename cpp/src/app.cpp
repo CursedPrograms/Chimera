@@ -126,6 +126,81 @@ static double now() { return SDL_GetTicks() / 1000.0; }
 static void say(const std::string& s) { toast = s; toastUntil = now() + 5; }
 static void changed(Rect r = {0, 0, 1 << 30, 1 << 30}) { dirty = dirty.unite(r.clip(doc.w, doc.h)); docVersion++; doc.dirty = true; }
 static void selChanged() { selVersion++; }
+
+// ---------- document tabs ----------
+struct Tab {
+    int id = 0;                                  // ImGui's name for it (indices move when tabs close)
+    Doc doc; History hist; bool noDoc = true;
+    float zoom = 1; ImVec2 origin; bool showMask = false; bool fit = true;
+};
+static int tabIds = 1;
+static std::vector<Tab> tabs(1, Tab{1});                 // tabs[curTab] is empty while it's the active one
+static int curTab = 0, tabPick = -1, tabClose = -1;   // tabPick: ImGui has to be told which tab shows; tabClose: asked first
+static bool jobRunning();
+static void setTitle();
+
+static void stashTab() {
+    Tab& t = tabs[curTab];
+    t.doc = std::move(doc); t.hist = std::move(hist); t.noDoc = noDoc;
+    t.zoom = zoom; t.origin = origin; t.showMask = showMask; t.fit = fitNext;
+    doc = Doc(); hist = History();
+}
+
+static void loadTab(int i) {
+    curTab = i;
+    Tab& t = tabs[i];
+    doc = std::move(t.doc); hist = std::move(t.hist); noDoc = t.noDoc;
+    zoom = t.zoom; origin = t.origin; showMask = t.showMask; fitNext = t.fit;
+    const int id = t.id; t = Tab(); t.id = id; t.noDoc = false;
+    dirty = {0, 0, doc.w, doc.h}; texW = -1;
+    docVersion++; selVersion++; thumbVersion = -1; antsVersion = -1;
+    lasso.clear(); poly.clear(); stroke = Stroke(); dragging = panning = false;
+    tabPick = i;
+    setTitle();
+}
+
+static bool switchTab(int i) {
+    if (i == curTab || i < 0 || i >= (int)tabs.size()) return false;
+    if (jobRunning()) { say("Wait for the filter to finish: its result goes to this picture"); tabPick = curTab; return false; }
+    stashTab();
+    loadTab(i);
+    return true;
+}
+
+// a new tab for a picture coming in (the empty start is used as it is)
+static void newTab() {
+    if (noDoc) return;
+    stashTab();
+    Tab t; t.id = ++tabIds;
+    tabs.push_back(std::move(t));
+    loadTab((int)tabs.size() - 1);
+}
+
+static void closeTab(int i) {
+    if (i != curTab && !switchTab(i)) return;
+    if (tabs.size() == 1) {                      // the last one: back to the empty start
+        doc = newDoc(1600, 1000, true); hist = History(); noDoc = true;
+        dirty = {0, 0, doc.w, doc.h}; texW = -1; docVersion++; selVersion++; thumbVersion = -1; fitNext = true;
+        setTitle();
+        return;
+    }
+    tabs.erase(tabs.begin() + i);
+    curTab = -1;
+    loadTab(std::min(i, (int)tabs.size() - 1));
+}
+
+static void askCloseTab(int i) {
+    const bool unsaved = i == curTab ? doc.dirty && hist.canUndo() : tabs[i].doc.dirty && tabs[i].hist.canUndo();
+    if (jobRunning() && i == curTab) { say("Wait for the filter to finish first"); return; }
+    if (unsaved) { if (i != curTab && !switchTab(i)) return; tabClose = i; } else closeTab(i);
+}
+
+static std::string tabName(int i) {
+    const Doc& d = i == curTab ? doc : tabs[i].doc;
+    const bool empty = i == curTab ? noDoc : tabs[i].noDoc;
+    if (empty) return "Start";
+    return (d.path.empty() ? std::string("Untitled") : u8path(d.path).filename().u8string()) + (d.dirty ? " *" : "");
+}
 static void remember(const std::string& what) { hist.push(doc, what); }
 
 // ---------- GL textures ----------
@@ -202,7 +277,7 @@ static void maskColours() {
 }
 
 static void updateThumbs() {
-    if (thumbVersion == docVersion || (thumbs.size() == doc.layers.size() && now() - thumbAt < 0.25)) return;   // new or removed layers: at once
+    if (thumbVersion == docVersion || (thumbVersion >= 0 && thumbs.size() == doc.layers.size() && now() - thumbAt < 0.25)) return;   // new or removed layers: at once
     thumbVersion = docVersion; thumbAt = now();
     thumbs.resize(doc.layers.size(), 0); mthumbs.resize(doc.layers.size(), 0);
     for (size_t i = 0; i < doc.layers.size(); ++i) {
@@ -268,7 +343,13 @@ static void fresh() {
 bool open(const std::string& path) {
     std::string err;
     Doc d;
+    if (!noDoc && jobRunning()) { say("Wait for the filter to finish, then open it"); return false; }
     if (!openDoc(path, d, err)) { say(err); return false; }
+    for (int i = 0; i < (int)tabs.size(); ++i) {   // already open: just go there
+        const std::string& tp = i == curTab ? doc.path : tabs[i].doc.path;
+        if (!tp.empty() && tp == path && (i == curTab ? !noDoc : !tabs[i].noDoc)) { switchTab(i); return true; }
+    }
+    newTab();
     doc = std::move(d);
     fresh();
     setTitle();
@@ -701,7 +782,7 @@ static void drawDialog() {
     ImGui::Separator();
     if (ImGui::Button("OK", ImVec2(110, 0)) || ImGui::IsKeyPressed(ImGuiKey_Enter) && dlg != D_RENAME) {
         switch (dlg) {
-        case D_NEW: if (pi[0] > 0 && pi[1] > 0 && pi[0] <= 16384 && pi[1] <= 16384) { doc = newDoc(pi[0], pi[1], pb[0]); fresh(); setTitle(); } break;
+        case D_NEW: if (pi[0] > 0 && pi[1] > 0 && pi[0] <= 16384 && pi[1] <= 16384) { newTab(); doc = newDoc(pi[0], pi[1], pb[0]); fresh(); setTitle(); } break;
         case D_IMGSIZE: if (pi[0] > 0 && pi[1] > 0 && pi[0] <= 16384 && pi[1] <= 16384) { remember("Image Size"); resizeImage(doc, pi[0], pi[1]); changed(); selChanged(); fitNext = true; } break;
         case D_CANVAS: if (pi[0] > 0 && pi[1] > 0 && pi[0] <= 16384 && pi[1] <= 16384) { remember("Canvas Size"); resizeCanvas(doc, pi[0], pi[1], pi[2], pi[3]); changed(); selChanged(); fitNext = true; } break;
         case D_FEATHER: remember("Feather"); featherSel(doc, p[0]); selChanged(); break;
@@ -1733,6 +1814,8 @@ static void menus() {
         if (item("Save Project As...", nullptr, !noDoc)) saveAs(true);
         if (item("Export PNG / JPG...", "Ctrl+Shift+S", !noDoc)) saveAs(false);
         ImGui::Separator();
+        if (item("Close", "Ctrl+W", !noDoc || tabs.size() > 1)) askCloseTab(curTab);
+        ImGui::Separator();
         if (item("Quit", "Ctrl+Q")) requestQuit();
         ImGui::EndMenu();
     }
@@ -1861,6 +1944,8 @@ static void keys() {
         else if (k(ImGuiKey_O)) { const std::string p = fileDialog(false, OPEN_FILTER, nullptr, ""); if (!p.empty()) { if (shift) placeAsLayer(p); else open(p); } }
         else if (k(ImGuiKey_S)) { if (shift) saveAs(false); else save(); }
         else if (k(ImGuiKey_Q)) requestQuit();
+        else if (k(ImGuiKey_W)) askCloseTab(curTab);
+        else if (k(ImGuiKey_Tab)) switchTab((curTab + (shift ? (int)tabs.size() - 1 : 1)) % (int)tabs.size());
         else if (k(ImGuiKey_A)) { remember("Select All"); selectAll(); }
         else if (k(ImGuiKey_D)) { remember("Deselect"); deselect(); }
         else if (k(ImGuiKey_I)) { if (shift) { remember("Inverse"); invertSel(doc); selChanged(); } else if (alt) openDlg(D_IMGSIZE); else { remember("Invert"); Work o = getWork(doc), r = o; adjInvert(r); putWork(doc, o, r); changed(); } }
@@ -1944,7 +2029,37 @@ void frame() {
     }
     ImGui::End();
 
-    canvasPos = ImVec2(leftW, top + optH); canvasSize = ImVec2(W - leftW - rightW, H - top - optH - statusH);
+    const float tabH = 26;
+    ImGui::SetNextWindowPos(ImVec2(leftW, top + optH)); ImGui::SetNextWindowSize(ImVec2(W - leftW - rightW, tabH));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(4, 3));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, col4(C_BG));
+    ImGui::PushStyleColor(ImGuiCol_Tab, col4(C_PANEL));
+    ImGui::PushStyleColor(ImGuiCol_TabActive, col4(C_LINE));
+    ImGui::PushStyleColor(ImGuiCol_TabHovered, col4(C_DEEP));
+    ImGui::PushStyleColor(ImGuiCol_TabUnfocusedActive, col4(C_LINE));
+    ImGui::Begin("doctabs", nullptr, fixed | ImGuiWindowFlags_NoScrollbar);
+    if (ImGui::BeginTabBar("docs", ImGuiTabBarFlags_FittingPolicyScroll | ImGuiTabBarFlags_NoTooltip)) {
+        int pick = -1;
+        for (int i = 0; i < (int)tabs.size(); ++i) {
+            bool open = true;
+            const std::string label = tabName(i) + "###doc" + std::to_string(tabs[i].id);
+            const ImGuiTabItemFlags f = tabPick == i ? ImGuiTabItemFlags_SetSelected : 0;
+            if (ImGui::BeginTabItem(label.c_str(), &open, f)) { if (i != curTab && tabPick < 0) pick = i; ImGui::EndTabItem(); }
+            if (ImGui::IsItemHovered()) {
+                const Doc& d = i == curTab ? doc : tabs[i].doc;
+                if (!(i == curTab ? noDoc : tabs[i].noDoc)) ImGui::SetTooltip("%s\n%d x %d", d.path.empty() ? "Not saved yet" : d.path.c_str(), d.w, d.h);
+            }
+            if (!open) { askCloseTab(i); break; }
+        }
+        tabPick = -1;
+        if (pick >= 0) switchTab(pick);
+        ImGui::EndTabBar();
+    }
+    ImGui::End();
+    ImGui::PopStyleColor(5);
+    ImGui::PopStyleVar();
+
+    canvasPos = ImVec2(leftW, top + optH + tabH); canvasSize = ImVec2(W - leftW - rightW, H - top - optH - statusH - tabH);
     if (fitNext && canvasSize.x > 50) { fit(); fitNext = false; }
     ImGui::SetNextWindowPos(canvasPos); ImGui::SetNextWindowSize(canvasSize);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
@@ -1996,12 +2111,23 @@ void frame() {
     if (askQuit) { ImGui::OpenPopup("quit?"); askQuit = false; }
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     if (ImGui::BeginPopupModal("quit?", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
-        ImGui::Text("Save the changes first?");
-        if (ImGui::Button("Save", ImVec2(90, 0))) { save(); if (!doc.dirty) quit = true; ImGui::CloseCurrentPopup(); }
+        ImGui::Text("Save the changes to %s first?", tabName(curTab).c_str());
+        if (ImGui::Button("Save", ImVec2(90, 0))) { save(); if (!doc.dirty) requestQuit(); ImGui::CloseCurrentPopup(); }
         ImGui::SameLine();
-        if (ImGui::Button("Don't save", ImVec2(90, 0))) { quit = true; ImGui::CloseCurrentPopup(); }
+        if (ImGui::Button("Don't save", ImVec2(90, 0))) { doc.dirty = false; hist = History(); requestQuit(); ImGui::CloseCurrentPopup(); }
         ImGui::SameLine();
         if (ImGui::Button("Cancel", ImVec2(90, 0))) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+    if (tabClose >= 0) { ImGui::OpenPopup("close?"); }
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (ImGui::BeginPopupModal("close?", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) {
+        ImGui::Text("Save the changes to %s first?", tabName(curTab).c_str());
+        if (ImGui::Button("Save", ImVec2(90, 0))) { save(); if (!doc.dirty) closeTab(curTab); tabClose = -1; ImGui::CloseCurrentPopup(); }
+        ImGui::SameLine();
+        if (ImGui::Button("Don't save", ImVec2(90, 0))) { closeTab(curTab); tabClose = -1; ImGui::CloseCurrentPopup(); }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(90, 0))) { tabClose = -1; ImGui::CloseCurrentPopup(); }
         ImGui::EndPopup();
     }
     static bool wasDirty = false;
@@ -2009,7 +2135,13 @@ void frame() {
 }
 
 bool wantsQuit() { return quit; }
-void requestQuit() { if (doc.dirty && hist.canUndo()) askQuit = true; else quit = true; }
+void requestQuit() {
+    // the first unsaved picture is shown and asked about; when none is left, LayerTack closes
+    if (doc.dirty && hist.canUndo()) { askQuit = true; return; }
+    for (int i = 0; i < (int)tabs.size(); ++i)
+        if (i != curTab && tabs[i].doc.dirty && tabs[i].hist.canUndo()) { if (switchTab(i)) askQuit = true; return; }
+    quit = true;
+}
 
 void init(SDL_Window* win, const std::string& prefDir, void (*status)(const char* what, float progress)) {
     auto step = [status](const char* what, float progress) { if (status) status(what, progress); };
@@ -2036,7 +2168,8 @@ void init(SDL_Window* win, const std::string& prefDir, void (*status)(const char
 }
 
 // --capture: a scripted session so the README's screenshot shows the real thing
-bool busy() { return !clOut.empty() || !btOut.empty() || !mmRun.out.empty() || Changeling::stepsLoading(); }
+static bool jobRunning() { return !clOut.empty() || !btOut.empty() || !mmRun.out.empty(); }
+bool busy() { return jobRunning() || Changeling::stepsLoading(); }
 
 void script(const std::string& what) {
     if (what == "empty") return;                             // the empty start, as it is
@@ -2060,6 +2193,8 @@ void script(const std::string& what) {
         scriptView = what.size() > 7 ? atoi(what.c_str() + 7) : 0;
         return;
     }
+    if (what.rfind("tab:", 0) == 0) { open(what.substr(4)); return; }
+    if (what.rfind("tabback:", 0) == 0) { open(what.substr(8)); switchTab(0); return; }   // and back to the first
     if (what == "bathos") { btSource = 0; btAsk = true; bathosStart(); return; }   // Filter > Bathos > Depth Map on the picture
     if (what.rfind("mimic:", 0) == 0) { mmOpt.faces = {what.substr(6)}; mmSource = 0; mmAsk = true; mimicStart(); return; }
     // "changeling:Chronos age=0.8": that Changeling on the whole picture, as Filter > Changeling runs it
