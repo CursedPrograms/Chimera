@@ -9,9 +9,16 @@ crates/doc/src/adjust.rs and crates/algo/src/matting.rs), licensed
 MIT OR Apache-2.0.
 Copyright (c) the PhotoCraft contributors.
 
+The tool strip (cpp/src/toolbar.cpp) follows PhotoCraft's toolbar
+(crates/ui-egui/src/panels/toolbar.rs: its sections, slots, flyouts and keys).
+Its icons (cpp/assets/icons) are PhotoCraft's: Lucide icons (ISC, Lucide Icons
+and Contributors, https://github.com/lucide-icons/lucide; licence in
+cpp/assets/icons/LICENSE-lucide.txt) and PhotoCraft's own (MIT OR Apache-2.0).
+
 Third-party code built into LayerTack:
 - Dear ImGui (MIT), https://github.com/ocornut/imgui
 - SDL2 (zlib), https://www.libsdl.org
 - stb_image, stb_image_write (MIT / public domain), https://github.com/nothings/stb
+- nanosvg (zlib), https://github.com/memononen/nanosvg, draws the tool icons
 - ONNX Runtime (MIT), https://github.com/microsoft/onnxruntime, loaded at run time
 - U2-Net-p (Apache-2.0), https://github.com/xuebinqin/U-2-Net, downloaded on first use of Select Subject

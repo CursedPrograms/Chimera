@@ -9,6 +9,7 @@
 #include "changeling.h"
 #include "segment.h"
 #include "splash.h"
+#include "toolbar.h"
 #include "util.h"
 
 #include <SDL.h>
@@ -102,9 +103,10 @@ static bool showMask = false;                    // Alt-click on a mask: see it 
 static bool quit = false, askQuit = false;
 static std::string toast; static double toastUntil = 0;
 
-enum Tool { T_MOVE, T_RECT, T_ELLIPSE, T_LASSO, T_POLY, T_WAND, T_BRUSH, T_ERASER, T_BUCKET, T_DROPPER, T_HAND, T_COUNT };
+enum Tool { T_MOVE, T_RECT, T_ELLIPSE, T_LASSO, T_POLY, T_WAND, T_BRUSH, T_ERASER, T_BUCKET, T_DROPPER, T_HAND, T_COUNT,
+            T_NONE = T_COUNT };   // T_NONE: a tool on the strip LayerTack doesn't have yet
 static int tool = T_BRUSH;
-static uint8_t fg[4] = {224, 64, 138, 255}, bgc[4] = {255, 255, 255, 255};
+static uint8_t fg[4] = {0, 0, 0, 255}, bgc[4] = {255, 255, 255, 255};   // black on white, as PhotoCraft (D)
 static float brushSize = 40, brushHard = 0.8f, brushOpacity = 1.0f;
 static float eraserSize = 40, eraserHard = 0.8f, eraserOpacity = 1.0f;
 static int selMode = SEL_NEW; static float selFeather = 0;
@@ -1488,21 +1490,31 @@ static void toolIcon(ImDrawList* dl, int t, ImVec2 c, ImU32 col) {
 static const char* TOOL_NAMES[T_COUNT] = {"Move (V)", "Rectangle Select (M)", "Ellipse Select (M)", "Lasso (L)", "Polygonal Lasso (L)", "Magic Wand (W)",
                                           "Brush (B)", "Eraser (E)", "Paint Bucket (G)", "Eyedropper (I)", "Hand (H, or hold Space)"};
 
-static void toolsPanel() {
-    ImDrawList* dl = ImGui::GetWindowDrawList();
-    for (int t = 0; t < T_COUNT; ++t) {
-        ImGui::PushID(t);
-        const ImVec2 a = ImGui::GetCursorScreenPos();
-        if (ImGui::InvisibleButton("t", ImVec2(32, 32))) { tool = t; poly.clear(); }
-        const bool on = tool == t, hov = ImGui::IsItemHovered();
-        dl->AddRectFilled(a, ImVec2(a.x + 32, a.y + 32), on ? C_PINK : (hov ? IM_COL32(0x33, 0x33, 0x33, 255) : C_PANEL), 3);
-        toolIcon(dl, t, ImVec2(a.x + 16, a.y + 16), on ? IM_COL32(255, 255, 255, 255) : C_TEXT);
-        if (hov) ImGui::SetTooltip("%s", TOOL_NAMES[t]);
-        ImGui::PopID();
-        if (t == T_MOVE || t == T_WAND || t == T_BUCKET) ImGui::Dummy(ImVec2(1, 4));
+// the strip's tool to LayerTack's own (T_NONE: not in LayerTack yet)
+static int ltTool(int id) {
+    switch (id) {
+    case Toolbar::MOVE: return T_MOVE; case Toolbar::RECT_MARQUEE: return T_RECT; case Toolbar::ELLIPSE_MARQUEE: return T_ELLIPSE;
+    case Toolbar::LASSO: return T_LASSO; case Toolbar::POLYGON_LASSO: return T_POLY; case Toolbar::MAGIC_WAND: return T_WAND;
+    case Toolbar::BRUSH: return T_BRUSH; case Toolbar::ERASER: return T_ERASER; case Toolbar::PAINT_BUCKET: return T_BUCKET;
+    case Toolbar::EYEDROPPER: return T_DROPPER; case Toolbar::HAND: return T_HAND;
+    default: return T_NONE;
     }
-    // colours: foreground over background, swap, default
-    ImGui::Dummy(ImVec2(1, 8));
+}
+static void syncTool() {
+    const int t = ltTool(Toolbar::current());
+    if (t != tool) { tool = t; poly.clear(); }
+}
+
+static void toolsPanel() {
+    // the tools scroll when the window is too short for them; the colour chips stay underneath (PhotoCraft)
+    const float chipsH = 56;
+    ImGui::BeginChild("##strip", ImVec2(0, std::min(ImGui::GetContentRegionAvail().y - chipsH, Toolbar::height())), false, ImGuiWindowFlags_NoScrollbar);
+    Toolbar::draw();
+    ImGui::EndChild();
+    syncTool();
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    // colours: foreground over background, swap, default (under the tools, as in PhotoCraft)
+    ImGui::SetCursorScreenPos(ImVec2(ImGui::GetWindowPos().x + (Toolbar::width() - 32) / 2, ImGui::GetCursorScreenPos().y + 10));
     const ImVec2 a = ImGui::GetCursorScreenPos();
     dl->AddRectFilled(ImVec2(a.x + 12, a.y + 12), ImVec2(a.x + 32, a.y + 32), IM_COL32(bgc[0], bgc[1], bgc[2], 255));
     dl->AddRect(ImVec2(a.x + 12, a.y + 12), ImVec2(a.x + 32, a.y + 32), C_LINE);
@@ -1535,7 +1547,18 @@ static bool sliderI(const char* label, int* v, int lo, int hi) {
 
 static void optionsBar() {
     ImGui::AlignTextToFramePadding();
-    ImGui::TextColored(col4(C_PINK), "%s", TOOL_NAMES[tool]);
+    {   // the tool: its icon and name
+        const ImVec2 at = ImGui::GetCursorScreenPos();
+        Toolbar::icon(ImGui::GetWindowDrawList(), Toolbar::current(), at.x + 10, at.y + ImGui::GetFrameHeight() / 2, 18, C_PINK);
+        ImGui::Dummy(ImVec2(24, ImGui::GetFrameHeight())); ImGui::SameLine(0, 4);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextColored(col4(C_PINK), "%s", Toolbar::label(Toolbar::current()));
+    }
+    if (tool == T_NONE) {
+        ImGui::SameLine(0, 18);
+        ImGui::TextDisabled("Not in LayerTack yet: it comes as PhotoCraft's tools are ported. Pick another tool to work on the picture.");
+        return;
+    }
     ImGui::SameLine(0, 18);
     ImGui::PushItemWidth(120);
     auto selModes = [&]() {
@@ -2123,15 +2146,8 @@ static void keys() {
     if (k(ImGuiKey_Delete) || k(ImGuiKey_Backspace)) { clearSelection(); return; }
     if (k(ImGuiKey_Enter) && poly.size() >= 6) { finishShape(shapePolygon(doc, poly), selMode, "Polygonal Lasso"); poly.clear(); return; }
     if (k(ImGuiKey_Escape)) { poly.clear(); lasso.clear(); return; }
-    if (k(ImGuiKey_V)) tool = T_MOVE;
-    if (k(ImGuiKey_M)) tool = tool == T_RECT ? T_ELLIPSE : T_RECT;
-    if (k(ImGuiKey_L)) tool = tool == T_LASSO ? T_POLY : T_LASSO;
-    if (k(ImGuiKey_W)) tool = T_WAND;
-    if (k(ImGuiKey_B)) tool = T_BRUSH;
-    if (k(ImGuiKey_E)) tool = T_ERASER;
-    if (k(ImGuiKey_G)) tool = T_BUCKET;
-    if (k(ImGuiKey_I)) tool = T_DROPPER;
-    if (k(ImGuiKey_H)) tool = T_HAND;
+    // the tool letters, PhotoCraft's way: a letter picks its group's tool, Shift+letter steps through the group
+    if (Toolbar::keys(shift, ctrl, alt)) syncTool();
     if (k(ImGuiKey_X)) { uint8_t t[4]; memcpy(t, fg, 4); memcpy(fg, bgc, 4); memcpy(bgc, t, 4); }
     if (k(ImGuiKey_D)) { memset(fg, 0, 3); memset(bgc, 255, 3); }
     // [ and ]: size; with Shift: hardness
@@ -2158,7 +2174,7 @@ void frame() {
     const float W = io.DisplaySize.x, H = io.DisplaySize.y;
     if (scriptDlg != D_NONE) { openDlg(scriptDlg); if (dlg == D_REFINE) { pi[0] = scriptView; p[0] = 12; } if (scriptSize[0] > 0) { pi[0] = scriptSize[0]; pi[1] = scriptSize[1]; scriptSize[0] = 0; scriptOk = true; } scriptDlg = D_NONE; }
     menus();
-    const float top = ImGui::GetFrameHeight(), optH = 38, statusH = 26, leftW = 50, rightW = 310;
+    const float top = ImGui::GetFrameHeight(), optH = 38, statusH = 26, leftW = Toolbar::width(), rightW = 310;
     const ImGuiWindowFlags fixed = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus;
 
     ImGui::SetNextWindowPos(ImVec2(0, top)); ImGui::SetNextWindowSize(ImVec2(W, optH));
@@ -2167,7 +2183,9 @@ void frame() {
     ImGui::PopStyleColor();
 
     ImGui::SetNextWindowPos(ImVec2(0, top + optH)); ImGui::SetNextWindowSize(ImVec2(leftW, H - top - optH - statusH));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 8));
     ImGui::Begin("tools", nullptr, fixed); toolsPanel(); ImGui::End();
+    ImGui::PopStyleVar();
 
     ImGui::SetNextWindowPos(ImVec2(W - rightW, top + optH)); ImGui::SetNextWindowSize(ImVec2(rightW, H - top - optH - statusH));
     ImGui::Begin("panels", nullptr, fixed);
@@ -2310,6 +2328,8 @@ void init(SDL_Window* win, const std::string& prefDir, void (*status)(const char
         Changeling::init(prefDir, bp ? bp : "");
         Bathos::init(prefDir, bp ? bp : "");   // Filter > Bathos: Atelier's depth app, when it's on this PC
         MimicPlug::init(prefDir, bp ? bp : "");   // Filter > Mimic: Atelier's face-swap app
+        Toolbar::init(std::string(bp ? bp : "") + "assets/", prefDir);   // the tool strip's icons and its layout
+        Toolbar::select(Toolbar::BRUSH);
         SDL_free(bp);
         step(Changeling::studioDir().empty() ? "Changeling Studio isn't on this PC" : "Asking Changeling Studio for its filters...", 0.5f);
         Changeling::loadSteps();
@@ -2396,7 +2416,7 @@ void script(const std::string& what) {
         doc.editMask = true;
         combineSel(doc, shapeEllipse(doc, doc.w / 8, doc.h / 8, doc.w / 3, doc.h / 2), SEL_NEW);
         changed(); selChanged();
-        tool = T_BRUSH;
+        Toolbar::select(Toolbar::BRUSH); syncTool();
     }
     if (what == "ops") {
         FILE* tl = fopen("layertack_timing.txt", "w");
