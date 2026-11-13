@@ -19,7 +19,7 @@ void setFonts(ImFont* title, ImFont* small) { titleFont = title; smallFont = sma
 
 static const ImU32 BG = IM_COL32(0x1a, 0x1a, 0x1a, 255), LINE = IM_COL32(0x33, 0x33, 0x33, 255),
                    TEXT = IM_COL32(0xd6, 0xd6, 0xd6, 255), DIM = IM_COL32(0x9a, 0x9a, 0x9a, 255),
-                   PINK = IM_COL32(0xe0, 0x40, 0x8a, 255), GREY = IM_COL32(0x9e, 0x9e, 0x9e, 255),
+                   PINK = IM_COL32(0x00, 0x7b, 0xb7, 255), GREY = IM_COL32(0x9e, 0x9e, 0x9e, 255),
                    DARK = IM_COL32(0x3a, 0x3a, 0x3a, 255), GHOST = IM_COL32(0xd6, 0xd6, 0xd6, 150);
 
 // a layer as the logo draws it: a parallelogram leaning right, centre c, w wide, h high
