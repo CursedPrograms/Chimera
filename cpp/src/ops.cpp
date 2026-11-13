@@ -1,4 +1,4 @@
-// LayerTack - adjustments, filters, fills, selections, resizing and the brush.
+// Chimera - adjustments, filters, fills, selections, resizing and the brush.
 #include "ops.h"
 #include "blend.h"
 #include <algorithm>

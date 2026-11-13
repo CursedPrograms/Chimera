@@ -1,4 +1,4 @@
-// LayerTack - Filter > Changeling: finds Changeling Studio, asks its chain.py for the steps, runs them.
+// Chimera - Filter > Changeling: finds Changeling Studio, asks its chain.py for the steps, runs them.
 #include "changeling.h"
 #include "util.h"
 
@@ -149,7 +149,7 @@ static std::string findStudio() {
     }
     // 2. CHANGELING_STUDIO
     if (const char* e = std::getenv("CHANGELING_STUDIO")) if (isStudio(u8path(e))) return e;
-    // 3. next to LayerTack, or next to a folder it's in (D:/cc/LayerTack/cpp/dist/LayerTack -> D:/cc/Changeling-Studio)
+    // 3. next to Chimera, or next to a folder it's in (D:/cc/Chimera/cpp/dist/Chimera -> D:/cc/Changeling-Studio)
     std::error_code ec;
     for (fs::path d = u8path(exeFolder); !d.empty(); d = d.parent_path()) {
         for (const char* name : {"Changeling-Studio", "Changeling Studio"})
@@ -206,7 +206,7 @@ static std::string python() {
 
 std::string workDir() {
     std::error_code ec;
-    fs::path d = fs::temp_directory_path(ec) / "LayerTack-Changeling";
+    fs::path d = fs::temp_directory_path(ec) / "Chimera-Changeling";
     fs::create_directories(d, ec);
     return d.u8string();
 }
@@ -273,7 +273,7 @@ bool Job::start(const std::vector<std::string>& argv, const std::string& cwd) {
                                    wcwd.empty() ? nullptr : wcwd.c_str(), &si, &pi);
     CloseHandle(wr);
     if (!ok) { CloseHandle(rd); return false; }
-    // in a job: Stop (or LayerTack closing) ends chain.py and the Changeling it started
+    // in a job: Stop (or Chimera closing) ends chain.py and the Changeling it started
     I->job = CreateJobObjectW(nullptr, nullptr);
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION li{};
     li.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
@@ -346,7 +346,7 @@ static bool loading = false;
 
 void loadSteps() {
     stepList.clear(); stepsErr.clear(); loading = false;
-    if (studio.empty()) { stepsErr = "Changeling Studio isn't on this PC (or LayerTack can't find it)"; return; }
+    if (studio.empty()) { stepsErr = "Changeling Studio isn't on this PC (or Chimera can't find it)"; return; }
     const std::string py = python();
     if (py.empty()) { stepsErr = "No Python to run Changeling Studio with (set up a Changeling first)"; return; }
     if (!stepsJob.start({py, "-u", "chain.py", "--steps", "--json"}, studio)) { stepsErr = "Couldn't start " + py; return; }

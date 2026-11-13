@@ -1,7 +1,7 @@
-// LayerTack - Filter > Changeling: the Changelings (Imago, Tiresias, Chronos, Natio, Cosmeta, Tonsor) as filters.
-// LayerTack doesn't carry them: it finds Changeling Studio on this PC and runs its chain.py, which runs each
+// Chimera - Filter > Changeling: the Changelings (Imago, Tiresias, Chronos, Natio, Cosmeta, Tonsor) as filters.
+// Chimera doesn't carry them: it finds Changeling Studio on this PC and runs its chain.py, which runs each
 // Changeling in its own Python environment. The steps and their options come from `chain.py --steps --json`, so a
-// new Changeling or option shows up here without changing LayerTack.
+// new Changeling or option shows up here without changing Chimera.
 #pragma once
 #include <string>
 #include <vector>
@@ -23,9 +23,9 @@ struct Step {
     std::string notReady() const;                // a required photo not picked yet, or missing
 };
 
-// Changeling Studio's folder (the one with chain.py): remembered, CHANGELING_STUDIO, or found near LayerTack.
+// Changeling Studio's folder (the one with chain.py): remembered, CHANGELING_STUDIO, or found near Chimera.
 std::string studioDir();
-void setStudioDir(const std::string& dir);      // remembered in LayerTack's settings folder
+void setStudioDir(const std::string& dir);      // remembered in Chimera's settings folder
 void init(const std::string& prefDir, const std::string& exeDir);
 
 // A program run in the background: its output comes in line by line, Stop ends it and everything it started.

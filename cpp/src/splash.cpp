@@ -1,4 +1,4 @@
-// LayerTack - the splash: the logo's three layers drawn large, the name, the version, the credits and what's loading.
+// Chimera - the splash: the logo's three layers drawn large, the name, the version, the credits and what's loading.
 // Solid colours only (Changeling greys + Cursed pink), drawn with ImGui's draw list so it's sharp at any size.
 #include "splash.h"
 

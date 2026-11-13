@@ -1,4 +1,4 @@
-// LayerTack - more filters and selection tools, ported from PhotoCraft (github.com/storytold/photocraft,
+// Chimera - more filters and selection tools, ported from PhotoCraft (github.com/storytold/photocraft,
 // crates/algo/src/distort.rs, stylize.rs, sharpen.rs, MIT OR Apache-2.0): Sharpen, Distort, Stylize, and
 // Select > Modify. Filters work on a Work (see ops.h); the distortions are centred on `b`, the selection's box in
 // the Work's own coordinates (or the whole of it).

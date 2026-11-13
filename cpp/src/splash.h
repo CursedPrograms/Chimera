@@ -1,4 +1,4 @@
-// LayerTack - the splash: shown in its own small window while LayerTack loads, and again in Help > About.
+// Chimera - the splash: shown in its own small window while Chimera loads, and again in Help > About.
 #pragma once
 
 struct ImDrawList;

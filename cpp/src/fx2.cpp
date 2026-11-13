@@ -1,4 +1,4 @@
-// LayerTack - Motion and Radial Blur, Median, Clouds, Crystallize and Pointillize, ported from PhotoCraft
+// Chimera - Motion and Radial Blur, Median, Clouds, Crystallize and Pointillize, ported from PhotoCraft
 // (crates/algo/src/blur.rs, noise.rs, render.rs, pixelate.rs; MIT OR Apache-2.0). See fx.h.
 #include "fx.h"
 #include <algorithm>

@@ -1,4 +1,4 @@
-// LayerTack - a timing check of the operations (not shipped): ltbench picture.png
+// Chimera - a timing check of the operations (not shipped): ltbench picture.png
 #include "doc.h"
 #include "ops.h"
 #include "refine.h"

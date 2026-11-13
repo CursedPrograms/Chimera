@@ -1,4 +1,4 @@
-LayerTack
+Chimera
 Copyright (c) 2024-2026 Cursed Entertainment. MIT License (see LICENSE).
 
 The blend modes (cpp/src/blend.cpp), the adjustment layers (cpp/src/adjust.cpp)
@@ -15,7 +15,7 @@ Its icons (cpp/assets/icons) are PhotoCraft's: Lucide icons (ISC, Lucide Icons
 and Contributors, https://github.com/lucide-icons/lucide; licence in
 cpp/assets/icons/LICENSE-lucide.txt) and PhotoCraft's own (MIT OR Apache-2.0).
 
-Third-party code built into LayerTack:
+Third-party code built into Chimera:
 - Dear ImGui (MIT), https://github.com/ocornut/imgui
 - SDL2 (zlib), https://www.libsdl.org
 - stb_image, stb_image_write (MIT / public domain), https://github.com/nothings/stb

@@ -1,4 +1,4 @@
-// LayerTack - the window: menus, the tool options bar, the tools, the canvas, colours and layers, the dialogs.
+// Chimera - the window: menus, the tool options bar, the tools, the canvas, colours and layers, the dialogs.
 // The usual image editor layout, in the Changeling greys with the Cursed pink.
 #include "app.h"
 #include "blend.h"
@@ -91,7 +91,7 @@ static SDL_Window* window = nullptr;
 static std::string prefs;
 static Doc doc;
 static History hist;
-// No picture yet: LayerTack starts empty and waits for one to be dropped (or File > New / Open). The first picture
+// No picture yet: Chimera starts empty and waits for one to be dropped (or File > New / Open). The first picture
 // sets the canvas size. doc still holds a blank document underneath, so nothing has to cope with having none.
 static bool noDoc = true;
 static Image view;                               // the composite on screen
@@ -104,7 +104,7 @@ static bool quit = false, askQuit = false;
 static std::string toast; static double toastUntil = 0;
 
 enum Tool { T_MOVE, T_RECT, T_ELLIPSE, T_LASSO, T_POLY, T_WAND, T_BRUSH, T_ERASER, T_BUCKET, T_DROPPER, T_HAND, T_COUNT,
-            T_NONE = T_COUNT };   // T_NONE: a tool on the strip LayerTack doesn't have yet
+            T_NONE = T_COUNT };   // T_NONE: a tool on the strip Chimera doesn't have yet
 static int tool = T_BRUSH;
 static uint8_t fg[4] = {0, 0, 0, 255}, bgc[4] = {255, 255, 255, 255};   // black on white, as PhotoCraft (D)
 static float brushSize = 40, brushHard = 0.8f, brushOpacity = 1.0f;
@@ -328,11 +328,16 @@ static std::string fileDialog(bool save, const char* filter, const char* defExt,
 #endif
 }
 
-static const char* OPEN_FILTER = "Pictures and projects|*.png;*.jpg;*.jpeg;*.bmp;*.tga;*.gif;*.psd;*.ltk|All files|*.*|";
+// a Chimera project (.chimera; .ltk is the same format)
+static bool isProject(const std::string& p) {
+    auto ends = [&](const char* e) { const size_t n = strlen(e); return p.size() >= n && p.compare(p.size() - n, n, e) == 0; };
+    return ends(".chimera") || ends(".ltk");
+}
+static const char* OPEN_FILTER = "Pictures and projects|*.png;*.jpg;*.jpeg;*.bmp;*.tga;*.gif;*.psd;*.chimera;*.ltk|All files|*.*|";
 
 static void setTitle() {
     std::string name = doc.path.empty() ? "Untitled" : u8path(doc.path).filename().u8string();
-    SDL_SetWindowTitle(window, ("LayerTack - " + name + (doc.dirty ? " *" : "")).c_str());
+    SDL_SetWindowTitle(window, ("Chimera - " + name + (doc.dirty ? " *" : "")).c_str());
 }
 
 static void fresh() {
@@ -373,14 +378,14 @@ static void placeAsLayer(const std::string& path) {
 
 void dropFile(const std::string& path) {
     // nothing open yet: the picture opens, and the canvas takes its size; later pictures come in as layers
-    if (noDoc || doc.layers.empty() || path.size() > 4 && path.substr(path.size() - 4) == ".ltk") open(path);
+    if (noDoc || doc.layers.empty() || isProject(path)) open(path);
     else placeAsLayer(path);
 }
 
 static void saveAs(bool project) {
     std::string start = doc.path;
-    if (!start.empty()) start = u8path(start).replace_extension(project ? ".ltk" : ".png").u8string();
-    const std::string p = project ? fileDialog(true, "LayerTack project|*.ltk|", "ltk", start)
+    if (!start.empty()) start = u8path(start).replace_extension(project ? ".chimera" : ".png").u8string();
+    const std::string p = project ? fileDialog(true, "Chimera project|*.chimera|", "chimera", start)
                                   : fileDialog(true, "PNG|*.png|JPG|*.jpg|", "png", start);
     if (p.empty()) return;
     std::string err;
@@ -391,7 +396,7 @@ static void saveAs(bool project) {
 }
 
 static void save() {
-    if (!doc.path.empty() && doc.path.size() > 4 && doc.path.substr(doc.path.size() - 4) == ".ltk") {
+    if (!doc.path.empty() && isProject(doc.path)) {
         std::string err;
         if (saveProject(doc, doc.path, err)) { doc.dirty = false; say("Saved"); setTitle(); } else say(err);
     } else saveAs(true);
@@ -697,7 +702,7 @@ static void drawDialog() {
     if (!dlgOpen) return;
     if (dlgOpening) { ImGui::OpenPopup("dlg"); dlgOpening = false; }
     const char* titles[] = {"", "New", "Image Size", "Canvas Size", "Brightness/Contrast", "Hue/Saturation", "Black & White", "Curves",
-                            "Levels", "Gaussian Blur", "Box Blur", "Add Noise", "Feather Selection", "Grow / Shrink Selection", "Threshold", "Rename Layer", "About LayerTack", "Free Transform", "Select and Mask",
+                            "Levels", "Gaussian Blur", "Box Blur", "Add Noise", "Feather Selection", "Grow / Shrink Selection", "Threshold", "Rename Layer", "About Chimera", "Free Transform", "Select and Mask",
                             "Unsharp Mask", "High Pass", "Twirl", "Pinch", "Spherize", "Wave", "Ripple", "Polar Coordinates", "Mosaic", "Emboss",
                             "Motion Blur", "Radial Blur", "Median", "Crystallize", "Pointillize",
                             "Expand Selection", "Contract Selection", "Smooth Selection", "Border Selection"};
@@ -875,7 +880,7 @@ static void drawDialog() {
         ImGui::TextDisabled("The layer and its mask, round the layer's centre.");
         break;
     case D_RENAME: ImGui::SetKeyboardFocusHere(); if (ImGui::InputText("Name", renameBuf, sizeof renameBuf, ImGuiInputTextFlags_EnterReturnsTrue)) { remember("Rename"); doc.cur().name = renameBuf; closeDlg(true); ImGui::PopItemWidth(); ImGui::EndPopup(); return; } break;
-    case D_ABOUT: {   // the splash, as it shows while LayerTack loads
+    case D_ABOUT: {   // the splash, as it shows while Chimera loads
         const ImVec2 at = ImGui::GetCursorScreenPos();
         Splash::draw(ImGui::GetWindowDrawList(), at.x, at.y, nullptr, -1);
         ImGui::Dummy(ImVec2(Splash::W, Splash::H));
@@ -1490,7 +1495,7 @@ static void toolIcon(ImDrawList* dl, int t, ImVec2 c, ImU32 col) {
 static const char* TOOL_NAMES[T_COUNT] = {"Move (V)", "Rectangle Select (M)", "Ellipse Select (M)", "Lasso (L)", "Polygonal Lasso (L)", "Magic Wand (W)",
                                           "Brush (B)", "Eraser (E)", "Paint Bucket (G)", "Eyedropper (I)", "Hand (H, or hold Space)"};
 
-// the strip's tool to LayerTack's own (T_NONE: not in LayerTack yet)
+// the strip's tool to Chimera's own (T_NONE: not in Chimera yet)
 static int ltTool(int id) {
     switch (id) {
     case Toolbar::MOVE: return T_MOVE; case Toolbar::RECT_MARQUEE: return T_RECT; case Toolbar::ELLIPSE_MARQUEE: return T_ELLIPSE;
@@ -1556,7 +1561,7 @@ static void optionsBar() {
     }
     if (tool == T_NONE) {
         ImGui::SameLine(0, 18);
-        ImGui::TextDisabled("Not in LayerTack yet: it comes as PhotoCraft's tools are ported. Pick another tool to work on the picture.");
+        ImGui::TextDisabled("Not in Chimera yet: it comes as PhotoCraft's tools are ported. Pick another tool to work on the picture.");
         return;
     }
     ImGui::SameLine(0, 18);
@@ -1860,7 +1865,7 @@ static void layersPanel(float height) {
         const ImVec2 a = ImGui::GetCursorScreenPos();
         const float w = ImGui::GetContentRegionAvail().x, h = 48;
         const bool active = i == doc.active;
-        dl->AddRectFilled(a, ImVec2(a.x + w, a.y + h), active ? IM_COL32(0x3a, 0x20, 0x2e, 255) : C_PANEL);
+        dl->AddRectFilled(a, ImVec2(a.x + w, a.y + h), active ? IM_COL32(0x16, 0x30, 0x40, 255) : C_PANEL);
         // its colour tag fills the eye column (as in PhotoCraft); right-click the eye column to set it
         if (l.label > 0 && l.label < LABEL_COUNT) dl->AddRectFilled(a, ImVec2(a.x + 27, a.y + h), LABELS[l.label].eye);
         dl->AddLine(ImVec2(a.x, a.y + h), ImVec2(a.x + w, a.y + h), C_LINE);
@@ -2096,7 +2101,7 @@ static void menus() {
         if (item("Zoom Out", "Ctrl+-")) zoomAt(zoom / 1.25f, ImVec2(canvasPos.x + canvasSize.x / 2, canvasPos.y + canvasSize.y / 2));
         ImGui::EndMenu();
     }
-    if (ImGui::BeginMenu("Help")) { if (item("About LayerTack")) openDlg(D_ABOUT); ImGui::EndMenu(); }
+    if (ImGui::BeginMenu("Help")) { if (item("About Chimera")) openDlg(D_ABOUT); ImGui::EndMenu(); }
     ImGui::EndMainMenuBar();
 }
 
@@ -2310,7 +2315,7 @@ void frame() {
 
 bool wantsQuit() { return quit; }
 void requestQuit() {
-    // the first unsaved picture is shown and asked about; when none is left, LayerTack closes
+    // the first unsaved picture is shown and asked about; when none is left, Chimera closes
     if (doc.dirty && hist.canUndo()) { askQuit = true; return; }
     for (int i = 0; i < (int)tabs.size(); ++i)
         if (i != curTab && tabs[i].doc.dirty && tabs[i].hist.canUndo()) { if (switchTab(i)) askQuit = true; return; }
@@ -2419,7 +2424,7 @@ void script(const std::string& what) {
         Toolbar::select(Toolbar::BRUSH); syncTool();
     }
     if (what == "ops") {
-        FILE* tl = fopen("layertack_timing.txt", "w");
+        FILE* tl = fopen("chimera_timing.txt", "w");
         auto t0 = std::chrono::steady_clock::now();
         auto tick = [&](const char* n) { auto t1 = std::chrono::steady_clock::now(); if (tl) fprintf(tl, "%-12s %6.0f ms\n", n, std::chrono::duration<double, std::milli>(t1 - t0).count()); t0 = t1; };
         // brush with soft and hard edges, blurs, curves, black & white, noise, bucket, lasso, resize: no crashes

@@ -1,4 +1,4 @@
-// LayerTack - Filter > Mimic: face swap from Mimic (Atelier's face-swap app), as a plugin. LayerTack doesn't carry
+// Chimera - Filter > Mimic: face swap from Mimic (Atelier's face-swap app), as a plugin. Chimera doesn't carry
 // the face models: it finds mimic-cli on this PC (see atelier.h) and runs it in the background.
 #pragma once
 #include <string>

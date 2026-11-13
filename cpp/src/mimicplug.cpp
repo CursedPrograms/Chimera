@@ -1,4 +1,4 @@
-// LayerTack - Filter > Mimic (see mimicplug.h)
+// Chimera - Filter > Mimic (see mimicplug.h)
 #include "mimicplug.h"
 #include "atelier.h"
 #include "util.h"

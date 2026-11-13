@@ -21,16 +21,16 @@
 <br>
 
 <div align="center">
-  <img src="cpp/assets/logo.png" alt="LayerTack" width="120"/>
+  <img src="cpp/assets/logo.png" alt="Chimera" width="120"/>
 </div>
 
-# LayerTack
+# Chimera
 
 **A layer-based image editor for Windows (and Linux), written in C++.** Layers, true layer masks, Photoshop's blend
 modes, selections with Select Subject, tonal adjustments and filters, in a dark studio workspace.
-**[Website](https://cursedprograms.github.io/LayerTack/)**
+**[Website](https://cursedprograms.github.io/Chimera/)**
 
-![LayerTack: a subject mask, a Multiply layer with a gradient mask and an ellipse selection](images/window.jpg)
+![Chimera: a subject mask, a Multiply layer with a gradient mask and an ellipse selection](images/window.jpg)
 
 ## Features
 
@@ -45,7 +45,7 @@ modes, selections with Select Subject, tonal adjustments and filters, in a dark 
 - **Adjustment layers:** Photoshop's 15 adjustments as layers that change everything below them and stay editable:
   Brightness/Contrast, Levels, Curves, Exposure, Vibrance, Hue/Saturation, Color Balance, Black & White, Photo
   Filter, Channel Mixer, Invert, Posterize, Threshold, Gradient Map and Selective Color. Their settings are in the
-  Properties panel above the layers; each has its own mask, opacity and blend mode, they're saved in `.ltk`
+  Properties panel above the layers; each has its own mask, opacity and blend mode, they're saved in `.chimera`
   projects, and Merge Down bakes one into the layer below (Layer > New Adjustment Layer, or **Adj** under the
   layers).
 - **Blend modes:** all 27 of Photoshop's layer modes, with its exact maths: Normal, Dissolve, Darken, Multiply,
@@ -98,7 +98,7 @@ modes, selections with Select Subject, tonal adjustments and filters, in a dark 
 - **Add Noise:** Photoshop-style Gaussian or Uniform noise, monochromatic or per channel.
 
 ### 6. Changeling filters (Filter > Changeling)
-The Changelings work on a photo inside LayerTack: **Imago** (another face), **Tiresias** (the other gender),
+The Changelings work on a photo inside Chimera: **Imago** (another face), **Tiresias** (the other gender),
 **Chronos** (younger or older), **Natio** (born somewhere else), **Cosmeta** (makeup and hair colour) and
 **Tonsor** (a hairstyle from a photo).
 - **Non-destructive:** the result comes in as a new layer above the picture, in the same place, so masks, opacity
@@ -106,27 +106,27 @@ The Changelings work on a photo inside LayerTack: **Imago** (another face), **Ti
 - **On the whole picture or one layer:** transparency is kept.
 - **In the background:** the log shows progress, and **Stop** ends the run.
 - **Needs [Changeling Studio](https://github.com/CursedPrograms/Changeling-Studio)** on the same PC, with the
-  Changelings you want set up. LayerTack finds it next to itself, in the usual places or through
+  Changelings you want set up. Chimera finds it next to itself, in the usual places or through
   `CHANGELING_STUDIO`; otherwise use **Filter > Changeling > Find Changeling Studio...** The steps and their
-  options come from Studio's `chain.py --steps --json`, so new Changelings show up without updating LayerTack.
+  options come from Studio's `chain.py --steps --json`, so new Changelings show up without updating Chimera.
 
 ### Depth maps (Filter > Bathos)
 **Filter > Bathos > Depth Map** puts the depth of the picture (or a layer) in as a new layer: near is bright, far is
 dark, and faces get a real 3D shape. Detail, edge refine, face relief, colour ramp, far-is-bright and contrast are
 in the dialog; with a selection the new layer is masked to it. It runs
-**[Bathos](https://github.com/CursedPrograms/Bathos)** (Atelier's depth app) in the background: LayerTack finds
+**[Bathos](https://github.com/CursedPrograms/Bathos)** (Atelier's depth app) in the background: Chimera finds
 `bathos-cli` next to itself, in its `plugins\Bathos` folder, where Bathos is installed, or in a Bathos folder nearby;
 otherwise use **Filter > Bathos > Find Bathos...**
 
 ### Face swap (Filter > Mimic)
 **Filter > Mimic** swaps a face from a photo onto the picture (or a layer) and puts the result in as a new layer,
 masked to the selection when there is one. It runs **[Mimic](https://github.com/CursedPrograms/Mimic)** (Atelier's
-face swapper) in the background: LayerTack finds `mimic-cli` next to itself, in its `plugins\Mimic` folder, where
+face swapper) in the background: Chimera finds `mimic-cli` next to itself, in its `plugins\Mimic` folder, where
 Mimic is installed, or in a Mimic folder nearby; otherwise use **Filter > Mimic > Find Mimic...**
 
 ### 7. Export and canvas utilities
 - **PNG:** 32-bit PNG with full transparency; JPG export (onto white).
-- **Projects:** `.ltk` files keep every layer, mask, blend mode and opacity.
+- **Projects:** `.chimera` files keep every layer, mask, blend mode and opacity.
 - **Image Size:** bicubic resampling of every layer and mask, with locked proportions.
 - **Canvas Size:** grow or crop the canvas round any of nine anchors.
 - **Open:** PNG, JPG, BMP, TGA, GIF and flat PSD; drop files on the window to place them as layers.
@@ -140,25 +140,25 @@ Ctrl+J, Ctrl+E, Ctrl+T, Ctrl+M, Ctrl+L, Ctrl+U, Ctrl+I, Ctrl+A, Ctrl+D, Ctrl+Shi
 
 ## Download and run
 
-Windows: build it once (below), then run `cpp/build/Release/LayerTack.exe`, or unzip `cpp/dist/LayerTack-win64.zip`
-anywhere and run `LayerTack.exe`. Open a picture with File > Open, by dropping it on the window, or with
-`LayerTack.exe picture.png`.
+Windows: build it once (below), then run `cpp/build/Release/Chimera.exe`, or unzip `cpp/dist/Chimera-win64.zip`
+anywhere and run `Chimera.exe`. Open a picture with File > Open, by dropping it on the window, or with
+`Chimera.exe picture.png`.
 
 Select Subject downloads its model once (U²-Net-p, about 5 MB) the first time you use it: into
-`F:\AIModels\segment` when that drive exists, otherwise into LayerTack's settings folder.
+`F:\AIModels\segment` when that drive exists, otherwise into Chimera's settings folder.
 
 ## Build
 
 Windows: Visual Studio 2022 (C++) and CMake, then `cpp/build.bat` (or `build.ps1`). It fetches SDL2 and ONNX
-Runtime into `cpp/external/` once, builds `cpp/build/Release/LayerTack.exe` and packs `cpp/dist/LayerTack-win64.zip`.
-The zip carries Microsoft's Visual C++ runtime, so LayerTack starts on PCs without it installed. If LayerTack is
-installed in `%LOCALAPPDATA%\Programs\LayerTack`, the build updates that copy too (close LayerTack first).
+Runtime into `cpp/external/` once, builds `cpp/build/Release/Chimera.exe` and packs `cpp/dist/Chimera-win64.zip`.
+The zip carries Microsoft's Visual C++ runtime, so Chimera starts on PCs without it installed. If Chimera is
+installed in `%LOCALAPPDATA%\Programs\Chimera`, the build updates that copy too (close Chimera first).
 
 Linux: `cpp/build.sh` (needs cmake, a C++17 compiler and libsdl2-dev; for Select Subject, libonnxruntime.so where
 the loader finds it, and zenity for file dialogs).
 
 The code, in `cpp/src/`:
-- `doc.cpp`: the document: layers, masks, compositing, files (PNG, JPG, `.ltk`), undo
+- `doc.cpp`: the document: layers, masks, compositing, files (PNG, JPG, `.chimera`), undo
 - `blend.cpp`: the blend modes
 - `ops.cpp`: adjustments, filters, fills, selections, resizing, transform and the brush
 - `segment.cpp`: Select Subject through ONNX Runtime's C API (loaded at run time)
@@ -166,10 +166,10 @@ The code, in `cpp/src/`:
 - `adjust.cpp`: adjustment layers: the 15 adjustments' maths
 - `refine.cpp`: Select and Mask: guided-filter edges, smooth, feather, contrast, shift edge, decontaminate
 - `mimicplug.cpp`: Filter > Mimic: finds [Mimic](https://github.com/CursedPrograms/Mimic) (`mimic-cli`) and runs it for a face-swap layer
-- `atelier.cpp`: finds the other Atelier apps LayerTack uses as plugins
+- `atelier.cpp`: finds the other Atelier apps Chimera uses as plugins
 - `bathos.cpp`: Filter > Bathos: finds [Bathos](https://github.com/CursedPrograms/Bathos) (`bathos-cli`) and runs it for a depth-map layer
 - `app.cpp`: the window: menus, tools, canvas, Layers panel and dialogs
-- `splash.cpp`: the splash shown while LayerTack loads, and in Help > About
+- `splash.cpp`: the splash shown while Chimera loads, and in Help > About
 - `main.cpp`: SDL2, OpenGL and Dear ImGui
 
 ## Credits

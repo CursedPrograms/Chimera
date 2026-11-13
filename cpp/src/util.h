@@ -1,4 +1,4 @@
-// LayerTack - small helpers: UTF-8 paths (file names with accents work on Windows too)
+// Chimera - small helpers: UTF-8 paths (file names with accents work on Windows too)
 #pragma once
 #include <cstdio>
 #include <cstring>

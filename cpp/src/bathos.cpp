@@ -1,4 +1,4 @@
-// LayerTack - Filter > Bathos (see bathos.h)
+// Chimera - Filter > Bathos (see bathos.h)
 #include "bathos.h"
 #include "atelier.h"
 #include "util.h"

@@ -1,4 +1,4 @@
-// LayerTack - the tool strip, PhotoCraft's layout (see toolbar.h)
+// Chimera - the tool strip, PhotoCraft's layout (see toolbar.h)
 #include "toolbar.h"
 
 #include <SDL.h>
@@ -171,7 +171,7 @@ static std::vector<int> visible(const std::vector<int>& slot) {
 static std::string tipFor(int t) {
     std::string s = TOOLS[t].label;
     if (TOOLS[t].key) { s += "  ("; s += TOOLS[t].key; s += ")"; }
-    if (!TOOLS[t].works) s += "\nNot in LayerTack yet: it comes as PhotoCraft is ported.";
+    if (!TOOLS[t].works) s += "\nNot in Chimera yet: it comes as PhotoCraft is ported.";
     return s;
 }
 
@@ -207,7 +207,7 @@ static void flyout(const std::vector<int>& slot, int shown) {
             const char k[2] = {TOOLS[t].key, 0};
             dl->AddText(ImVec2(b.x - 8 - ImGui::CalcTextSize(k).x, a.y + 13 - ImGui::GetFontSize() / 2), C_DIM, k);
         }
-        if (over && !TOOLS[t].works) ImGui::SetTooltip("Not in LayerTack yet: it comes as PhotoCraft is ported.");
+        if (over && !TOOLS[t].works) ImGui::SetTooltip("Not in Chimera yet: it comes as PhotoCraft is ported.");
         if (clicked || (openByHold && over && ImGui::IsMouseReleased(0))) { select(t); picked = true; }
         ImGui::PopID();
     }

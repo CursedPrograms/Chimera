@@ -1,4 +1,4 @@
-// LayerTack - adjustments (see adjust.h). Ported from PhotoCraft (MIT OR Apache-2.0): crates/compose/src/adjust.rs,
+// Chimera - adjustments (see adjust.h). Ported from PhotoCraft (MIT OR Apache-2.0): crates/compose/src/adjust.rs,
 // adjust/tone.rs, adjust/color.rs, adjust/channels.rs and crates/doc/src/adjust.rs; 8-bit RGB documents.
 #include "adjust.h"
 

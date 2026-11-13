@@ -1,8 +1,8 @@
-// LayerTack - an image editor: layers, masks, blend modes, selections, adjustments and filters.
+// Chimera - an image editor: layers, masks, blend modes, selections, adjustments and filters.
 // SDL2 (window, input), OpenGL 3, Dear ImGui (the interface).
 //
-//   LayerTack [picture or project]
-//   LayerTack --capture out.bmp [picture] [--script demo]    a screenshot from a hidden window, then quit
+//   Chimera [picture or project]
+//   Chimera --capture out.bmp [picture] [--script demo]    a screenshot from a hidden window, then quit
 #include "app.h"
 #include "changeling.h"
 #include "splash.h"
@@ -15,6 +15,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -54,7 +55,7 @@ static void loadFont() {
     io.Fonts->AddFontDefault();
 }
 
-// ---------- the splash window: shown while LayerTack loads ----------
+// ---------- the splash window: shown while Chimera loads ----------
 static SDL_Window* splashWin = nullptr;
 static Uint32 splashStart = 0;
 static bool splashSkip = false, quitEarly = false;   // skip: clicked or Escape; quitEarly: closed (Alt+F4)
@@ -97,7 +98,7 @@ int main(int argc, char** argv) {
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
     // hidden until it's ready: the splash shows meanwhile (--capture never shows it)
     const Uint32 flags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_HIDDEN;
-    SDL_Window* win = SDL_CreateWindow("LayerTack", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 960, flags);
+    SDL_Window* win = SDL_CreateWindow("Chimera", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, 1600, 960, flags);
     if (!win) return 1;
     SDL_SetWindowMinimumSize(win, 900, 560);
     SDL_GLContext gl = SDL_GL_CreateContext(win);
@@ -117,7 +118,7 @@ int main(int argc, char** argv) {
 
     // the splash: a small borderless window sharing the main window's OpenGL context
     if (capture.empty()) {
-        splashWin = SDL_CreateWindow("LayerTack", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, (int)Splash::W, (int)Splash::H,
+        splashWin = SDL_CreateWindow("Chimera", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, (int)Splash::W, (int)Splash::H,
                                      SDL_WINDOW_OPENGL | SDL_WINDOW_BORDERLESS);
         if (splashWin && SDL_GL_MakeCurrent(splashWin, gl) != 0) { SDL_DestroyWindow(splashWin); splashWin = nullptr; SDL_GL_MakeCurrent(win, gl); }
         if (splashWin && icon) SDL_SetWindowIcon(splashWin, icon);
@@ -128,7 +129,18 @@ int main(int argc, char** argv) {
     splashStart = SDL_GetTicks();
     splashSay("Loading the interface...", 0.1f);
 
-    char* pp = SDL_GetPrefPath("Cursed Entertainment", "LayerTack");
+#ifdef _WIN32
+    {   // settings and downloaded models from the editor's first folder name move to Chimera's, once
+        const char* ad = getenv("APPDATA");
+        if (ad) {
+            std::error_code ec;
+            const std::filesystem::path base = std::filesystem::u8path(ad) / "Cursed Entertainment";
+            if (std::filesystem::exists(base / "LayerTack", ec) && !std::filesystem::exists(base / "Chimera", ec))
+                std::filesystem::rename(base / "LayerTack", base / "Chimera", ec);
+        }
+    }
+#endif
+    char* pp = SDL_GetPrefPath("Cursed Entertainment", "Chimera");
     App::init(win, pp ? pp : "", splashWin ? splashSay : nullptr);
     SDL_free(pp);
     if (!file.empty()) {

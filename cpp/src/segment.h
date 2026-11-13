@@ -1,6 +1,6 @@
-// LayerTack - Select Subject / Remove Background: U2-Net-p (a small salient-object model, ~5 MB) through
+// Chimera - Select Subject / Remove Background: U2-Net-p (a small salient-object model, ~5 MB) through
 // ONNX Runtime, loaded at run time (onnxruntime.dll next to the exe). The model is fetched once, on first use,
-// into F:\AIModels\segment when that drive is there (the models folder), else into LayerTack's settings folder.
+// into F:\AIModels\segment when that drive is there (the models folder), else into Chimera's settings folder.
 #pragma once
 #include "doc.h"
 #include <string>

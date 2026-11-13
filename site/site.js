@@ -1,4 +1,4 @@
-// LayerTack's page: the shortcut list and the year
+// Chimera's page: the shortcut list and the year
 (function () {
   'use strict';
   const keys = [

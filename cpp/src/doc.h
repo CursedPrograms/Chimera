@@ -1,4 +1,4 @@
-// LayerTack - the document: layers (each with its own size, position and an optional mask), a selection and
+// Chimera - the document: layers (each with its own size, position and an optional mask), a selection and
 // undo. Pixels are 8-bit RGBA, straight alpha; masks and the selection are 8-bit (255 = shown / selected).
 #pragma once
 #include "adjust.h"
@@ -83,7 +83,7 @@ void composite(const Doc& d, Image& out, Rect r, bool showMask);
 
 // ---- files
 bool loadImage(const std::string& path, Image& out, std::string& err);
-bool openDoc(const std::string& path, Doc& d, std::string& err);       // a picture or a .ltk project
+bool openDoc(const std::string& path, Doc& d, std::string& err);       // a picture or a .chimera project
 bool saveImage(const Doc& d, const std::string& path, std::string& err); // .png or .jpg: the flattened picture
 bool saveProject(const Doc& d, const std::string& path, std::string& err);
 

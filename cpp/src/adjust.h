@@ -1,4 +1,4 @@
-// LayerTack - adjustments as layers: the parameters of a Photoshop adjustment, kept live on a layer, applied to what's
+// Chimera - adjustments as layers: the parameters of a Photoshop adjustment, kept live on a layer, applied to what's
 // below it when the picture is composited. The maths is ported from PhotoCraft (github.com/storytold/photocraft,
 // crates/compose/src/adjust*.rs and crates/doc/src/adjust.rs, MIT OR Apache-2.0), fitted to Photoshop's own output.
 #pragma once
@@ -43,7 +43,7 @@ struct Adjustment {
     float selective[9][4] = {};                  // reds..magentas, whites, neutrals, blacks x cyan, magenta, yellow, black %
 
     static Adjustment make(int kind);            // with Photoshop's starting values
-    std::string save() const;                    // a byte blob for .ltk projects
+    std::string save() const;                    // a byte blob for .chimera projects
     bool load(const std::string& blob);
 };
 

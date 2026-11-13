@@ -1,4 +1,4 @@
-// LayerTack - Sharpen, Distort, Stylize and Select > Modify (see fx.h)
+// Chimera - Sharpen, Distort, Stylize and Select > Modify (see fx.h)
 #include "fx.h"
 #include "refine.h"
 #include <algorithm>

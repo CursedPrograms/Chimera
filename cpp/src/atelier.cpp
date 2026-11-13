@@ -1,4 +1,4 @@
-// LayerTack - finding Atelier apps (see atelier.h)
+// Chimera - finding Atelier apps (see atelier.h)
 #include "atelier.h"
 #include "util.h"
 #include <cstdio>

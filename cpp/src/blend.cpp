@@ -1,4 +1,4 @@
-// LayerTack - blend modes, ported from PhotoCraft (MIT OR Apache-2.0; see NOTICE).
+// Chimera - blend modes, ported from PhotoCraft (MIT OR Apache-2.0; see NOTICE).
 #include "blend.h"
 #include <algorithm>
 #include <cmath>

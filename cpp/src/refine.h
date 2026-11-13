@@ -1,4 +1,4 @@
-// LayerTack - Select and Mask: edges that follow the picture (hair, fur, soft focus), then smoothed, feathered,
+// Chimera - Select and Mask: edges that follow the picture (hair, fur, soft focus), then smoothed, feathered,
 // sharpened and shifted, and colours cleaned of the old background. Ported from PhotoCraft
 // (github.com/storytold/photocraft, crates/algo/src/matting.rs, MIT OR Apache-2.0); the soft edges are He, Sun and
 // Tang's guided filter ("Guided Image Filtering", ECCV 2010).

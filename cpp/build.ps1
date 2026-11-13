@@ -1,4 +1,4 @@
-# Builds LayerTack (Release) into build\Release, and dist\LayerTack-win64.zip.
+# Builds Chimera (Release) into build\Release, and dist\Chimera-win64.zip.
 # Needs Visual Studio 2022 (C++), CMake. SDL2's development package is fetched into external\ once.
 # Native tools are checked by their exit codes: CMake prints harmless warnings on stderr, which "Stop" would treat as
 # failures in Windows PowerShell 5.1.
@@ -21,27 +21,27 @@ if (-not (Test-Path "external\onnxruntime\onnxruntime.dll")) {
 }
 Run cmake -B build -G "Visual Studio 17 2022" -A x64
 Run cmake --build build --config Release
-Remove-Item -Recurse -Force dist\LayerTack -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force dist\LayerTack | Out-Null
-Copy-Item -Recurse build\Release\* dist\LayerTack\
-Remove-Item dist\LayerTack\*.lib -ErrorAction SilentlyContinue
-Remove-Item dist\LayerTack\ltbench.exe -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force dist\Chimera -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Force dist\Chimera | Out-Null
+Copy-Item -Recurse build\Release\* dist\Chimera\
+Remove-Item dist\Chimera\*.lib -ErrorAction SilentlyContinue
+Remove-Item dist\Chimera\ltbench.exe -ErrorAction SilentlyContinue
 # Microsoft's Visual C++ runtime goes next to the exe, so it starts on PCs without the redistributable installed
 $crt = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -find 'VC\Redist\MSVC\*\x64\Microsoft.VC143.CRT' | Select-Object -First 1
 if (-not $crt) { Write-Host "Visual C++ runtime folder not found, is Visual Studio 2022 installed?"; exit 1 }
-'vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll', 'msvcp140_1.dll' | ForEach-Object { Copy-Item (Join-Path $crt $_) dist\LayerTack\ }
-Copy-Item ..\README.md, ..\LICENSE, ..\NOTICE dist\LayerTack\
-Remove-Item dist\LayerTack-win64.zip -ErrorAction SilentlyContinue
+'vcruntime140.dll', 'vcruntime140_1.dll', 'msvcp140.dll', 'msvcp140_1.dll' | ForEach-Object { Copy-Item (Join-Path $crt $_) dist\Chimera\ }
+Copy-Item ..\README.md, ..\LICENSE, ..\NOTICE dist\Chimera\
+Remove-Item dist\Chimera-win64.zip -ErrorAction SilentlyContinue
 # Windows' own tar makes a zip with forward slashes, which every unzip tool reads
-Run "$env:SystemRoot\System32\tar.exe" -a -c -f dist\LayerTack-win64.zip -C dist\LayerTack *
-Write-Host "Built: build\Release\LayerTack.exe and dist\LayerTack-win64.zip"
-# LayerTack installed on this PC (Start menu and Desktop shortcuts): this build replaces that copy too
-$inst = Join-Path $env:LOCALAPPDATA "Programs\LayerTack"
-if (Test-Path "$inst\LayerTack.exe") {
-    if (Get-Process LayerTack -ErrorAction SilentlyContinue) {
-        Write-Host "LayerTack is open, so the installed copy wasn't updated: close it and build again."
+Run "$env:SystemRoot\System32\tar.exe" -a -c -f dist\Chimera-win64.zip -C dist\Chimera *
+Write-Host "Built: build\Release\Chimera.exe and dist\Chimera-win64.zip"
+# Chimera installed on this PC (Start menu and Desktop shortcuts): this build replaces that copy too
+$inst = Join-Path $env:LOCALAPPDATA "Programs\Chimera"
+if (Test-Path "$inst\Chimera.exe") {
+    if (Get-Process Chimera -ErrorAction SilentlyContinue) {
+        Write-Host "Chimera is open, so the installed copy wasn't updated: close it and build again."
     } else {
-        Copy-Item -Recurse -Force dist\LayerTack\* $inst
-        Write-Host "Updated the installed LayerTack: $inst"
+        Copy-Item -Recurse -Force dist\Chimera\* $inst
+        Write-Host "Updated the installed Chimera: $inst"
     }
 }

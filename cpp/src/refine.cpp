@@ -1,4 +1,4 @@
-// LayerTack - Select and Mask (see refine.h). Work is done only in the box round the edge, so the cost follows the
+// Chimera - Select and Mask (see refine.h). Work is done only in the box round the edge, so the cost follows the
 // edge's length, not the picture's size.
 #include "refine.h"
 #include <algorithm>

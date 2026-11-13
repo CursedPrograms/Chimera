@@ -1,4 +1,4 @@
-// LayerTack - Select Subject through ONNX Runtime's C API (loaded at run time, so LayerTack runs without it).
+// Chimera - Select Subject through ONNX Runtime's C API (loaded at run time, so Chimera runs without it).
 #include "segment.h"
 #include "util.h"
 #include <algorithm>
@@ -26,10 +26,10 @@ std::string segmentModelPath() {
 #ifdef _WIN32
     if (fs::exists("F:/AIModels", ec)) return "F:/AIModels/segment/u2netp.onnx";
     const char* app = std::getenv("APPDATA");
-    return std::string(app ? app : ".") + "/LayerTack/models/u2netp.onnx";
+    return std::string(app ? app : ".") + "/Chimera/models/u2netp.onnx";
 #else
     const char* home = std::getenv("HOME");
-    return std::string(home ? home : ".") + "/.config/LayerTack/models/u2netp.onnx";
+    return std::string(home ? home : ".") + "/.config/Chimera/models/u2netp.onnx";
 #endif
 }
 
@@ -52,7 +52,7 @@ static bool fetchModel(const std::string& path, std::string& err) {
 static const OrtApi* loadOrt(std::string& err) {
     static const OrtApi* api = nullptr;
     static bool tried = false;
-    if (tried) { if (!api) err = "ONNX Runtime (onnxruntime.dll) isn't next to LayerTack"; return api; }
+    if (tried) { if (!api) err = "ONNX Runtime (onnxruntime.dll) isn't next to Chimera"; return api; }
     tried = true;
     typedef const OrtApiBase*(ORT_API_CALL * GetBase)();
     GetBase getBase = nullptr;
@@ -63,9 +63,9 @@ static const OrtApi* loadOrt(std::string& err) {
     void* h = dlopen("libonnxruntime.so", RTLD_NOW);
     if (h) getBase = (GetBase)dlsym(h, "OrtGetApiBase");
 #endif
-    if (!getBase) { err = "ONNX Runtime (onnxruntime.dll) isn't next to LayerTack"; return nullptr; }
+    if (!getBase) { err = "ONNX Runtime (onnxruntime.dll) isn't next to Chimera"; return nullptr; }
     api = getBase()->GetApi(ORT_API_VERSION);
-    if (!api) err = "This ONNX Runtime is too old for LayerTack";
+    if (!api) err = "This ONNX Runtime is too old for Chimera";
     return api;
 }
 
@@ -84,7 +84,7 @@ bool segmentSubject(const Image& img, std::vector<uint8_t>& out, std::string& er
         return false;
     };
     if (!session) {
-        if (!check(ort->CreateEnv(ORT_LOGGING_LEVEL_WARNING, "LayerTack", &env))) return false;
+        if (!check(ort->CreateEnv(ORT_LOGGING_LEVEL_WARNING, "Chimera", &env))) return false;
         OrtSessionOptions* opts;
         if (!check(ort->CreateSessionOptions(&opts))) return false;
 #ifdef _WIN32

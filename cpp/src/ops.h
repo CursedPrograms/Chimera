@@ -1,4 +1,4 @@
-// LayerTack - what you do to pixels: adjustments, filters, fills, selections, resizing and the brush.
+// Chimera - what you do to pixels: adjustments, filters, fills, selections, resizing and the brush.
 // Everything works on the "target": the active layer's pixels, or its mask when you're editing the mask
 // (the mask is treated as a grey picture, so you can blur, fill, curve or paint it like any other).
 // Inside a selection only the selected part changes (soft selections blend).

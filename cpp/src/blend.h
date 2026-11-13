@@ -1,4 +1,4 @@
-// LayerTack - blend modes. The maths is ported from PhotoCraft (github.com/storytold/photocraft,
+// Chimera - blend modes. The maths is ported from PhotoCraft (github.com/storytold/photocraft,
 // crates/color/src/blend.rs and crates/compose/src/psblend.rs, MIT OR Apache-2.0): Photoshop's formulas,
 // including its exact Color Burn / Dodge, Vivid Light and Hard Mix edge cases.
 #pragma once

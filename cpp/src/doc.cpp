@@ -1,4 +1,4 @@
-// LayerTack - the document: layers, masks, compositing, files and undo.
+// Chimera - the document: layers, masks, compositing, files and undo.
 #include "doc.h"
 #include "blend.h"
 #include "util.h"
@@ -332,11 +332,11 @@ static bool writeFile(const std::string& path, const std::vector<uint8_t>& data)
 }
 
 bool openDoc(const std::string& path, Doc& d, std::string& err) {
-    if (endsWith(path, ".ltk")) {
+    if (endsWith(path, ".chimera") || endsWith(path, ".ltk")) {
         std::vector<uint8_t> b;
         if (!readFile(path, b)) { err = "Can't open " + path; return false; }
         Reader r{b};
-        if (b.size() < 4 || memcmp(b.data(), "LTK1", 4)) { err = "Not a LayerTack project"; return false; }
+        if (b.size() < 4 || memcmp(b.data(), "LTK1", 4)) { err = "Not a Chimera project"; return false; }
         r.i = 4;
         Doc n;
         n.w = r.i32(); n.h = r.i32();

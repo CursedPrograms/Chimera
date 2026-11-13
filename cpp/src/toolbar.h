@@ -1,4 +1,4 @@
-// LayerTack - the tool strip on the left, laid out exactly as PhotoCraft's (Photoshop's): the same tools in the same
+// Chimera - the tool strip on the left, laid out exactly as PhotoCraft's (Photoshop's): the same tools in the same
 // slots and sections, each slot showing its last-used tool with a little corner mark; right-click, hold or drag away
 // opens its flyout, Alt-click cycles it, the letter keys pick a group's tool and Shift+letter steps through the group.
 // The header toggles one or two columns; "..." edits which tools show. Icons: PhotoCraft's (Lucide, ISC; and
@@ -39,7 +39,7 @@ int current();                         // the tool picked (an Id)
 void select(int id);                   // pick a tool (also what the slot shows from now on)
 const char* label(int id);             // "Brush Tool"
 char key(int id);                      // its letter ('B'), 0 for none
-bool works(int id);                    // LayerTack does it already; the rest come as PhotoCraft is ported
+bool works(int id);                    // Chimera does it already; the rest come as PhotoCraft is ported
 // the strip, drawn into the current window (its width: width()); tips: false while a dialog is up
 void draw();
 float width();                         // one column or two, as the header chevron has it

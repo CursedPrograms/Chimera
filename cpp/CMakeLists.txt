@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
-project(LayerTack VERSION 1.3.0 LANGUAGES C CXX)
-# LayerTack: an image editor. SDL2 (window, input), OpenGL 3, Dear ImGui (the interface), stb (PNG/JPG), and
+project(Chimera VERSION 1.3.0 LANGUAGES C CXX)
+# Chimera: an image editor. SDL2 (window, input), OpenGL 3, Dear ImGui (the interface), stb (PNG/JPG), and
 # ONNX Runtime's C header (Select Subject; onnxruntime.dll is loaded at run time, next to the exe).
 # Only SDL2 has to be installed; the rest is fetched here (or taken from external/ when it's there).
 #
@@ -55,28 +55,28 @@ set(SOURCES src/main.cpp src/app.cpp src/doc.cpp src/ops.cpp src/blend.cpp src/a
 if(WIN32)
     list(APPEND SOURCES src/app.rc)
 endif()
-add_executable(LayerTack WIN32 ${SOURCES})
-target_include_directories(LayerTack PRIVATE ${STB_DIR} ${ORT_DIR} ${NANOSVG_DIR} src)
-target_link_libraries(LayerTack PRIVATE imgui)
-target_compile_definitions(LayerTack PRIVATE LT_VERSION="${PROJECT_VERSION}")
+add_executable(Chimera WIN32 ${SOURCES})
+target_include_directories(Chimera PRIVATE ${STB_DIR} ${ORT_DIR} ${NANOSVG_DIR} src)
+target_link_libraries(Chimera PRIVATE imgui)
+target_compile_definitions(Chimera PRIVATE LT_VERSION="${PROJECT_VERSION}")
 if(TARGET SDL2::SDL2main)
-    target_link_libraries(LayerTack PRIVATE SDL2::SDL2main)
+    target_link_libraries(Chimera PRIVATE SDL2::SDL2main)
 endif()
 if(MSVC)
-    target_compile_options(LayerTack PRIVATE /W3 /utf-8 /O2 /fp:fast /D_CRT_SECURE_NO_WARNINGS)
+    target_compile_options(Chimera PRIVATE /W3 /utf-8 /O2 /fp:fast /D_CRT_SECURE_NO_WARNINGS)
 else()
-    target_link_libraries(LayerTack PRIVATE dl)
+    target_link_libraries(Chimera PRIVATE dl)
 endif()
 
 # assets next to the exe; SDL2 and ONNX Runtime's DLLs too
-add_custom_command(TARGET LayerTack POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets $<TARGET_FILE_DIR:LayerTack>/assets)
+add_custom_command(TARGET Chimera POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/assets $<TARGET_FILE_DIR:Chimera>/assets)
 if(WIN32)
-    add_custom_command(TARGET LayerTack POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL2::SDL2> $<TARGET_FILE_DIR:LayerTack>)
+    add_custom_command(TARGET Chimera POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:SDL2::SDL2> $<TARGET_FILE_DIR:Chimera>)
     if(EXISTS ${ORT_DIR}/onnxruntime.dll)
-        add_custom_command(TARGET LayerTack POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${ORT_DIR}/onnxruntime.dll $<TARGET_FILE_DIR:LayerTack>)
+        add_custom_command(TARGET Chimera POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${ORT_DIR}/onnxruntime.dll $<TARGET_FILE_DIR:Chimera>)
     endif()
 endif()
 
