@@ -138,6 +138,16 @@ Layers panel on the right and a status bar, in the Cursed dark theme (solid grey
 shortcuts: V M L W B E G I H, [ and ] for brush size (Shift for hardness), X swaps colours, D resets them, Ctrl+Z,
 Ctrl+J, Ctrl+E, Ctrl+T, Ctrl+M, Ctrl+L, Ctrl+U, Ctrl+I, Ctrl+A, Ctrl+D, Ctrl+Shift+I, Ctrl+0, Ctrl+1.
 
+## Minimum requirements
+
+| | |
+| --- | --- |
+| **System** | Windows 10 or 11, 64-bit (Linux builds from source) |
+| **Processor** | any 64-bit processor |
+| **Memory** | 4 GB RAM (8 GB for big pictures with many layers) |
+| **Graphics** | any graphics card with OpenGL 3.3 (2010 or newer) |
+| **Disk** | 50 MB |
+
 ## Download and run
 
 Windows: build it once (below), then run `cpp/build/Release/Chimera.exe`, or unzip `cpp/dist/Chimera-win64.zip`
