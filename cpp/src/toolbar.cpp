@@ -62,7 +62,7 @@ static const Info TOOLS[COUNT] = {
     {"Rectangle Tool", 'U', "rectangle-horizontal", false}, {"Ellipse Tool", 'U', "circle", false}, {"Triangle Tool", 'U', "triangle", false},
     {"Polygon Tool", 'U', "pentagon", false}, {"Star Tool", 'U', "star", false}, {"Line Tool", 'U', "slash", false},
     {"Custom Shape Tool", 'U', "cloud", false},
-    {"Hand Tool", 'H', "hand", true}, {"Rotate View Tool", 'R', "compass", false}, {"Zoom Tool", 'Z', "zoom-in", false},
+    {"Hand Tool", 'H', "hand", true}, {"Rotate View Tool", 'R', "compass", true}, {"Zoom Tool", 'Z', "zoom-in", false},
 };
 
 // PhotoCraft's TOOL_SECTIONS: sections (a divider between), slots (one button, a flyout), tools

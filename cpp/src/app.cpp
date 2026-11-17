@@ -105,7 +105,7 @@ static bool showMask = false;                    // Alt-click on a mask: see it 
 static bool quit = false, askQuit = false;
 static std::string toast; static double toastUntil = 0;
 
-enum Tool { T_MOVE, T_RECT, T_ELLIPSE, T_LASSO, T_POLY, T_WAND, T_BRUSH, T_ERASER, T_BUCKET, T_DROPPER, T_HAND,
+enum Tool { T_MOVE, T_RECT, T_ELLIPSE, T_LASSO, T_POLY, T_WAND, T_BRUSH, T_ERASER, T_BUCKET, T_DROPPER, T_HAND, T_ROTATE,
             T_PENCIL, T_ZOOM, T_ROW, T_COL, T_CROP, T_GRADIENT, T_MAGIC_ERASER, T_RETOUCH, T_QUICK, T_OBJECT, T_REDEYE, T_HEAL, T_SHAPE, T_MARK, T_TYPE, T_PEN, T_COUNT,
             T_NONE = T_COUNT };   // T_NONE: a tool on the strip Chimera doesn't have yet
 static int tool = T_BRUSH;
@@ -133,10 +133,11 @@ static int selMode = SEL_NEW; static float selFeather = 0;
 static int tolerance = 32; static bool contiguous = true, sampleAll = false; static float bucketOpacity = 1.0f;
 
 // view: canvas pixel (x, y) is at screen origin + (x, y) * zoom
-static float zoom = 1.0f; static ImVec2 origin(0, 0); static ImVec2 canvasPos, canvasSize; static bool fitNext = true;
+static float zoom = 1.0f, viewRotation = 0.0f; static ImVec2 origin(0, 0); static ImVec2 canvasPos, canvasSize; static bool fitNext = true;
 
 // interaction
 static bool dragging = false, panning = false; static ImVec2 dragStart, dragNow, panStart, originStart;
+static float rotateStartAngle = 0.0f, rotateStartPointer = 0.0f;
 static int moveStartX = 0, moveStartY = 0;
 static std::vector<float> lasso, poly;
 // the shape tools: new shapes take these (and the foreground colour); with a shape layer active, the options bar
@@ -1451,17 +1452,37 @@ static void drawMimic() {
 }
 
 // ---------- the view ----------
-static ImVec2 toScreen(float x, float y) { return ImVec2(canvasPos.x + origin.x + x * zoom, canvasPos.y + origin.y + y * zoom); }
-static ImVec2 toCanvas(ImVec2 s) { return ImVec2((s.x - canvasPos.x - origin.x) / zoom, (s.y - canvasPos.y - origin.y) / zoom); }
+static ImVec2 toScreen(float x, float y) {
+    const float dx = origin.x + x * zoom - canvasSize.x * 0.5f;
+    const float dy = origin.y + y * zoom - canvasSize.y * 0.5f;
+    const float a = viewRotation * 0.017453292519943295f, c = std::cos(a), s = std::sin(a);
+    return ImVec2(canvasPos.x + canvasSize.x * 0.5f + c * dx - s * dy,
+                  canvasPos.y + canvasSize.y * 0.5f + s * dx + c * dy);
+}
+static ImVec2 toCanvas(ImVec2 p) {
+    const float dx = p.x - canvasPos.x - canvasSize.x * 0.5f;
+    const float dy = p.y - canvasPos.y - canvasSize.y * 0.5f;
+    const float a = viewRotation * 0.017453292519943295f, c = std::cos(a), s = std::sin(a);
+    return ImVec2((c * dx + s * dy + canvasSize.x * 0.5f - origin.x) / zoom,
+                  (-s * dx + c * dy + canvasSize.y * 0.5f - origin.y) / zoom);
+}
 static void fit() {
-    zoom = std::min(1.0f, std::min((canvasSize.x - 40) / doc.w, (canvasSize.y - 40) / doc.h));
+    const float a = viewRotation * 0.017453292519943295f;
+    const float rw = std::fabs(std::cos(a)) * doc.w + std::fabs(std::sin(a)) * doc.h;
+    const float rh = std::fabs(std::sin(a)) * doc.w + std::fabs(std::cos(a)) * doc.h;
+    zoom = std::min(1.0f, std::min((canvasSize.x - 40) / rw, (canvasSize.y - 40) / rh));
     origin = ImVec2((canvasSize.x - doc.w * zoom) / 2, (canvasSize.y - doc.h * zoom) / 2);
 }
 static void zoomAt(float nz, ImVec2 screen) {
     nz = std::clamp(nz, 0.02f, 64.0f);
     const ImVec2 c = toCanvas(screen);
+    const float dx = screen.x - canvasPos.x - canvasSize.x * 0.5f;
+    const float dy = screen.y - canvasPos.y - canvasSize.y * 0.5f;
+    const float a = viewRotation * 0.017453292519943295f, cs = std::cos(a), sn = std::sin(a);
+    const float localX = cs * dx + sn * dy + canvasSize.x * 0.5f;
+    const float localY = -sn * dx + cs * dy + canvasSize.y * 0.5f;
     zoom = nz;
-    origin = ImVec2(screen.x - canvasPos.x - c.x * zoom, screen.y - canvasPos.y - c.y * zoom);
+    origin = ImVec2(localX - c.x * zoom, localY - c.y * zoom);
 }
 
 static int modeFromKeys() {
@@ -1833,14 +1854,32 @@ static void canvasInput() {
     const int t = space ? T_HAND : tool;
 
     if (hovered && io.MouseWheel != 0) zoomAt(zoom * (io.MouseWheel > 0 ? 1.15f : 1 / 1.15f), m);
+    if (tool == T_ROTATE && viewRotation != 0.0f) {
+        const ImVec2 q(canvasPos.x + canvasSize.x - 24, canvasPos.y + 24);
+        const float dx = m.x - q.x, dy = m.y - q.y;
+        if (hovered && dx * dx + dy * dy < 14 * 14 && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) { viewRotation = 0.0f; dragging = false; return; }
+    }
+    if (tool == T_ROTATE && ImGui::IsKeyPressed(ImGuiKey_Escape)) viewRotation = 0.0f;
     // middle button always pans
     if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) { panning = true; panStart = m; originStart = origin; }
-    if (panning) { origin = ImVec2(originStart.x + m.x - panStart.x, originStart.y + m.y - panStart.y); if (!ImGui::IsMouseDown(ImGuiMouseButton_Middle) && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) panning = false; }
+    if (panning) {
+        const float a = viewRotation * 0.017453292519943295f, cs = std::cos(a), sn = std::sin(a);
+        const float dx = m.x - panStart.x, dy = m.y - panStart.y;
+        origin = ImVec2(originStart.x + cs * dx + sn * dy, originStart.y - sn * dx + cs * dy);
+        if (!ImGui::IsMouseDown(ImGuiMouseButton_Middle) && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) panning = false;
+    }
 
     if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
         dragging = true; dragStart = c; dragNow = c;
         switch (t) {
         case T_HAND: panning = true; panStart = m; originStart = origin; dragging = false; break;
+        case T_ROTATE: {
+            if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) { viewRotation = 0.0f; dragging = false; break; }
+            const ImVec2 pivot(canvasPos.x + canvasSize.x * 0.5f, canvasPos.y + canvasSize.y * 0.5f);
+            rotateStartPointer = std::atan2(m.y - pivot.y, m.x - pivot.x);
+            rotateStartAngle = viewRotation;
+            break;
+        }
         case T_MOVE: remember("Move"); moveStartX = doc.cur().x; moveStartY = doc.cur().y; break;
         case T_LASSO: lasso = {c.x, c.y}; break;
         case T_POLY:
@@ -1989,10 +2028,19 @@ static void canvasInput() {
         default: break;
         }
     }
-    if (dragging && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+    if (dragging && (ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseReleased(ImGuiMouseButton_Left))) {
         const ImVec2 penLast = dragNow; (void)penLast;
         dragNow = c;
         switch (t) {
+        case T_ROTATE: {
+            const ImVec2 pivot(canvasPos.x + canvasSize.x * 0.5f, canvasPos.y + canvasSize.y * 0.5f);
+            const float pointer = std::atan2(m.y - pivot.y, m.x - pivot.x);
+            const float delta = std::remainder(pointer - rotateStartPointer, 6.283185307179586f);
+            float angle = rotateStartAngle + delta * 57.29577951308232f;
+            if (io.KeyShift) angle = std::round(angle / 15.0f) * 15.0f;
+            viewRotation = std::remainder(angle, 360.0f);
+            break;
+        }
         case T_MOVE: {
             Layer& l = doc.cur();
             const int nx = moveStartX + (int)std::lround(c.x - dragStart.x), ny = moveStartY + (int)std::lround(c.y - dragStart.y);
@@ -2115,19 +2163,29 @@ static void canvasInput() {
         else if (ImGui::IsKeyPressed(ImGuiKey_Escape)) cropPending = false;
     }
     if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) && t != T_HAND && !ImGui::IsMouseDown(ImGuiMouseButton_Middle)) panning = false;
-    if (t == T_HAND && panning) origin = ImVec2(originStart.x + m.x - panStart.x, originStart.y + m.y - panStart.y);
 }
 
 static void drawCanvas() {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(canvasPos, ImVec2(canvasPos.x + canvasSize.x, canvasPos.y + canvasSize.y), C_BG);
-    const ImVec2 a = toScreen(0, 0), b = toScreen((float)doc.w, (float)doc.h);
+    const ImVec2 a = toScreen(0, 0), b = toScreen((float)doc.w, 0), c = toScreen((float)doc.w, (float)doc.h), d = toScreen(0, (float)doc.h);
     dl->PushClipRect(canvasPos, ImVec2(canvasPos.x + canvasSize.x, canvasPos.y + canvasSize.y), true);
-    dl->AddImage((ImTextureID)(intptr_t)checkerTex, a, b, ImVec2(0, 0), ImVec2((b.x - a.x) / 16, (b.y - a.y) / 16));
+    const ImVec2 uv0(0, 0), uv1((float)doc.w / 16, 0), uv2((float)doc.w / 16, (float)doc.h / 16), uv3(0, (float)doc.h / 16);
+    dl->AddImageQuad((ImTextureID)(intptr_t)checkerTex, a, b, c, d, uv0, uv1, uv2, uv3);
     glBindTexture(GL_TEXTURE_2D, viewTex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, zoom >= 2 ? GL_NEAREST : GL_LINEAR);
-    dl->AddImage((ImTextureID)(intptr_t)viewTex, a, b);
-    dl->AddRect(ImVec2(a.x - 1, a.y - 1), ImVec2(b.x + 1, b.y + 1), C_LINE);
+    dl->AddImageQuad((ImTextureID)(intptr_t)viewTex, a, b, c, d, uv0, ImVec2(1, 0), ImVec2(1, 1), ImVec2(0, 1));
+    dl->AddQuad(a, b, c, d, C_LINE);
+    if (std::fabs(viewRotation) > 0.05f) {
+        const ImVec2 q(canvasPos.x + canvasSize.x - 24, canvasPos.y + 24);
+        dl->AddCircleFilled(q, 14, C_WELL, 24);
+        dl->AddCircle(q, 13.5f, C_LINE, 24);
+        const float a0 = -1.57079632679f + viewRotation * 0.017453292519943295f;
+        const ImVec2 tip(q.x + std::cos(a0) * 8, q.y + std::sin(a0) * 8);
+        dl->AddLine(q, tip, C_PINK, 2);
+        dl->AddCircleFilled(tip, 2, C_PINK, 12);
+        dl->AddText(ImVec2(q.x - 3, q.y + 4), C_TEXT, "N");
+    }
 
     // marching ants
     if (antsVersion != selVersion) { ants = selOutline(doc); antsVersion = selVersion; }
@@ -2324,6 +2382,7 @@ static int ltTool(int id) {
     case Toolbar::LASSO: return T_LASSO; case Toolbar::POLYGON_LASSO: return T_POLY; case Toolbar::MAGIC_WAND: return T_WAND;
     case Toolbar::BRUSH: return T_BRUSH; case Toolbar::ERASER: return T_ERASER; case Toolbar::PAINT_BUCKET: return T_BUCKET;
     case Toolbar::EYEDROPPER: return T_DROPPER; case Toolbar::HAND: return T_HAND;
+    case Toolbar::ROTATE_VIEW: return T_ROTATE;
     case Toolbar::PENCIL: return T_PENCIL; case Toolbar::ZOOM: return T_ZOOM;
     case Toolbar::SINGLE_ROW_MARQUEE: return T_ROW; case Toolbar::SINGLE_COLUMN_MARQUEE: return T_COL;
     case Toolbar::CROP: return T_CROP; case Toolbar::GRADIENT: return T_GRADIENT; case Toolbar::MAGIC_ERASER: return T_MAGIC_ERASER;
@@ -2495,6 +2554,10 @@ static void optionsBar() {
         ImGui::TextDisabled("Drag what to keep; Enter or double-click crops, Escape cancels");
         break;
     case T_ZOOM: ImGui::TextDisabled("Click zooms in, Alt+click zooms out; the wheel zooms too"); break;
+    case T_ROTATE:
+        ImGui::TextDisabled("Drag around the canvas centre to rotate the view; Shift snaps to 15 degrees; double-click or Escape resets");
+        if (std::fabs(viewRotation) > 0.05f) { ImGui::SameLine(0, 14); if (ImGui::Button("Reset View")) viewRotation = 0.0f; ImGui::SameLine(0, 8); ImGui::TextDisabled("%.1f degrees", viewRotation); }
+        break;
     case T_QUICK:
         sliderF("Size", &quickSize, 1, 500, "%.0f px", ImGuiSliderFlags_Logarithmic); ImGui::SameLine(0, 14);
         ImGui::Checkbox("Sample all layers", &sampleAll); ImGui::SameLine(0, 14);
@@ -3500,6 +3563,12 @@ bool busy() { return jobRunning() || Changeling::stepsLoading(); }
 void script(const std::string& what) {
     if (what == "empty") return;                             // the empty start, as it is
     noDoc = false;                                           // the scripts work on the blank document
+    if (what == "rotate-view") {
+        Toolbar::select(Toolbar::ROTATE_VIEW); syncTool();
+        viewRotation = 30.0f;
+        fprintf(stderr, "rotate-view: camera %.1f degrees; document pixels unchanged\n", viewRotation);
+        return;
+    }
     if (what == "about") { scriptDlg = D_ABOUT; return; }   // Help > About: the splash art
     if (what.rfind("adjust:", 0) == 0) {
         const int k = atoi(what.c_str() + 7);
