@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <unordered_set>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -49,7 +50,12 @@ Layer emptyLayer(const Doc& d, const std::string& name) {
 }
 
 void addLayer(Doc& d, Layer l) {
-    const int at = d.layers.empty() ? 0 : d.active + 1;
+    int at = d.layers.empty() ? 0 : d.active + 1;
+    if (!d.layers.empty() && d.layers[d.active].groupId) {
+        const int id = d.layers[d.active].groupId;
+        for (int i = 0; i < (int)d.layers.size(); ++i) if (d.layers[i].groupId == id) at = std::max(at, i + 1);
+        l.groupId = id;
+    }
     d.layers.insert(d.layers.begin() + at, std::move(l));
     d.active = at;
     d.editMask = false;
@@ -59,6 +65,9 @@ void addLayer(Doc& d, Layer l) {
 void deleteLayer(Doc& d) {
     if (d.layers.size() <= 1) return;
     d.layers.erase(d.layers.begin() + d.active);
+    d.groups.erase(std::remove_if(d.groups.begin(), d.groups.end(), [&](const LayerGroup& g) {
+        return std::none_of(d.layers.begin(), d.layers.end(), [&](const Layer& l) { return l.groupId == g.id; });
+    }), d.groups.end());
     d.active = std::max(0, d.active - 1);
     d.editMask = false;
     d.dirty = true;
@@ -73,9 +82,37 @@ void duplicateLayer(Doc& d) {
 void moveLayer(Doc& d, int dir) {
     const int to = d.active + dir;
     if (to < 0 || to >= (int)d.layers.size()) return;
+    if (d.layers[d.active].groupId != d.layers[to].groupId) return;
     std::swap(d.layers[d.active], d.layers[to]);
     d.active = to;
     d.dirty = true;
+}
+
+// Wrap a contiguous selection so group compositing has one well-defined stack position.
+bool groupLayers(Doc& d, const std::vector<int>& selected) {
+    if (selected.empty()) return false;
+    std::vector<int> ids = selected;
+    std::sort(ids.begin(), ids.end());
+    ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+    if (ids.back() >= (int)d.layers.size() || ids.front() < 0 || ids.back() - ids.front() + 1 != (int)ids.size()) return false;
+    for (int i : ids) if (d.layers[i].groupId) return false;
+    int id = 1;
+    for (const LayerGroup& g : d.groups) id = std::max(id, g.id + 1);
+    LayerGroup group; group.id = id; group.name = "Group " + std::to_string(id);
+    for (int i : ids) d.layers[i].groupId = id;
+    d.groups.push_back(std::move(group));
+    d.active = ids.back();
+    d.dirty = true;
+    return true;
+}
+
+bool ungroupActiveLayer(Doc& d) {
+    if (d.active < 0 || d.active >= (int)d.layers.size() || !d.layers[d.active].groupId) return false;
+    const int id = d.layers[d.active].groupId;
+    for (Layer& l : d.layers) if (l.groupId == id) l.groupId = 0;
+    d.groups.erase(std::remove_if(d.groups.begin(), d.groups.end(), [id](const LayerGroup& g) { return g.id == id; }), d.groups.end());
+    d.dirty = true;
+    return true;
 }
 
 // ---- fill layers
@@ -278,8 +315,33 @@ void composite(const Doc& d, Image& out, Rect r, bool showMask) {
     std::vector<float> buf((size_t)rw * (r.y1 - r.y0) * 4, 0.0f);
     std::vector<float> cov;   // the current base's coverage (alpha x mask), for the layers clipped to it
     bool baseShown = true;
+    std::unordered_set<int> handledGroups;
     for (size_t i = 0; i < d.layers.size(); ++i) {
         const Layer& l = d.layers[i];
+        if (l.groupId) {
+            if (!handledGroups.insert(l.groupId).second) continue;
+            const auto found = std::find_if(d.groups.begin(), d.groups.end(), [&](const LayerGroup& g) { return g.id == l.groupId; });
+            if (found == d.groups.end()) continue;
+            Doc grouped = d;
+            grouped.layers.clear(); grouped.groups.clear(); grouped.active = 0;
+            for (const Layer& child : d.layers) if (child.groupId == l.groupId) { grouped.layers.push_back(child); grouped.layers.back().groupId = 0; }
+            if (grouped.layers.empty()) continue;
+            grouped.layers.front().clip = false;
+            Image pixels(d.w, d.h);
+            composite(grouped, pixels, r, false);
+            Layer merged; merged.name = found->name; merged.img = std::move(pixels); merged.visible = found->visible;
+            merged.opacity = found->opacity; merged.blend = found->blend;
+            merged.hasMask = found->hasMask; merged.maskOn = found->maskOn; merged.mask = found->mask;
+            if (i == 0 || !l.clip) baseShown = merged.visible && merged.opacity > 0;
+            if (baseShown) drawLayer(merged, buf, r, merged.blend, merged.opacity);
+            const bool clippedAbove = i + 1 < d.layers.size() && d.layers[i + 1].clip && d.layers[i + 1].groupId != l.groupId;
+            if (clippedAbove && baseShown) {
+                cov.assign((size_t)rw * (r.y1 - r.y0), 0.0f);
+                for (int y = r.y0; y < r.y1; ++y) for (int x = r.x0; x < r.x1; ++x)
+                    cov[(size_t)(y - r.y0) * rw + x - r.x0] = merged.img.at(x, y)[3] / 255.0f * merged.maskAt(x, y) / 255.0f;
+            }
+            continue;
+        }
         if (!l.clip) {
             baseShown = l.visible && l.opacity > 0.0f;
             const bool clippedAbove = i + 1 < d.layers.size() && d.layers[i + 1].clip;
@@ -352,6 +414,7 @@ static void mergeInto(Doc& d, Layer& bottom, const Layer& top) {
 
 void mergeDown(Doc& d) {
     if (d.active == 0 || d.layers[d.active - 1].isAdjust()) return;   // (Photoshop won't merge onto an adjustment layer either)
+    if (d.layers[d.active].groupId != d.layers[d.active - 1].groupId) return;
     Layer top = d.layers[d.active];
     mergeInto(d, d.layers[d.active - 1], top);
     d.layers.erase(d.layers.begin() + d.active);
@@ -369,9 +432,10 @@ void mergeVisible(Doc& d) {
         if (!vis.layers.empty()) { vis.layers[0].clip = false; composite(vis, m.img, {0, 0, d.w, d.h}, false); }
     }
     std::vector<Layer> keep;
-    for (Layer& l : d.layers) if (!l.visible) keep.push_back(std::move(l));
+    for (Layer& l : d.layers) if (!l.visible) { l.groupId = 0; keep.push_back(std::move(l)); }
     keep.push_back(std::move(m));
     d.layers = std::move(keep);
+    d.groups.clear();
     d.active = (int)d.layers.size() - 1;
     d.editMask = false;
     d.dirty = true;
@@ -385,6 +449,7 @@ void flatten(Doc& d) {
     l.img = std::move(out);
     d.layers.clear();
     d.layers.push_back(std::move(l));
+    d.groups.clear();
     d.active = 0;
     d.editMask = false;
     d.dirty = true;
@@ -545,6 +610,26 @@ bool openDoc(const std::string& path, Doc& d, std::string& err) {
                     n.artboards.push_back(std::move(a));
                 }
             }
+            if (r.ok && r.i < b.size()) {
+                if (r.i + 8 > b.size() || memcmp(b.data() + r.i, "GRP1", 4)) { err = "The project has an unknown extension"; return false; }
+                r.i += 4;
+                const uint32_t groups = r.u32();
+                if (groups > 100000) { err = "The project has too many layer groups"; return false; }
+                for (uint32_t i = 0; i < groups && r.ok; ++i) {
+                    LayerGroup g; g.id = r.i32(); g.opacity = r.f(); g.blend = r.i32();
+                    const uint32_t flags = r.u32(); g.visible = flags & 1; g.expanded = flags & 2; g.hasMask = flags & 4; g.maskOn = flags & 8;
+                    auto name = r.bytes(); g.name.assign(name.begin(), name.end());
+                    if (g.hasMask) { g.mask = r.bytes(); if (g.mask.size() != (size_t)n.w * n.h) r.ok = false; }
+                    const uint32_t children = r.u32();
+                    if (children > n.layers.size()) { r.ok = false; break; }
+                    for (uint32_t j = 0; j < children && r.ok; ++j) {
+                        const uint32_t index = r.u32();
+                        if (index >= n.layers.size() || n.layers[index].groupId) { r.ok = false; break; }
+                        n.layers[index].groupId = g.id;
+                    }
+                    n.groups.push_back(std::move(g));
+                }
+            }
         }
         if (!r.ok || n.layers.empty()) { err = "The project is damaged"; return false; }
         n.active = std::clamp(n.active, 0, (int)n.layers.size() - 1);
@@ -669,6 +754,17 @@ bool saveProject(const Doc& d, const std::string& path, std::string& err) {
         putU32(o, (uint32_t)a.rect.x1); putU32(o, (uint32_t)a.rect.y1);
         putU32(o, (uint32_t)a.background);
         putBytes(o, (const uint8_t*)a.name.data(), a.name.size());
+    }
+    o.insert(o.end(), {'G', 'R', 'P', '1'});
+    putU32(o, (uint32_t)d.groups.size());
+    for (const LayerGroup& g : d.groups) {
+        putU32(o, (uint32_t)g.id); putF(o, g.opacity); putU32(o, (uint32_t)g.blend);
+        putU32(o, (g.visible ? 1 : 0) | (g.expanded ? 2 : 0) | (g.hasMask ? 4 : 0) | (g.maskOn ? 8 : 0));
+        putBytes(o, (const uint8_t*)g.name.data(), g.name.size());
+        if (g.hasMask) putBytes(o, g.mask.data(), g.mask.size());
+        uint32_t count = 0; for (const Layer& l : d.layers) if (l.groupId == g.id) ++count;
+        putU32(o, count);
+        for (uint32_t i = 0; i < d.layers.size(); ++i) if (d.layers[i].groupId == g.id) putU32(o, i);
     }
     if (!writeFile(path, o)) { err = "Can't write " + path; return false; }
     return true;

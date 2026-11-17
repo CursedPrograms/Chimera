@@ -29,6 +29,7 @@ struct Slice {
 
 // An artboard is a named canvas region that the Artboard tool can select and resize.
 struct Artboard { Rect rect; std::string name; int background = 0; };
+struct LayerGroup { int id = 0; std::string name = "Group"; float opacity = 1.0f; int blend = 0; bool visible = true, expanded = false, hasMask = false, maskOn = true; std::vector<uint8_t> mask; };
 
 struct Image {
     int w = 0, h = 0;
@@ -71,6 +72,7 @@ struct Layer {
     bool isAdjust() const { return adj.kind != ADJ_NONE; }
     bool clip = false;                           // a clipping mask: it only shows where the layer below it (its base) does
     bool frame = false;                           // a shape layer used as an image placeholder and clip base
+    int groupId = 0;                              // membership in a top-level LayerGroup, zero means ungrouped
     Fill fill;                                   // a fill layer (Solid Colour, Gradient): its pixels come from these
     bool isFill() const { return fill.kind != FILL_NONE; }
     Shape shape;                                 // a shape layer (a fill layer only inside its shape, and its stroke)
@@ -88,6 +90,7 @@ struct Doc {
     std::vector<uint8_t> sel;                    // canvas-sized; empty() = nothing selected (everything is fair game)
     std::vector<Slice> slices;                   // user slices used by the Slice tools and image export
     std::vector<Artboard> artboards;             // named design regions, independent of the pixel layers
+    std::vector<LayerGroup> groups;               // groups refer to flat contiguous ranges of child layers
     std::string path;                            // where it was opened from / saved to
     // the marks on it (PhotoCraft's Color Sampler, Count, Note and Ruler tools): not part of the picture
     struct Mark { float x = 0, y = 0; std::string text; };
@@ -117,6 +120,8 @@ int clipBase(const Doc& d, int i);               // the layer a clipped layer i 
 void deleteLayer(Doc& d);
 void duplicateLayer(Doc& d);
 void moveLayer(Doc& d, int dir);                 // +1 up, -1 down
+bool groupLayers(Doc& d, const std::vector<int>& layers);
+bool ungroupActiveLayer(Doc& d);
 void mergeDown(Doc& d);
 void mergeVisible(Doc& d);
 void flatten(Doc& d);

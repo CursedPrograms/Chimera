@@ -144,6 +144,26 @@ static std::vector<ImVec2> pcropClicks; static int pcropDragPart = -1, pcropOutW
 static ImVec2 pcropMoveStart; static float pcropMoveQ[8] = {0};
 static int sliceActive = -1;
 static int artboardActive = -1, artboardWidth = 750, artboardHeight = 1334, artboardBackground = 0;
+static std::vector<int> layerSelection;
+static int layerRangeAnchor = -1, activeGroupId = 0;
+// Keep multi-selection contiguous when Shift-clicking because groups own a range in the flat stack.
+static void selectLayer(int index) {
+    layerSelection.erase(std::remove_if(layerSelection.begin(), layerSelection.end(), [](int i) { return i < 0 || i >= (int)doc.layers.size(); }), layerSelection.end());
+    const ImGuiIO& io = ImGui::GetIO();
+    if (io.KeyShift && layerRangeAnchor >= 0) {
+        layerSelection.clear();
+        for (int i = std::min(index, layerRangeAnchor); i <= std::max(index, layerRangeAnchor); ++i) layerSelection.push_back(i);
+    } else if (io.KeyCtrl) {
+        auto it = std::find(layerSelection.begin(), layerSelection.end(), index);
+        if (it == layerSelection.end()) layerSelection.push_back(index); else if (layerSelection.size() > 1) layerSelection.erase(it);
+        layerRangeAnchor = index;
+    } else {
+        layerSelection = {index};
+        layerRangeAnchor = index;
+    }
+    doc.active = index;
+    activeGroupId = 0;
+}
 static Rect sliceStartRect;
 static bool sliceDidMove = false;
 static bool frameEllipse = false;
@@ -397,6 +417,7 @@ static void setTitle() {
 
 static void fresh() {
     noDoc = false;
+    layerSelection.clear(); layerRangeAnchor = -1; activeGroupId = 0;
     hist = History();
     showMask = false; dirty = {0, 0, doc.w, doc.h}; texW = -1;
     docVersion++; selVersion++; fitNext = true;
@@ -4013,18 +4034,22 @@ static void newAdjustmentMenu() {
 
 static void layersPanel(float height) {
     Layer& cur = doc.cur();
+    LayerGroup* groupCur = nullptr;
+    if (activeGroupId) for (LayerGroup& g : doc.groups) if (g.id == activeGroupId) { groupCur = &g; break; }
     ImGui::TextColored(col4(C_PINK), "LAYERS");
     ImGui::PushItemWidth(-1);
-    if (ImGui::BeginCombo("##blend", blendName(cur.blend))) {
+    int& blendMode = groupCur ? groupCur->blend : cur.blend;
+    float& opacity = groupCur ? groupCur->opacity : cur.opacity;
+    if (ImGui::BeginCombo("##blend", blendName(blendMode))) {
         for (int m = 0; m < BM_Count; ++m) {
             if (blendGroupStart(m)) ImGui::Separator();
-            if (ImGui::Selectable(blendName(m), m == cur.blend)) { remember("Blend Mode"); cur.blend = m; changed(); }
+            if (ImGui::Selectable(blendName(m), m == blendMode)) { remember(groupCur ? "Group Blend Mode" : "Blend Mode"); blendMode = m; changed(); }
         }
         ImGui::EndCombo();
     }
-    float op = cur.opacity * 100;
+    float op = opacity * 100;
     static bool opEditing = false;
-    if (ImGui::SliderFloat("##op", &op, 0, 100, "Opacity %.0f%%")) { if (!opEditing) { remember("Opacity"); opEditing = true; } cur.opacity = op / 100; changed(); }
+    if (ImGui::SliderFloat("##op", &op, 0, 100, "Opacity %.0f%%")) { if (!opEditing) { remember(groupCur ? "Group Opacity" : "Opacity"); opEditing = true; } opacity = op / 100; changed(); }
     if (ImGui::IsItemDeactivated()) opEditing = false;
     ImGui::PopItemWidth();
 
@@ -4032,10 +4057,34 @@ static void layersPanel(float height) {
     ImDrawList* dl = ImGui::GetWindowDrawList();
     for (int i = (int)doc.layers.size() - 1; i >= 0; --i) {
         Layer& l = doc.layers[i];
+        if (l.groupId) {
+            auto g = std::find_if(doc.groups.begin(), doc.groups.end(), [&](const LayerGroup& q) { return q.id == l.groupId; });
+            if (g != doc.groups.end()) {
+                const bool top = std::none_of(doc.layers.begin() + i + 1, doc.layers.end(), [&](const Layer& q) { return q.groupId == l.groupId; });
+                if (top) {
+                    const ImVec2 ga = ImGui::GetCursorScreenPos();
+                    const float gw = ImGui::GetContentRegionAvail().x, gh = 42;
+                    dl->AddRectFilled(ga, ImVec2(ga.x + gw, ga.y + gh), activeGroupId == g->id ? IM_COL32(0x16, 0x30, 0x40, 255) : C_PANEL);
+                    dl->AddLine(ImVec2(ga.x, ga.y + gh), ImVec2(ga.x + gw, ga.y + gh), C_LINE);
+                    dl->AddText(ImVec2(ga.x + 12, ga.y + 13), C_TEXT, g->expanded ? "v" : ">");
+                    dl->AddText(ImVec2(ga.x + 30, ga.y + 12), g->visible ? C_TEXT : C_DIM, g->name.c_str());
+                    ImGui::SetCursorScreenPos(ga);
+                    ImGui::PushID(g->id + 90000);
+                    if (ImGui::InvisibleButton("group_row", ImVec2(gw - 26, gh))) { activeGroupId = g->id; doc.active = i; doc.editMask = false; layerSelection.clear(); for (int j = 0; j < (int)doc.layers.size(); ++j) if (doc.layers[j].groupId == g->id) layerSelection.push_back(j); }
+                    ImGui::SetCursorScreenPos(ImVec2(ga.x + gw - 24, ga.y + 7));
+                    if (ImGui::SmallButton(g->expanded ? "-" : "+")) g->expanded = !g->expanded;
+                    ImGui::SetCursorScreenPos(ImVec2(ga.x + gw - 50, ga.y + 7));
+                    if (ImGui::SmallButton(g->visible ? "o" : "x")) { remember(g->visible ? "Hide Group" : "Show Group"); g->visible = !g->visible; changed(); }
+                    ImGui::PopID();
+                    ImGui::SetCursorScreenPos(ImVec2(ga.x, ga.y + gh + 1));
+                }
+                if (!g->expanded) continue;
+            }
+        }
         ImGui::PushID(i);
         const ImVec2 a = ImGui::GetCursorScreenPos();
         const float w = ImGui::GetContentRegionAvail().x, h = 48;
-        const bool active = i == doc.active;
+        const bool active = i == doc.active || std::find(layerSelection.begin(), layerSelection.end(), i) != layerSelection.end();
         dl->AddRectFilled(a, ImVec2(a.x + w, a.y + h), active ? IM_COL32(0x16, 0x30, 0x40, 255) : C_PANEL);
         // its colour tag fills the eye column (as in PhotoCraft); right-click the eye column to set it
         if (l.label > 0 && l.label < LABEL_COUNT) dl->AddRectFilled(a, ImVec2(a.x + 27, a.y + h), LABELS[l.label].eye);
@@ -4048,7 +4097,7 @@ static void layersPanel(float height) {
         if (l.visible) { dl->AddEllipse(ImVec2(a.x + 14, a.y + 24), 8, 5, C_TEXT, 0, 16, 1.5f); dl->AddCircleFilled(ImVec2(a.x + 14, a.y + 24), 2.5f, C_TEXT); }
         else dl->AddRect(ImVec2(a.x + 7, a.y + 17), ImVec2(a.x + 21, a.y + 31), C_LINE);
         // the layer's picture; click edits the pixels
-        const float indent = l.clip && i > 0 ? 16.0f : 0.0f;
+        const float indent = (l.clip && i > 0 ? 16.0f : 0.0f) + (l.groupId ? 12.0f : 0.0f);
         const ImVec2 tp(a.x + 28 + indent, a.y + 4);
         if (indent > 0) {   // clipped to the layer below: Photoshop's bent arrow
             const float ax = a.x + 34, ay = a.y + 12;
@@ -4063,7 +4112,7 @@ static void layersPanel(float height) {
             dl->AddCircle(c, 12, C_TEXT, 32, 1.5f);
         } else if (i < (int)thumbs.size() && thumbs[i]) dl->AddImage((ImTextureID)(intptr_t)thumbs[i], tp, ImVec2(tp.x + 40, tp.y + 40));
         ImGui::SetCursorScreenPos(tp);
-        if (ImGui::InvisibleButton("px", ImVec2(40, 40))) { doc.active = i; doc.editMask = l.isAdjust() && l.hasMask; if (showMask) { showMask = false; changed(); } }
+        if (ImGui::InvisibleButton("px", ImVec2(40, 40))) { selectLayer(i); doc.editMask = l.isAdjust() && l.hasMask; if (showMask) { showMask = false; changed(); } }
         if (l.isAdjust() && ImGui::IsItemHovered()) ImGui::SetTooltip("%s adjustment: its settings are in Properties above", adjName(l.adj.kind));
         if (l.isFill() && ImGui::IsItemHovered()) ImGui::SetTooltip("Fill layer: its colours are in Properties above; paint its mask");
         if (active && !doc.editMask) dl->AddRect(ImVec2(tp.x - 2, tp.y - 2), ImVec2(tp.x + 42, tp.y + 42), C_PINK, 0, 0, 2);
@@ -4087,7 +4136,7 @@ static void layersPanel(float height) {
         }
         // the name; double-click renames
         ImGui::SetCursorScreenPos(ImVec2(nameX, a.y));
-        if (ImGui::InvisibleButton("name", ImVec2(std::max(10.0f, a.x + w - nameX), h))) { doc.active = i; doc.editMask = l.isAdjust() && l.hasMask; }
+        if (ImGui::InvisibleButton("name", ImVec2(std::max(10.0f, a.x + w - nameX), h))) { selectLayer(i); doc.editMask = l.isAdjust() && l.hasMask; }
         if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) openDlg(D_RENAME);
         dl->AddText(ImVec2(nameX, a.y + 9), l.visible ? C_TEXT : C_DIM, l.name.c_str());
         char info[64];
@@ -4100,8 +4149,12 @@ static void layersPanel(float height) {
     // the buttons under the list
     auto btn = [&](const char* label, const char* tip) { const bool r = ImGui::Button(label); if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", tip); ImGui::SameLine(0, 3); return r; };
     if (btn("New", "New empty layer (Ctrl+Shift+N)")) { remember("New Layer"); addLayer(doc, emptyLayer(doc, "Layer " + std::to_string(doc.layers.size()))); changed(); }
-    if (btn("Mask", "Add a layer mask (from the selection when there is one); Alt: hide all")) {
-        if (!cur.hasMask) { remember("Add Mask"); addMask(doc, doc.hasSel() ? 2 : (ImGui::GetIO().KeyAlt ? 1 : 0)); changed(); }
+    if (btn("Mask", groupCur ? "Add a group mask" : "Add a layer mask (from the selection when there is one); Alt: hide all")) {
+        if (groupCur) {
+            if (!groupCur->hasMask) { remember("Add Group Mask"); groupCur->hasMask = true; groupCur->maskOn = true; groupCur->mask.assign((size_t)doc.w * doc.h, ImGui::GetIO().KeyAlt ? 0 : 255); if (doc.hasSel() && !ImGui::GetIO().KeyAlt) groupCur->mask = doc.sel; changed(); }
+            else if (ImGui::GetIO().KeyShift) { remember("Remove Group Mask"); groupCur->hasMask = false; groupCur->mask.clear(); changed(); }
+            else { remember(groupCur->maskOn ? "Disable Group Mask" : "Enable Group Mask"); groupCur->maskOn = !groupCur->maskOn; changed(); }
+        } else if (!cur.hasMask) { remember("Add Mask"); addMask(doc, doc.hasSel() ? 2 : (ImGui::GetIO().KeyAlt ? 1 : 0)); changed(); }
         else say("The layer has a mask already");
     }
     if (btn("Adj", "New adjustment layer")) ImGui::OpenPopup("newadj");
@@ -4111,6 +4164,13 @@ static void layersPanel(float height) {
     if (btn("↓", "Move the layer down")) { remember("Reorder"); moveLayer(doc, -1); changed(); }
     if (btn("Merge", "Merge down (Ctrl+E)")) { remember("Merge Down"); mergeDown(doc); changed(); }
     if (btn("Del", "Delete the layer")) { remember("Delete Layer"); deleteLayer(doc); changed(); }
+    if (btn("Grp", "Group the selected contiguous layers (Ctrl+G)")) {
+        if (layerSelection.empty()) layerSelection.push_back(doc.active);
+        remember("Group Layers");
+        if (groupLayers(doc, layerSelection)) { activeGroupId = doc.cur().groupId; changed(); }
+        else { hist.doUndo(doc); say("Select a contiguous range of layers to group"); }
+    }
+    if (btn("Ungrp", "Ungroup the selected group")) { if (ungroupActiveLayer(doc)) { remember("Ungroup Layers"); activeGroupId = 0; changed(); } }
     ImGui::NewLine();
 }
 
@@ -4189,6 +4249,13 @@ static void menus() {
     }
     if (ImGui::BeginMenu("Layer", !noDoc)) {
         if (item("New Layer", "Ctrl+Shift+N")) { remember("New Layer"); addLayer(doc, emptyLayer(doc, "Layer " + std::to_string(doc.layers.size()))); changed(); }
+        if (item("Group Layers", "Ctrl+G")) {
+            if (layerSelection.empty()) layerSelection.push_back(doc.active);
+            remember("Group Layers");
+            if (groupLayers(doc, layerSelection)) { activeGroupId = doc.cur().groupId; changed(); }
+            else { hist.doUndo(doc); say("Select a contiguous range of layers to group"); }
+        }
+        if (item("Ungroup Layers", nullptr, doc.cur().groupId != 0)) { remember("Ungroup Layers"); ungroupActiveLayer(doc); activeGroupId = 0; changed(); }
         if (item("Duplicate Layer", "Ctrl+J")) { remember("Duplicate"); duplicateLayer(doc); changed(); }
         if (item("Delete Layer", nullptr, doc.layers.size() > 1)) { remember("Delete Layer"); deleteLayer(doc); changed(); }
         if (item("Rename Layer...")) openDlg(D_RENAME);
@@ -4336,6 +4403,12 @@ static void keys() {
         else if (k(ImGuiKey_R) && alt) { if (doc.hasSel() || doc.cur().hasMask) openDlg(D_REFINE); }
         else if (k(ImGuiKey_J)) { remember("Duplicate"); duplicateLayer(doc); changed(); }
         else if (k(ImGuiKey_G) && alt) toggleClip();   // Alt+Ctrl+G: Create / Release Clipping Mask
+        else if (k(ImGuiKey_G)) {
+            if (layerSelection.empty()) layerSelection.push_back(doc.active);
+            remember("Group Layers");
+            if (groupLayers(doc, layerSelection)) { activeGroupId = doc.cur().groupId; changed(); }
+            else { hist.doUndo(doc); say("Select a contiguous range of layers to group"); }
+        }
         else if (k(ImGuiKey_E)) { if (shift) { remember("Merge Visible"); mergeVisible(doc); } else { remember("Merge Down"); mergeDown(doc); } changed(); }
         else if (k(ImGuiKey_M)) openDlg(D_CURVES);
         else if (k(ImGuiKey_L)) openDlg(D_LEVELS);
@@ -4760,6 +4833,29 @@ void script(const std::string& what) {
         const bool saved = saveProject(doc, project, err) && openDoc(project, roundTrip, err);
         const bool ok = saved && roundTrip.artboards.size() == 2 && roundTrip.artboards[0].name == "Artboard 1" && roundTrip.artboards[1].background == 1;
         fprintf(stderr, "artboard: %s; two named regions, background and project round trip=%d\n", ok ? "passed" : err.c_str(), saved);
+        changed();
+        return;
+    }
+    if (what == "layer-groups") {
+        Toolbar::select(Toolbar::MOVE); syncTool();
+        Fill first; first.kind = FILL_SOLID; first.colour[0] = 0.9f; first.colour[1] = 0.18f; first.colour[2] = 0.2f;
+        Shape a; a.kind = SHAPE_RECT; a.x0 = doc.w * 0.2f; a.y0 = doc.h * 0.2f; a.x1 = doc.w * 0.65f; a.y1 = doc.h * 0.72f;
+        addShapeLayer(doc, a, first);
+        Fill second; second.kind = FILL_SOLID; second.colour[0] = 0.1f; second.colour[1] = 0.5f; second.colour[2] = 0.9f;
+        Shape b; b.kind = SHAPE_ELLIPSE; b.x0 = doc.w * 0.42f; b.y0 = doc.h * 0.28f; b.x1 = doc.w * 0.78f; b.y1 = doc.h * 0.78f;
+        addShapeLayer(doc, b, second);
+        layerSelection = {1, 2};
+        remember("Group Layers");
+        groupLayers(doc, layerSelection);
+        activeGroupId = doc.cur().groupId;
+        LayerGroup& group = doc.groups.back(); group.opacity = 0.72f; group.hasMask = true; group.mask.assign((size_t)doc.w * doc.h, 255);
+        for (int y = 0; y < doc.h; ++y) for (int x = 0; x < doc.w / 3; ++x) group.mask[(size_t)y * doc.w + x] = 0;
+        Image before; composite(doc, before, {0, 0, doc.w, doc.h}, false);
+        std::string err; const std::string project = scriptPath("groups-roundtrip.chimera").u8string(); Doc roundTrip;
+        const bool saved = saveProject(doc, project, err) && openDoc(project, roundTrip, err);
+        Image after; if (saved) composite(roundTrip, after, {0, 0, roundTrip.w, roundTrip.h}, false);
+        const bool same = saved && roundTrip.groups.size() == 1 && roundTrip.layers[1].groupId == roundTrip.layers[2].groupId && before.px == after.px;
+        fprintf(stderr, "layer-groups: %s; two children, group opacity and mask, project/composite round trip=%d\n", same ? "passed" : err.c_str(), saved);
         changed();
         return;
     }
