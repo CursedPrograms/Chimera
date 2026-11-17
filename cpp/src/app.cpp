@@ -2378,7 +2378,8 @@ static int shapeKind() {
     }
 }
 // PhotoCraft's custom shape presets are paths in a 100 by 100 box; these starter paths use the same coordinates.
-static const char* CUSTOM_SHAPE_NAMES[] = {"Heart", "Arrow Right", "Arrow Left", "Cloud", "Speech Bubble", "Lightning", "Diamond", "Check Mark"};
+static const char* CUSTOM_SHAPE_NAMES[] = {"Heart", "Arrow Right", "Arrow Left", "Cloud", "Speech Bubble", "Lightning", "Diamond", "Check Mark",
+                                           "Banner", "Ribbon", "Pentagon", "Hexagon", "Octagon", "Plus", "Cross", "Star", "Burst", "Leaf", "Raindrop", "Thought Bubble"};
 static const std::vector<std::vector<ImVec2>> CUSTOM_SHAPE_POINTS = {
     {{50,96},{7,55},{2,37},{5,20},{15,7},{30,2},{43,8},{50,20},{57,8},{70,2},{85,7},{95,20},{98,37},{93,55}},
     {{0,32},{57,32},{57,10},{100,50},{57,90},{57,68},{0,68}},
@@ -2387,8 +2388,22 @@ static const std::vector<std::vector<ImVec2>> CUSTOM_SHAPE_POINTS = {
     {{13,5},{87,5},{98,16},{98,60},{87,72},{52,72},{30,98},{34,72},{13,72},{2,60},{2,16}},
     {{62,0},{23,51},{46,51},{34,100},{82,39},{58,39}},
     {{50,0},{100,50},{50,100},{0,50}},
-    {{4,54},{20,37},{39,57},{80,10},{97,26},{39,90}}
+    {{4,54},{20,37},{39,57},{80,10},{97,26},{39,90}},
+    {{0,8},{100,8},{100,72},{72,72},{50,100},{28,72},{0,72}},
+    {{0,8},{100,8},{100,72},{72,72},{60,92},{60,72},{40,72},{40,92},{28,72},{0,72}},
+    {{50,0},{100,50},{50,100},{0,50},{15,50}},
+    {{25,0},{75,0},{100,50},{75,100},{25,100},{0,50}},
+    {{30,0},{70,0},{100,30},{100,70},{70,100},{30,100},{0,70},{0,30}},
+    {{38,0},{62,0},{62,38},{100,38},{100,62},{62,62},{62,100},{38,100},{38,62},{0,62},{0,38},{38,38}},
+    {{20,0},{50,30},{80,0},{100,20},{70,50},{100,80},{80,100},{50,70},{20,100},{0,80},{30,50},{0,20}},
+    {{50,0},{62,35},{98,35},{69,56},{80,94},{50,70},{20,94},{31,56},{2,35},{38,35}},
+    {{50,0},{62,34},{98,38},{72,60},{80,96},{50,76},{20,96},{28,60},{2,38},{38,34}},
+    {{50,2},{61,25},{88,5},{76,34},{100,48},{72,55},{86,88},{55,74},{41,100},{38,69},{7,84},{22,55},{0,38},{31,39}},
+    {{50,0},{80,45},{80,68},{70,88},{50,100},{30,88},{20,68},{20,45}},
+    {{50,7},{76,8},{96,27},{97,48},{85,65},{66,73},{54,70},{44,79},{40,94},{28,84},{31,70},{14,68},{3,54},{6,37},{21,29},{29,14}}
 };
+static const bool CUSTOM_SHAPE_SMOOTH[] = {true, false, false, true, false, false, false, false, false, false,
+                                           false, false, false, false, false, false, false, true, true, true};
 static Shape customShapeFromDrag(ImVec2 a, ImVec2 b) {
     // Fit the selected PhotoCraft-style preset path into the drag box without changing its outline.
     Shape sh = shapeNext;
@@ -2408,8 +2423,16 @@ static Shape customShapeFromDrag(ImVec2 a, ImVec2 b) {
     sh.x0 = x0; sh.y0 = y0; sh.x1 = x1; sh.y1 = y1;
     Subpath sp; sp.closed = true;
     const auto& points = CUSTOM_SHAPE_POINTS[std::clamp(customShapePick, 0, (int)CUSTOM_SHAPE_POINTS.size() - 1)];
-    for (const ImVec2& p : points) {
+    for (size_t i = 0; i < points.size(); ++i) {
+        const ImVec2& p = points[i];
         Knot k; k.ax = k.ix = k.ox = x0 + p.x / 100.0f * (x1 - x0); k.ay = k.iy = k.oy = y0 + p.y / 100.0f * (y1 - y0);
+        if (CUSTOM_SHAPE_SMOOTH[customShapePick] && !(customShapePick == 0 && i == 0)) {
+            const ImVec2& prev = points[(i + points.size() - 1) % points.size()];
+            const ImVec2& next = points[(i + 1) % points.size()];
+            const float tx = (next.x - prev.x) / 6.0f * (x1 - x0) / 100.0f;
+            const float ty = (next.y - prev.y) / 6.0f * (y1 - y0) / 100.0f;
+            k.ix = k.ax - tx; k.iy = k.ay - ty; k.ox = k.ax + tx; k.oy = k.ay + ty; k.smooth = true;
+        }
         sp.knots.push_back(k);
     }
     sh.path = {sp};
@@ -3652,7 +3675,26 @@ static void optionsBar() {
         if (live) { ImGui::TextDisabled("%s", L.name.c_str()); ImGui::SameLine(0, 14); }
         if (Toolbar::current() == Toolbar::CUSTOM_SHAPE) {
             ImGui::SetNextItemWidth(160);
-            ImGui::Combo("Shape", &customShapePick, CUSTOM_SHAPE_NAMES, IM_ARRAYSIZE(CUSTOM_SHAPE_NAMES));
+            if (ImGui::BeginCombo("Shape", CUSTOM_SHAPE_NAMES[customShapePick], ImGuiComboFlags_HeightLarge)) {
+                for (int i = 0; i < IM_ARRAYSIZE(CUSTOM_SHAPE_NAMES); ++i) {
+                    if (i % 4) ImGui::SameLine(0, 4);
+                    ImGui::PushID(i);
+                    ImGui::Button("##shape", ImVec2(72, 70));
+                    const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+                    const auto& source = CUSTOM_SHAPE_POINTS[i];
+                    float loX = 100, loY = 100, hiX = 0, hiY = 0;
+                    for (const ImVec2& p : source) { loX = std::min(loX, p.x); loY = std::min(loY, p.y); hiX = std::max(hiX, p.x); hiY = std::max(hiY, p.y); }
+                    const float scale = std::min(38.0f / std::max(1.0f, hiX - loX), 38.0f / std::max(1.0f, hiY - loY));
+                    std::vector<ImVec2> icon;
+                    for (const ImVec2& p : source) icon.push_back(ImVec2(a.x + 36 + (p.x - (loX + hiX) * 0.5f) * scale, a.y + 24 + (p.y - (loY + hiY) * 0.5f) * scale));
+                    ImGui::GetWindowDrawList()->AddPolyline(icon.data(), (int)icon.size(), C_PINK, ImDrawFlags_Closed, 1.5f);
+                    const ImVec2 text = ImGui::CalcTextSize(CUSTOM_SHAPE_NAMES[i]);
+                    ImGui::GetWindowDrawList()->AddText(ImVec2(a.x + (72 - text.x) * 0.5f, b.y - text.y - 4), C_TEXT, CUSTOM_SHAPE_NAMES[i]);
+                    if (ImGui::IsItemClicked()) customShapePick = i;
+                    ImGui::PopID();
+                }
+                ImGui::EndCombo();
+            }
             ImGui::SameLine(0, 12);
         }
         edited(ImGui::Checkbox("Fill", &sh.fillOn));
