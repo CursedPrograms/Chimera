@@ -531,6 +531,20 @@ bool openDoc(const std::string& path, Doc& d, std::string& err) {
                 if (s.rect.empty()) { r.ok = false; break; }
                 n.slices.push_back(std::move(s));
             }
+            if (r.ok && r.i < b.size()) {
+                if (r.i + 8 > b.size() || memcmp(b.data() + r.i, "ART1", 4)) { err = "The project has an unknown extension"; return false; }
+                r.i += 4;
+                const uint32_t boards = r.u32();
+                if (boards > 100000) { err = "The project has too many artboards"; return false; }
+                for (uint32_t i = 0; i < boards && r.ok; ++i) {
+                    Artboard a;
+                    a.rect.x0 = r.i32(); a.rect.y0 = r.i32(); a.rect.x1 = r.i32(); a.rect.y1 = r.i32();
+                    a.background = r.i32();
+                    auto name = r.bytes(); a.name.assign(name.begin(), name.end());
+                    if (a.rect.empty()) { r.ok = false; break; }
+                    n.artboards.push_back(std::move(a));
+                }
+            }
         }
         if (!r.ok || n.layers.empty()) { err = "The project is damaged"; return false; }
         n.active = std::clamp(n.active, 0, (int)n.layers.size() - 1);
@@ -647,6 +661,14 @@ bool saveProject(const Doc& d, const std::string& path, std::string& err) {
         putU32(o, (uint32_t)s.id); putU32(o, (uint32_t)s.rect.x0); putU32(o, (uint32_t)s.rect.y0);
         putU32(o, (uint32_t)s.rect.x1); putU32(o, (uint32_t)s.rect.y1);
         putBytes(o, (const uint8_t*)s.name.data(), s.name.size());
+    }
+    o.insert(o.end(), {'A', 'R', 'T', '1'});
+    putU32(o, (uint32_t)d.artboards.size());
+    for (const Artboard& a : d.artboards) {
+        putU32(o, (uint32_t)a.rect.x0); putU32(o, (uint32_t)a.rect.y0);
+        putU32(o, (uint32_t)a.rect.x1); putU32(o, (uint32_t)a.rect.y1);
+        putU32(o, (uint32_t)a.background);
+        putBytes(o, (const uint8_t*)a.name.data(), a.name.size());
     }
     if (!writeFile(path, o)) { err = "Can't write " + path; return false; }
     return true;

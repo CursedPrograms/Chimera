@@ -117,7 +117,7 @@ static std::string toast; static double toastUntil = 0;
 static void magneticClear();
 
 enum Tool { T_MOVE, T_RECT, T_ELLIPSE, T_LASSO, T_POLY, T_MAGNETIC, T_WAND, T_BRUSH, T_ERASER, T_BUCKET, T_DROPPER, T_HAND, T_ROTATE,
-            T_PENCIL, T_ZOOM, T_ROW, T_COL, T_CROP, T_PCROP, T_SLICE, T_SLICE_SELECT, T_FRAME, T_GRADIENT, T_MAGIC_ERASER, T_RETOUCH, T_QUICK, T_OBJECT, T_REDEYE, T_HEAL, T_SHAPE, T_MARK, T_TYPE, T_PEN, T_COUNT,
+            T_PENCIL, T_ZOOM, T_ROW, T_COL, T_CROP, T_PCROP, T_SLICE, T_SLICE_SELECT, T_FRAME, T_ARTBOARD, T_GRADIENT, T_MAGIC_ERASER, T_RETOUCH, T_QUICK, T_OBJECT, T_REDEYE, T_HEAL, T_SHAPE, T_MARK, T_TYPE, T_PEN, T_COUNT,
             T_NONE = T_COUNT };   // T_NONE: a tool on the strip Chimera doesn't have yet
 static int tool = T_BRUSH;
 static uint8_t fg[4] = {0, 0, 0, 255}, bgc[4] = {255, 255, 255, 255};   // black on white, as PhotoCraft (D)
@@ -143,6 +143,7 @@ static bool pcropPending = false, pcropCustomSize = false; static float pcropQ[8
 static std::vector<ImVec2> pcropClicks; static int pcropDragPart = -1, pcropOutW = 0, pcropOutH = 0;
 static ImVec2 pcropMoveStart; static float pcropMoveQ[8] = {0};
 static int sliceActive = -1;
+static int artboardActive = -1, artboardWidth = 750, artboardHeight = 1334, artboardBackground = 0;
 static Rect sliceStartRect;
 static bool sliceDidMove = false;
 static bool frameEllipse = false;
@@ -2092,6 +2093,17 @@ static bool createFrame(Rect rect) {
     changed();
     return true;
 }
+// Add an artboard rectangle to the document; its metadata is saved separately from image pixels.
+static bool createArtboard(Rect rect) {
+    if (rect.empty()) return false;
+    int number = 1;
+    for (const Artboard& a : doc.artboards) if (a.name.rfind("Artboard ", 0) == 0) ++number;
+    remember("New Artboard");
+    doc.artboards.push_back({rect, "Artboard " + std::to_string(number), artboardBackground});
+    artboardActive = (int)doc.artboards.size() - 1;
+    changed();
+    return true;
+}
 // Place an image into the active frame without tying later frame edits to image resampling.
 static void addPlacedImage(Image image, const std::string &name) {
     const bool intoFrame = !doc.layers.empty() && doc.cur().frame && doc.cur().isShape();
@@ -2578,6 +2590,8 @@ static void canvasInput() {
         }
         case T_FRAME:
             break;
+        case T_ARTBOARD:
+            break;
         case T_GRADIENT: case T_OBJECT: break;   // done when the drag ends
         case T_QUICK: quickPts = {c.x, c.y}; break;
         case T_REDEYE:
@@ -2824,6 +2838,15 @@ static void canvasInput() {
                 createFrame(r);
             }
             break;
+        case T_ARTBOARD:
+            if (std::fabs(c.x - dragStart.x) >= 3 && std::fabs(c.y - dragStart.y) >= 3) {
+                createArtboard({(int)std::floor(std::min(c.x, dragStart.x)), (int)std::floor(std::min(c.y, dragStart.y)),
+                                (int)std::ceil(std::max(c.x, dragStart.x)), (int)std::ceil(std::max(c.y, dragStart.y))});
+            } else {
+                const int x = (int)std::lround(c.x), y = (int)std::lround(c.y);
+                createArtboard({x, y, x + artboardWidth, y + artboardHeight});
+            }
+            break;
         case T_QUICK: quickSelectStroke(); break;
         case T_PEN:
             if (penMode() == PN_FREE && penFree.size() >= 6) {   // the dragged line as a smooth path (a point every few pixels)
@@ -3018,6 +3041,21 @@ static void drawCanvas() {
         if (pts.size() >= 2) { dl->AddPolyline(pts.data(), (int)pts.size(), IM_COL32(0, 0, 0, 220), 0, 3); dl->AddPolyline(pts.data(), (int)pts.size(), C_PINK, 0, 1.5f); }
         for (size_t i : magneticAnchors) if (i < magneticPts.size()) dl->AddCircleFilled(toScreen((float)magneticPts[i].x, (float)magneticPts[i].y), 3.0f, C_PINK, 12);
     }
+    if (!doc.artboards.empty() && (tool == T_ARTBOARD || tool == T_MOVE)) {
+        for (size_t i = 0; i < doc.artboards.size(); ++i) {
+            const Artboard& board = doc.artboards[i];
+            const ImVec2 a = toScreen((float)board.rect.x0, (float)board.rect.y0), b = toScreen((float)board.rect.x1, (float)board.rect.y1);
+            const ImU32 fill = board.background == 1 ? IM_COL32(0, 0, 0, 28) : board.background == 2 ? IM_COL32(0, 123, 183, 22) : IM_COL32(255, 255, 255, 22);
+            dl->AddRectFilled(a, b, fill);
+            dl->AddRect(a, b, (int)i == artboardActive ? C_PINK : IM_COL32(235, 235, 235, 210), 0, 0, (int)i == artboardActive ? 2.0f : 1.0f);
+            dl->AddText(ImVec2(a.x + 5, a.y + 4), C_PINK, board.name.c_str());
+        }
+    }
+    if (tool == T_ARTBOARD && dragging) {
+        const ImVec2 a = toScreen(std::min(dragStart.x, dragNow.x), std::min(dragStart.y, dragNow.y));
+        const ImVec2 b = toScreen(std::max(dragStart.x, dragNow.x), std::max(dragStart.y, dragNow.y));
+        dl->AddRect(a, b, C_PINK, 0, 0, 2.0f);
+    }
     if (tool == T_SHAPE && dragging) {   // the shape being drawn, outlined
         const std::vector<float> o = shapeOutline(shapeFromDrag(dragStart, dragNow));
         std::vector<ImVec2> pts;
@@ -3200,6 +3238,7 @@ static int ltTool(int id) {
     case Toolbar::BRUSH: return T_BRUSH; case Toolbar::ERASER: return T_ERASER; case Toolbar::PAINT_BUCKET: return T_BUCKET;
     case Toolbar::EYEDROPPER: return T_DROPPER; case Toolbar::HAND: return T_HAND;
     case Toolbar::ROTATE_VIEW: return T_ROTATE;
+    case Toolbar::ARTBOARD: return T_ARTBOARD;
     case Toolbar::MAGNETIC_LASSO: return T_MAGNETIC;
     case Toolbar::PENCIL: return T_PENCIL; case Toolbar::ZOOM: return T_ZOOM;
     case Toolbar::SINGLE_ROW_MARQUEE: return T_ROW; case Toolbar::SINGLE_COLUMN_MARQUEE: return T_COL;
@@ -3459,6 +3498,15 @@ static void optionsBar() {
         ImGui::SameLine(0, 12);
         ImGui::TextDisabled("Drag a rectangle or ellipse; place an image to clip it inside the frame");
         break;
+    case T_ARTBOARD: {
+        sliderI("Width", &artboardWidth, 1, 10000);
+        ImGui::SameLine(0, 10); sliderI("Height", &artboardHeight, 1, 10000);
+        ImGui::SameLine(0, 10);
+        const char* backgrounds[] = {"White", "Black", "Atelier Blue"};
+        ImGui::SetNextItemWidth(120); ImGui::Combo("Background", &artboardBackground, backgrounds, IM_ARRAYSIZE(backgrounds));
+        ImGui::SameLine(0, 12); ImGui::TextDisabled("Drag to draw; click to place a board at this size");
+        break;
+    }
     case T_ZOOM: ImGui::TextDisabled("Click zooms in, Alt+click zooms out; the wheel zooms too"); break;
     case T_ROTATE:
         ImGui::TextDisabled("Drag around the canvas centre to rotate the view; Shift snaps to 15 degrees; double-click or Escape resets");
@@ -4657,6 +4705,20 @@ void script(const std::string& what) {
         changed();
         const bool ok = doc.layers.size() == 3 && doc.layers[1].shape.kind == SHAPE_PATH && doc.layers[1].shape.path[0].knots.size() == CUSTOM_SHAPE_POINTS[0].size() && doc.layers[2].shape.path[0].knots.size() == CUSTOM_SHAPE_POINTS[1].size();
         fprintf(stderr, "custom-shape: %s; two editable SHAPE_PATH presets created\n", ok ? "passed" : "preset path check failed");
+        return;
+    }
+    if (what == "artboard") {
+        Toolbar::select(Toolbar::ARTBOARD); syncTool();
+        createArtboard({doc.w / 8, doc.h / 8, doc.w / 2, doc.h * 3 / 4});
+        artboardBackground = 1;
+        createArtboard({doc.w * 5 / 8, doc.h / 5, doc.w * 7 / 8, doc.h * 4 / 5});
+        std::string err;
+        const std::string project = scriptPath("artboards-roundtrip.chimera").u8string();
+        Doc roundTrip;
+        const bool saved = saveProject(doc, project, err) && openDoc(project, roundTrip, err);
+        const bool ok = saved && roundTrip.artboards.size() == 2 && roundTrip.artboards[0].name == "Artboard 1" && roundTrip.artboards[1].background == 1;
+        fprintf(stderr, "artboard: %s; two named regions, background and project round trip=%d\n", ok ? "passed" : err.c_str(), saved);
+        changed();
         return;
     }
     if (what == "about") { scriptDlg = D_ABOUT; return; }   // Help > About: the splash art

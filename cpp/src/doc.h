@@ -27,6 +27,9 @@ struct Slice {
     std::string name;
 };
 
+// An artboard is a named canvas region that the Artboard tool can select and resize.
+struct Artboard { Rect rect; std::string name; int background = 0; };
+
 struct Image {
     int w = 0, h = 0;
     std::vector<uint8_t> px;                     // RGBA
@@ -84,6 +87,7 @@ struct Doc {
     bool editMask = false;                       // painting / filters go to the active layer's mask
     std::vector<uint8_t> sel;                    // canvas-sized; empty() = nothing selected (everything is fair game)
     std::vector<Slice> slices;                   // user slices used by the Slice tools and image export
+    std::vector<Artboard> artboards;             // named design regions, independent of the pixel layers
     std::string path;                            // where it was opened from / saved to
     // the marks on it (PhotoCraft's Color Sampler, Count, Note and Ruler tools): not part of the picture
     struct Mark { float x = 0, y = 0; std::string text; };
