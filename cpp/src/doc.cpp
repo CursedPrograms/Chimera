@@ -195,6 +195,34 @@ bool groupLocked(const Doc& d, int id) {
     return false;
 }
 
+    // after PhotoCraft (crates/doc/src/comps.rs artboard movement): translate each descendant through its layer offset.
+void moveGroupContents(Doc& d, int groupId, int dx, int dy) {
+    auto descendsFrom = [&](int parent) {
+        while (parent) {
+            if (parent == groupId) return true;
+            auto it = std::find_if(d.groups.begin(), d.groups.end(), [parent](const LayerGroup& g) { return g.id == parent; });
+            if (it == d.groups.end()) break;
+            parent = it->parentId;
+        }
+        return false;
+    };
+    for (Layer& layer : d.layers) if (descendsFrom(layer.groupId)) {
+        layer.x += dx; layer.y += dy;
+    }
+    for (LayerGroup& group : d.groups) if (group.id == groupId && group.hasMask && group.mask.size() == (size_t)d.w * d.h) {
+        std::vector<uint8_t> moved(group.mask.size(), 0);
+        for (int y = 0; y < d.h; ++y) for (int x = 0; x < d.w; ++x) {
+            const int sx = x - dx, sy = y - dy;
+            if (sx >= 0 && sy >= 0 && sx < d.w && sy < d.h) moved[(size_t)y * d.w + x] = group.mask[(size_t)sy * d.w + sx];
+        }
+        group.mask.swap(moved);
+    }
+    for (Artboard& board : d.artboards) if (board.groupId == groupId) {
+        board.rect.x0 += dx; board.rect.x1 += dx; board.rect.y0 += dy; board.rect.y1 += dy;
+    }
+    d.dirty = true;
+}
+
 // ---- fill layers
 const char* gradStyleName(int s) {
     static const char* N[GRAD_COUNT] = {"Linear", "Radial", "Angle", "Reflected", "Diamond"};
@@ -510,13 +538,14 @@ void composite(const Doc& d, Image& out, Rect r, bool showMask) {
 bool renderArtboard(const Doc& d, int groupId, Image& out) {
     auto board = std::find_if(d.artboards.begin(), d.artboards.end(), [groupId](const Artboard& a) { return a.groupId == groupId; });
     if (board == d.artboards.end() || board->rect.empty()) return false;
-    Doc content = d;
-    content.layers.clear(); content.groups.clear(); content.active = 0;
-    for (const Layer& layer : d.layers) if (layer.groupId == groupId) { content.layers.push_back(layer); content.layers.back().groupId = 0; }
+    // after PhotoCraft (crates/doc/src/comps.rs artboard rendering): flatten the board subtree in stack order;
+    // nested groups and their own blend/mask settings stay inside the board composite.
+    Doc content; content.w = d.w; content.h = d.h; content.active = 0;
+    appendTreeLayers(d, groupId, content.layers, board->rect);
     if (content.layers.empty()) return false;
     content.layers.front().clip = false;
     Image canvas;
-    composite(content, canvas, {0, 0, d.w, d.h}, false);
+    compositeFlat(content, canvas, board->rect.clip(d.w, d.h), false);
     const Rect rect = board->rect;
     out = Image(rect.x1 - rect.x0, rect.y1 - rect.y0);
     for (int y = 0; y < out.h; ++y) for (int x = 0; x < out.w; ++x) {

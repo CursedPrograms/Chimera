@@ -146,6 +146,8 @@ static int sliceActive = -1;
 static int artboardActive = -1, artboardWidth = 750, artboardHeight = 1334, artboardBackground = 0;
 static std::vector<int> layerSelection;
 static int layerRangeAnchor = -1, activeGroupId = 0;
+static bool artboardMoving = false;
+static int artboardMoveDX = 0, artboardMoveDY = 0;
 // Keep multi-selection contiguous when Shift-clicking because groups own a range in the flat stack.
 static void selectLayer(int index) {
     layerSelection.erase(std::remove_if(layerSelection.begin(), layerSelection.end(), [](int i) { return i < 0 || i >= (int)doc.layers.size(); }), layerSelection.end());
@@ -184,6 +186,8 @@ static bool dragging = false, panning = false; static ImVec2 dragStart, dragNow,
 static float rotateStartAngle = 0.0f, rotateStartPointer = 0.0f;
 static int moveStartX = 0, moveStartY = 0;
 static int moveGroupId = 0;
+static bool moveTextLayer = false;
+static float moveTextStartX = 0, moveTextStartY = 0;
 static std::vector<float> lasso, poly;
 // the shape tools: new shapes take these (and the foreground colour); with a shape layer active, the options bar
 // changes that layer's shape instead
@@ -2117,12 +2121,16 @@ static bool createFrame(Rect rect) {
 }
 // Create an artboard as a regular group with a rectangle fill at its base.
 static bool createArtboard(Rect rect) {
+    rect = rect.clip(doc.w, doc.h);
     if (rect.empty()) return false;
     int number = 1;
     for (const Artboard& a : doc.artboards) if (a.name.rfind("Artboard ", 0) == 0) ++number;
     remember("New Artboard");
     int id = 1; for (const LayerGroup& g : doc.groups) id = std::max(id, g.id + 1);
-    LayerGroup group; group.id = id; group.name = "Artboard " + std::to_string(number); group.expanded = true;
+    LayerGroup group; group.id = id; group.name = "Artboard " + std::to_string(number); group.expanded = true; group.hasMask = true;
+    group.mask.assign((size_t)doc.w * doc.h, 0);
+    for (int y = std::max(0, rect.y0); y < std::min(doc.h, rect.y1); ++y)
+        std::fill(group.mask.begin() + (size_t)y * doc.w + std::max(0, rect.x0), group.mask.begin() + (size_t)y * doc.w + std::min(doc.w, rect.x1), (uint8_t)255);
     doc.groups.push_back(group);
     Artboard board; board.rect = rect; board.name = group.name; board.background = artboardBackground; board.groupId = id;
     doc.artboards.push_back(board);
@@ -2380,6 +2388,13 @@ static void typeBegin(ImVec2 c) {
     typeLayer = doc.active;
     changed();
 }
+// after PhotoCraft (crates/ui-egui/src/tools/move_tool.rs text movement): keep the glyphs and
+// their hit box in the same document coordinates while preserving the drag's original grab offset.
+static void moveTextTo(float x, float y) {
+    if (doc.active < 0 || doc.active >= (int)doc.layers.size() || !doc.cur().isText()) return;
+    Layer& layer = doc.cur(); layer.text.x = x; layer.text.y = y; layer.x = layer.y = 0;
+    renderFill(doc, layer); changed();
+}
 // the box typed into, over the picture where the text is (the layer shows the letters as they're typed)
 static void typeEditor() {
     if (typeLayer < 0 && !typeMaskEditing) return;
@@ -2493,6 +2508,26 @@ static Shape customShapeFromDrag(ImVec2 a, ImVec2 b) {
             k.ix = k.ax - tx; k.iy = k.ay - ty; k.ox = k.ax + tx; k.oy = k.ay + ty; k.smooth = true;
         }
         sp.knots.push_back(k);
+    }
+    // after PhotoCraft (crates/engine/src/presets/shapes.rs builtin Heart): keep its six cubic segments,
+    // because a tangent estimated from corner points cannot reproduce the lobes or the bottom cusp.
+    if (customShapePick == 0) {
+        const float sx = (x1 - x0) / 100.0f, sy = (y1 - y0) / 100.0f;
+        const float px[] = {50, 0, 28, 50, 72, 100};
+        const float py[] = {92, 30, 0, 16, 0, 30};
+        const float inx[] = {80, 0, 14, 47, 60, 100};
+        const float iny[] = {70, 52, 0, 8, 0, 12};
+        const float outx[] = {20, 0, 40, 53, 86, 100};
+        const float outy[] = {70, 12, 0, 8, 0, 52};
+        sp.knots.clear();
+        for (int i = 0; i < 6; ++i) {
+            Knot k;
+            k.ax = x0 + px[i] * sx; k.ay = y0 + py[i] * sy;
+            k.ix = x0 + inx[i] * sx; k.iy = y0 + iny[i] * sy;
+            k.ox = x0 + outx[i] * sx; k.oy = y0 + outy[i] * sy;
+            k.smooth = true;
+            sp.knots.push_back(k);
+        }
     }
     sh.path = {sp};
     return sh;
@@ -2613,9 +2648,24 @@ static void canvasInput() {
             rotateStartAngle = viewRotation;
             break;
         }
-        case T_MOVE:
+        case T_MOVE: {
+            moveTextLayer = false;
+            int textHit = -1;
+            for (int i = (int)doc.layers.size() - 1; i >= 0; --i) {
+                const Layer& layer = doc.layers[i];
+                if (!layer.isText() || !layer.visible) continue;
+                const float* b = layer.text.box;
+                if (c.x >= b[0] - 3 && c.x <= b[2] + 3 && c.y >= b[1] - 3 && c.y <= b[3] + 3) { textHit = i; break; }
+            }
+            if (textHit >= 0) selectLayer(textHit);
             if (groupLocked(doc, doc.cur().groupId)) { say("This layer is locked by its group"); dragging = false; break; }
-            remember("Move"); moveStartX = doc.cur().x; moveStartY = doc.cur().y; moveGroupId = doc.cur().groupId; break;
+            remember("Move");
+            if (doc.cur().isText()) {
+                moveTextLayer = true; moveTextStartX = doc.cur().text.x; moveTextStartY = doc.cur().text.y;
+                moveStartX = (int)std::lround(moveTextStartX); moveStartY = (int)std::lround(moveTextStartY); moveGroupId = 0;
+            } else { moveStartX = doc.cur().x; moveStartY = doc.cur().y; moveGroupId = doc.cur().groupId; }
+            break;
+        }
         case T_LASSO: lasso = {c.x, c.y}; break;
         case T_MAGNETIC:
             magneticClick({c.x, c.y}, ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left));
@@ -2674,8 +2724,16 @@ static void canvasInput() {
         }
         case T_FRAME:
             break;
-        case T_ARTBOARD:
+        case T_ARTBOARD: {
+            artboardMoving = false;
+            for (int i = (int)doc.artboards.size() - 1; i >= 0; --i) {
+                const Rect r = doc.artboards[i].rect;
+                if (c.x >= r.x0 && c.x < r.x1 && c.y >= r.y0 && c.y < r.y1) {
+                    artboardActive = i; artboardMoving = true; artboardMoveDX = artboardMoveDY = 0; remember("Move Artboard"); break;
+                }
+            }
             break;
+        }
         case T_GRADIENT: case T_OBJECT: break;   // done when the drag ends
         case T_QUICK: quickPts = {c.x, c.y}; break;
         case T_REDEYE:
@@ -2805,15 +2863,26 @@ static void canvasInput() {
         switch (t) {
         case T_MOVE: {
             Layer& l = doc.cur();
+            if (moveTextLayer && l.isText()) {
+                moveTextTo(moveTextStartX + c.x - dragStart.x, moveTextStartY + c.y - dragStart.y); break;
+            }
             const int nx = moveStartX + (int)std::lround(c.x - dragStart.x), ny = moveStartY + (int)std::lround(c.y - dragStart.y);
             const int dx = nx - l.x, dy = ny - l.y;
             if (moveGroupId && (dx || dy)) {
-                for (Layer& child : doc.layers) if (child.groupId == moveGroupId) { child.x += dx; child.y += dy; }
-                for (Artboard& board : doc.artboards) if (board.groupId == moveGroupId) { board.rect.x0 += dx; board.rect.x1 += dx; board.rect.y0 += dy; board.rect.y1 += dy; }
+                moveGroupContents(doc, moveGroupId, dx, dy);
                 changed();
             } else if (nx != l.x || ny != l.y) { l.x = nx; l.y = ny; changed(); }
             break;
         }
+        case T_ARTBOARD:
+            if (artboardMoving && artboardActive >= 0 && artboardActive < (int)doc.artboards.size()) {
+                Artboard& board = doc.artboards[artboardActive];
+                const int x = (int)std::lround(c.x - dragStart.x), y = (int)std::lround(c.y - dragStart.y);
+                moveGroupContents(doc, board.groupId, x - artboardMoveDX, y - artboardMoveDY);
+                artboardMoveDX = x; artboardMoveDY = y;
+                changed();
+            }
+            break;
         case T_LASSO: if (std::hypot(c.x - lasso[lasso.size() - 2], c.y - lasso.back()) * zoom > 2) { lasso.push_back(c.x); lasso.push_back(c.y); } break;
         case T_DROPPER: pickColour(c, io.KeyAlt); break;
         case T_CROP: cropR[2] = c.x; cropR[3] = c.y; break;
@@ -2928,7 +2997,9 @@ static void canvasInput() {
             }
             break;
         case T_ARTBOARD:
-            if (std::fabs(c.x - dragStart.x) >= 3 && std::fabs(c.y - dragStart.y) >= 3) {
+            if (artboardMoving) {
+                artboardMoving = false;
+            } else if (std::fabs(c.x - dragStart.x) >= 3 && std::fabs(c.y - dragStart.y) >= 3) {
                 createArtboard({(int)std::floor(std::min(c.x, dragStart.x)), (int)std::floor(std::min(c.y, dragStart.y)),
                                 (int)std::ceil(std::max(c.x, dragStart.x)), (int)std::ceil(std::max(c.y, dragStart.y))});
             } else {
@@ -3002,6 +3073,7 @@ static void canvasInput() {
         else if (ImGui::IsKeyPressed(ImGuiKey_Escape)) pcropCancel();
     }
     if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) && t != T_HAND && !ImGui::IsMouseDown(ImGuiMouseButton_Middle)) panning = false;
+    if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) moveTextLayer = false;
 }
 
 static void drawCanvas() {
@@ -4099,9 +4171,13 @@ static void layersPanel(float height) {
 
     ImGui::BeginChild("layerlist", ImVec2(0, height), false);
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    const std::vector<LayerTreeEntry> tree = layerTreeWalk(doc);
-    for (auto it = tree.rbegin(); it != tree.rend(); ++it) {
-        const LayerTreeEntry& entry = *it;
+    std::vector<LayerTreeEntry> tree = layerTreeWalk(doc);
+    std::stable_sort(tree.begin(), tree.end(), [](const LayerTreeEntry& a, const LayerTreeEntry& b) {
+        const size_t n = std::min(a.path.size(), b.path.size());
+        for (size_t i = 0; i < n; ++i) if (a.path[i] != b.path[i]) return a.path[i] > b.path[i];
+        return a.path.size() < b.path.size();
+    });
+    for (const LayerTreeEntry& entry : tree) {
         if (entry.group) {
             auto g = std::find_if(doc.groups.begin(), doc.groups.end(), [&](const LayerGroup& q) { return q.id == entry.id; });
             if (g == doc.groups.end()) continue;
@@ -4887,8 +4963,19 @@ void script(const std::string& what) {
         addShapeLayer(doc, sh, fill);
         doc.cur().name = "Arrow Right";
         changed();
-        const bool ok = doc.layers.size() == 3 && doc.layers[1].shape.kind == SHAPE_PATH && doc.layers[1].shape.path[0].knots.size() == CUSTOM_SHAPE_POINTS[0].size() && doc.layers[2].shape.path[0].knots.size() == CUSTOM_SHAPE_POINTS[1].size();
-        fprintf(stderr, "custom-shape: %s; two editable SHAPE_PATH presets created\n", ok ? "passed" : "preset path check failed");
+        const bool ok = doc.layers.size() == 3 && doc.layers[1].shape.kind == SHAPE_PATH && doc.layers[1].shape.path[0].knots.size() == 6 && doc.layers[1].shape.path[0].knots.front().smooth && doc.layers[2].shape.path[0].knots.size() == CUSTOM_SHAPE_POINTS[1].size();
+        fprintf(stderr, "custom-shape: %s; cubic PhotoCraft heart and editable arrow SHAPE_PATH created\n", ok ? "passed" : "preset path check failed");
+        return;
+    }
+    if (what == "text-move") {
+        Toolbar::select(Toolbar::TYPE_H); syncTool();
+        Text t; t.str = "Grab offset stays put"; t.size = 64; t.x = doc.w * 0.2f; t.y = doc.h * 0.4f;
+        Fill f; f.kind = FILL_SOLID; f.colour[0] = 1; f.colour[1] = 1; f.colour[2] = 1;
+        addTextLayer(doc, t, f); typeLayer = doc.active; snprintf(typeBuf, sizeof typeBuf, "%s", t.str.c_str());
+        const float x = doc.cur().text.x, y = doc.cur().text.y;
+        remember("Move Text"); moveTextTo(x + 72, y + 48);
+        const bool ok = doc.cur().isText() && std::fabs(doc.cur().text.x - x - 72) < 0.01f && std::fabs(doc.cur().text.y - y - 48) < 0.01f;
+        fprintf(stderr, "text-move: %s; text geometry and rendered hit box moved together without a grab jump\n", ok ? "passed" : "move check failed");
         return;
     }
     if (what == "artboard") {
@@ -4896,15 +4983,27 @@ void script(const std::string& what) {
         createArtboard({doc.w / 8, doc.h / 8, doc.w / 2, doc.h * 3 / 4});
         artboardBackground = 1;
         createArtboard({doc.w * 5 / 8, doc.h / 5, doc.w * 7 / 8, doc.h * 4 / 5});
+        const int secondBoardGroup = doc.artboards.back().groupId;
+        Fill boardFill; boardFill.kind = FILL_SOLID; boardFill.colour[0] = 0.9f; boardFill.colour[1] = 0.15f; boardFill.colour[2] = 0.2f;
+        Shape boardShape; boardShape.kind = SHAPE_RECT; boardShape.x0 = doc.w * 0.68f; boardShape.y0 = doc.h * 0.32f; boardShape.x1 = doc.w * 0.82f; boardShape.y1 = doc.h * 0.62f;
+        addShapeLayer(doc, boardShape, boardFill);
+        const int contentLayer = doc.active;
+        groupLayers(doc, {contentLayer});
         std::string err;
         const std::string project = scriptPath("artboards-roundtrip.chimera").u8string();
         Doc roundTrip;
         const bool saved = saveProject(doc, project, err) && openDoc(project, roundTrip, err);
         Image boardImage; const bool rendered = saved && renderArtboard(roundTrip, roundTrip.artboards[0].groupId, boardImage);
         const uint8_t* boardPixel = rendered ? boardImage.at(boardImage.w / 2, boardImage.h / 2) : nullptr;
+        const auto nested = std::find_if(roundTrip.groups.begin(), roundTrip.groups.end(), [&](const LayerGroup& g) { return g.parentId == secondBoardGroup; });
+        Image nestedBoard; const bool nestedRendered = saved && renderArtboard(roundTrip, roundTrip.artboards[1].groupId, nestedBoard);
+        const uint8_t* nestedPixel = nestedRendered ? nestedBoard.at(nestedBoard.w / 2, nestedBoard.h / 2) : nullptr;
+        Doc movedBoard = roundTrip; const Rect oldBoardRect = movedBoard.artboards[1].rect;
+        moveGroupContents(movedBoard, movedBoard.artboards[1].groupId, 3, 4);
+        const bool movedAsAUnit = movedBoard.artboards[1].rect.x0 == oldBoardRect.x0 + 3 && movedBoard.artboards[1].rect.y0 == oldBoardRect.y0 + 4 && movedBoard.layers.back().x == 3 && movedBoard.layers.back().y == 4;
         const bool ok = saved && rendered && boardPixel && boardPixel[0] > 245 && boardPixel[1] > 245 && boardPixel[2] > 245 && roundTrip.artboards.size() == 2 && roundTrip.artboards[0].name == "Artboard 1" && roundTrip.artboards[1].background == 1 &&
-                        roundTrip.artboards[0].groupId != 0 && roundTrip.layers.back().groupId == roundTrip.artboards[1].groupId;
-        fprintf(stderr, "artboard: %s; grouped backgrounds, export render and project round trip=%d\n", ok ? "passed" : err.c_str(), saved);
+                        nested != roundTrip.groups.end() && nestedRendered && nestedPixel && nestedPixel[0] > 180 && nestedPixel[1] < 100 && nestedPixel[2] < 100 && movedAsAUnit;
+        fprintf(stderr, "artboard: %s; nested group contents, group movement, board render and project round trip=%d\n", ok ? "passed" : err.c_str(), saved);
         changed();
         return;
     }
@@ -4919,15 +5018,19 @@ void script(const std::string& what) {
         layerSelection = {1, 2};
         remember("Group Layers");
         groupLayers(doc, layerSelection);
+        const int outerGroup = doc.cur().groupId;
+        remember("Group Layers");
+        groupLayers(doc, layerSelection);
         activeGroupId = doc.cur().groupId;
-        LayerGroup& group = doc.groups.back(); group.opacity = 0.72f; group.hasMask = true; group.mask.assign((size_t)doc.w * doc.h, 255); group.locked = true; group.expanded = true;
+        LayerGroup& group = doc.groups.back(); group.opacity = 0.72f; group.hasMask = true; group.mask.assign((size_t)doc.w * doc.h, 255); group.expanded = true;
+        for (LayerGroup& g : doc.groups) if (g.id == outerGroup) { g.locked = true; g.expanded = true; }
         for (int y = 0; y < doc.h; ++y) for (int x = 0; x < doc.w / 3; ++x) group.mask[(size_t)y * doc.w + x] = 0;
         Image before; composite(doc, before, {0, 0, doc.w, doc.h}, false);
         std::string err; const std::string project = scriptPath("groups-roundtrip.chimera").u8string(); Doc roundTrip;
         const bool saved = saveProject(doc, project, err) && openDoc(project, roundTrip, err);
         Image after; if (saved) composite(roundTrip, after, {0, 0, roundTrip.w, roundTrip.h}, false);
-        const bool same = saved && roundTrip.groups.size() == 1 && roundTrip.groups[0].locked && groupLocked(roundTrip, roundTrip.groups[0].id) && roundTrip.layers[1].groupId == roundTrip.layers[2].groupId && before.px == after.px;
-        fprintf(stderr, "layer-groups: %s; two children, opacity, mask, inherited lock and project/composite round trip=%d\n", same ? "passed" : err.c_str(), saved);
+        const bool same = saved && roundTrip.groups.size() == 2 && roundTrip.groups[0].locked && groupLocked(roundTrip, roundTrip.groups[1].id) && roundTrip.layers[1].groupId == roundTrip.layers[2].groupId && before.px == after.px;
+        fprintf(stderr, "layer-groups: %s; nested groups, opacity, mask, inherited lock and project/composite round trip=%d\n", same ? "passed" : err.c_str(), saved);
         changed();
         return;
     }

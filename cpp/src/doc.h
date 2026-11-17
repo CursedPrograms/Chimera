@@ -139,6 +139,7 @@ std::vector<int> layerPath(const Doc& d, int layerIndex);
 std::vector<int> groupPath(const Doc& d, int groupId);
 int maxGroupDepth(const Doc& d);
 bool groupLocked(const Doc& d, int groupId);
+void moveGroupContents(Doc& d, int groupId, int dx, int dy);
 bool renderArtboard(const Doc& d, int groupId, Image& out);
 void mergeDown(Doc& d);
 void mergeVisible(Doc& d);
