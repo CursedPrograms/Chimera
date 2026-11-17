@@ -106,7 +106,7 @@ static bool quit = false, askQuit = false;
 static std::string toast; static double toastUntil = 0;
 
 enum Tool { T_MOVE, T_RECT, T_ELLIPSE, T_LASSO, T_POLY, T_WAND, T_BRUSH, T_ERASER, T_BUCKET, T_DROPPER, T_HAND,
-            T_PENCIL, T_ZOOM, T_ROW, T_COL, T_CROP, T_GRADIENT, T_MAGIC_ERASER, T_RETOUCH, T_QUICK, T_OBJECT, T_REDEYE, T_HEAL, T_SHAPE, T_MARK, T_COUNT,
+            T_PENCIL, T_ZOOM, T_ROW, T_COL, T_CROP, T_GRADIENT, T_MAGIC_ERASER, T_RETOUCH, T_QUICK, T_OBJECT, T_REDEYE, T_HEAL, T_SHAPE, T_MARK, T_TYPE, T_COUNT,
             T_NONE = T_COUNT };   // T_NONE: a tool on the strip Chimera doesn't have yet
 static int tool = T_BRUSH;
 static uint8_t fg[4] = {0, 0, 0, 255}, bgc[4] = {255, 255, 255, 255};   // black on white, as PhotoCraft (D)
@@ -1567,6 +1567,77 @@ static void applyCrop() {
     if (r.clip(doc.w, doc.h).empty()) return;
     remember("Crop"); cropCanvas(doc, r, cropDelete); changed(); selChanged(); fitNext = true;
 }
+// ---------- the Type tools (PhotoCraft's point text; the Type Mask tools make a selection of the letters) ----------
+static Text typeNext = [] { Text t; t.size = 48; return t; }();
+static int typeLayer = -1;              // the text layer being typed into (-1: none)
+static bool typeMaskEditing = false;    // a Type Mask tool: typing into typeMask, a selection when done
+static Text typeMask;
+static char typeBuf[8192] = "";
+static bool typeFocus = false;
+static bool typeIsMask() { return Toolbar::current() == Toolbar::TYPE_H_MASK || Toolbar::current() == Toolbar::TYPE_V_MASK; }
+static bool typeIsVertical() { return Toolbar::current() == Toolbar::TYPE_V || Toolbar::current() == Toolbar::TYPE_V_MASK; }
+static void typeCommit() {
+    if (typeMaskEditing) {   // the letters as a selection
+        typeMaskEditing = false;
+        typeMask.str = typeBuf;
+        if (!typeMask.str.empty()) {
+            std::vector<float> cov; float box[4];
+            textCoverage(typeMask, doc.w, doc.h, cov, box);
+            std::vector<uint8_t> sel(cov.size());
+            for (size_t i = 0; i < cov.size(); ++i) sel[i] = to8(cov[i]);
+            finishShape(sel, SEL_NEW, "Type Mask");
+        }
+        return;
+    }
+    if (typeLayer < 0) return;
+    if (typeLayer < (int)doc.layers.size() && doc.layers[typeLayer].isText() && doc.layers[typeLayer].text.str.empty()) {
+        doc.active = typeLayer; deleteLayer(doc);   // nothing typed: no layer
+    }
+    typeLayer = -1;
+    changed();
+}
+static void typeBegin(ImVec2 c) {
+    // on a text layer's letters: edit it again; else new text where clicked (its first line's top a little above)
+    for (int i = (int)doc.layers.size() - 1; i >= 0; --i) {
+        const Layer& L = doc.layers[i];
+        if (!L.isText() || !L.visible) continue;
+        const float* b = L.text.box;
+        if (c.x >= b[0] - 4 && c.x <= b[2] + 4 && c.y >= b[1] - 4 && c.y <= b[3] + 4) {
+            doc.active = i; typeLayer = i; snprintf(typeBuf, sizeof typeBuf, "%s", L.text.str.c_str()); typeFocus = true; return;
+        }
+    }
+    Text t = typeNext;
+    t.vertical = typeIsVertical();
+    t.x = c.x; t.y = c.y - t.size * 0.75f;
+    typeBuf[0] = 0; typeFocus = true;
+    if (typeIsMask()) { typeMask = t; typeMaskEditing = true; return; }
+    remember("New Text");
+    Fill f; f.kind = FILL_SOLID; for (int k = 0; k < 3; ++k) f.colour[k] = fg[k] / 255.0f;
+    addTextLayer(doc, t, f);
+    typeLayer = doc.active;
+    changed();
+}
+// the box typed into, over the picture where the text is (the layer shows the letters as they're typed)
+static void typeEditor() {
+    if (typeLayer < 0 && !typeMaskEditing) return;
+    if (typeLayer >= (int)doc.layers.size() || (typeLayer >= 0 && !doc.layers[typeLayer].isText())) { typeLayer = -1; return; }
+    const Text& t = typeMaskEditing ? typeMask : doc.layers[typeLayer].text;
+    const ImVec2 at = toScreen(t.x, t.y + t.size * 1.3f + 6);
+    ImGui::SetNextWindowPos(ImVec2(at.x, at.y));
+    ImGui::SetNextWindowBgAlpha(0.92f);
+    ImGui::Begin("##typing", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing);
+    if (typeFocus) { ImGui::SetKeyboardFocusHere(); typeFocus = false; }
+    if (ImGui::InputTextMultiline("##tb", typeBuf, sizeof typeBuf, ImVec2(360, ImGui::GetTextLineHeight() * 4 + 8))) {
+        if (!typeMaskEditing) { Layer& L = doc.layers[typeLayer]; L.text.str = typeBuf; renderFill(doc, L); changed();
+            std::string nm = L.text.str.substr(0, L.text.str.find('\n')); if (nm.size() > 30) nm.resize(30); L.name = nm.empty() ? "Text" : nm; }
+        else typeMask.str = typeBuf;
+    }
+    ImGui::TextDisabled("Ctrl+Enter or click away to finish, Esc too");
+    const bool done = ImGui::IsKeyPressed(ImGuiKey_Escape) || (ImGui::GetIO().KeyCtrl && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)));
+    ImGui::End();
+    if (done) typeCommit();
+}
+
 // ---------- the marking tools: Color Sampler, Ruler, Note, Count (PhotoCraft's) ----------
 enum { MK_SAMPLER, MK_RULER, MK_NOTE, MK_COUNT };
 static int markMode() {
@@ -1747,6 +1818,11 @@ static void canvasInput() {
             changed(retouchTo(doc, stroke, c.x, c.y, rtSize, rtHard, retouchOpts(), true));
             break;
         }
+        case T_TYPE:
+            if (typeLayer >= 0 || typeMaskEditing) typeCommit();   // a click away finishes what was being typed
+            else typeBegin(c);
+            dragging = false;
+            break;
         case T_MARK: {
             const int mm = markMode();
             if (mm == MK_RULER) { doc.hasRuler = true; doc.ruler[0] = doc.ruler[2] = c.x; doc.ruler[1] = doc.ruler[3] = c.y; break; }
@@ -1905,6 +1981,14 @@ static void drawCanvas() {
     // the Lasso draws nothing while you drag: its selection appears when you let go. The Polygonal Lasso shows its
     // points, since it's built click by click.
     if (!poly.empty()) path(poly, true);
+    if (tool == T_TYPE) {   // the text layers' boxes, faint; the one being typed in, clear
+        for (int i = 0; i < (int)doc.layers.size(); ++i) {
+            const Layer& L = doc.layers[i];
+            if (!L.isText() || !L.visible) continue;
+            const float* b = L.text.box;
+            dl->AddRect(toScreen(b[0] - 2, b[1] - 2), toScreen(b[2] + 2, b[3] + 2), i == typeLayer ? C_PINK : IM_COL32(255, 255, 255, 70), 0, 0, i == typeLayer ? 1.5f : 1.0f);
+        }
+    }
     {   // the marks: samplers, counts, notes and the ruler
         for (size_t i = 0; i < doc.samplers.size(); ++i) {
             const ImVec2 q = toScreen(doc.samplers[i].x, doc.samplers[i].y);
@@ -2051,12 +2135,13 @@ static int ltTool(int id) {
     case Toolbar::SPOT_HEALING: case Toolbar::REMOVE: case Toolbar::HEALING: case Toolbar::PATCH: case Toolbar::CONTENT_AWARE_MOVE: return T_HEAL;
     case Toolbar::RECTANGLE: case Toolbar::ELLIPSE: case Toolbar::TRIANGLE: case Toolbar::POLYGON: case Toolbar::STAR: case Toolbar::LINE: return T_SHAPE;
     case Toolbar::COLOR_SAMPLER: case Toolbar::RULER: case Toolbar::NOTE: case Toolbar::COUNT_TOOL: return T_MARK;
+    case Toolbar::TYPE_H: case Toolbar::TYPE_V: case Toolbar::TYPE_H_MASK: case Toolbar::TYPE_V_MASK: return T_TYPE;
     default: return T_NONE;
     }
 }
 static void syncTool() {
     const int t = ltTool(Toolbar::current());
-    if (t != tool) { tool = t; poly.clear(); }
+    if (t != tool) { if (tool == T_TYPE) typeCommit(); tool = t; poly.clear(); }
 }
 
 static void toolsPanel() {
@@ -2218,6 +2303,47 @@ static void optionsBar() {
         selModes(); ImGui::SameLine(0, 14); ImGui::Checkbox("Sample all layers", &sampleAll); ImGui::SameLine(0, 14);
         ImGui::TextDisabled("Drag a box round an object: it's found inside the box");
         break;
+    case T_TYPE: {
+        // the active text layer's type, or the next text's
+        Layer& L = doc.cur();
+        const bool live = L.isText() && !typeIsMask();
+        Text& t = live ? L.text : (typeMaskEditing ? typeMask : typeNext);
+        bool ch = false;
+        auto edited = [&](bool c) { if (live && ImGui::IsItemActivated()) remember("Text"); ch |= c; };
+        // the font: the fonts on this PC, by name
+        const auto& fonts = systemFonts();
+        const std::string cur = t.font.empty() ? defaultFont() : t.font;
+        std::string curName = "Segoe UI";
+        for (const auto& f : fonts) if (f.path == cur) curName = f.name;
+        ImGui::SetNextItemWidth(200);
+        if (ImGui::BeginCombo("##font", curName.c_str(), ImGuiComboFlags_HeightLarge)) {
+            static char find[64] = "";
+            ImGui::SetNextItemWidth(-1); ImGui::InputTextWithHint("##ff", "Find a font", find, sizeof find);
+            std::string q = find; for (auto& c : q) c = (char)tolower((unsigned char)c);
+            for (const auto& f : fonts) {
+                std::string n = f.name; for (auto& c : n) c = (char)tolower((unsigned char)c);
+                if (!q.empty() && n.find(q) == std::string::npos) continue;
+                if (ImGui::Selectable(f.name.c_str(), f.path == cur)) { if (live) remember("Font"); t.font = f.path; ch = true; }
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine(0, 10); edited(sliderF("Size", &t.size, 4, 1000, "%.0f px", ImGuiSliderFlags_Logarithmic));
+        if (live && L.fill.kind == FILL_SOLID) { ImGui::SameLine(0, 10); edited(ImGui::ColorEdit3("##tc", L.fill.colour, ImGuiColorEditFlags_NoInputs)); }
+        ImGui::SameLine(0, 14);
+        const char* al[] = {t.vertical ? "Top" : "Left", t.vertical ? "Middle" : "Centre", t.vertical ? "Bottom" : "Right"};
+        for (int k = 0; k < 3; ++k) {
+            if (k) ImGui::SameLine(0, 2);
+            const bool on = t.align == k;
+            if (on) ImGui::PushStyleColor(ImGuiCol_Button, col4(C_PINK));
+            if (ImGui::Button(al[k])) { if (live) remember("Align"); t.align = k; ch = true; }
+            if (on) ImGui::PopStyleColor();
+        }
+        ImGui::SameLine(0, 14); edited(sliderF("Tracking", &t.tracking, -200, 1000, "%.0f"));
+        ImGui::SameLine(0, 14); edited(sliderF("Leading", &t.leading, 0.5f, 3.0f, "%.2f"));
+        if (live) { ImGui::SameLine(0, 14); edited(ImGui::Checkbox("Vertical", &t.vertical)); }
+        if (ch && live) { renderFill(doc, L); changed(); }
+        break;
+    }
     case T_MARK: {
         const int mm = markMode();
         if (mm == MK_SAMPLER) {
@@ -2548,7 +2674,7 @@ static void fillPanel() {
     Layer& l = doc.cur();
     Fill& f = l.fill;
     ImGui::TextColored(col4(C_PINK), "PROPERTIES");
-    ImGui::SameLine(); ImGui::TextDisabled("%s", l.isShape() ? (std::string(shapeName(l.shape.kind)) + (f.kind == FILL_SOLID ? " (colour)" : " (gradient)")).c_str() : f.kind == FILL_SOLID ? "Color Fill" : "Gradient Fill");
+    ImGui::SameLine(); ImGui::TextDisabled("%s", l.isText() ? (f.kind == FILL_SOLID ? "Text (colour)" : "Text (gradient)") : l.isShape() ? (std::string(shapeName(l.shape.kind)) + (f.kind == FILL_SOLID ? " (colour)" : " (gradient)")).c_str() : f.kind == FILL_SOLID ? "Color Fill" : "Gradient Fill");
     ImGui::PushItemWidth(-1);
     bool ch = false;
     if (f.kind == FILL_SOLID) ch |= adjColor("##fc", f.colour);
@@ -3057,6 +3183,7 @@ void frame() {
     drawBathos();
     drawMimic();
     drawInoculant();
+    if (tool == T_TYPE) typeEditor();
     updateThumbs();
     maskColours();
 
@@ -3226,6 +3353,20 @@ void script(const std::string& what) {
     if (what.rfind("ico:", 0) == 0) {   // tests: File > Export ICO to a file
         std::string err; const bool ok = saveImage(doc, what.substr(4), err);
         fprintf(stderr, "ico: %s %s\n", ok ? "saved" : "failed", err.c_str());
+    }
+    if (what == "text") {   // tests: horizontal and vertical text layers, centred, a Type Mask selection
+        Toolbar::select(Toolbar::TYPE_H); syncTool();
+        Text t; t.str = "Chimera\nText layers"; t.size = 72; t.x = doc.w * 0.5f; t.y = doc.h * 0.08f; t.align = 1;
+        Fill f; f.kind = FILL_SOLID; f.colour[0] = 1; f.colour[1] = 1; f.colour[2] = 1;
+        addTextLayer(doc, t, f);
+        Text v; v.str = "VERTICAL"; v.size = 40; v.vertical = true; v.x = doc.w * 0.9f; v.y = doc.h * 0.1f;
+        for (const auto& ff : systemFonts()) if (ff.name == "Georgia") v.font = ff.path;
+        Fill g; g.kind = FILL_GRADIENT; g.colour[0] = 0; g.colour[1] = 0.48f; g.colour[2] = 0.72f;
+        addTextLayer(doc, v, g);
+        typeMask = Text(); typeMask.str = "MASK"; typeMask.size = 120; typeMask.x = doc.w * 0.05f; typeMask.y = doc.h * 0.7f;
+        snprintf(typeBuf, sizeof typeBuf, "MASK"); typeMaskEditing = true; typeCommit();
+        fprintf(stderr, "text: %d layers, %d fonts, box %.0f %.0f %.0f %.0f\n", (int)doc.layers.size(), (int)systemFonts().size(), doc.layers[1].text.box[0], doc.layers[1].text.box[1], doc.layers[1].text.box[2], doc.layers[1].text.box[3]);
+        doc.active = 1; changed();
     }
     if (what == "brushes") {   // tests: each new brush along a line, as a mouse would
         const int ids[] = {Toolbar::PATTERN_STAMP, Toolbar::HISTORY_BRUSH, Toolbar::ART_HISTORY_BRUSH, Toolbar::COLOR_REPLACEMENT, Toolbar::MIXER_BRUSH};

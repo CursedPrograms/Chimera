@@ -2,6 +2,7 @@
 // undo. Pixels are 8-bit RGBA, straight alpha; masks and the selection are 8-bit (255 = shown / selected).
 #pragma once
 #include "shape.h"
+#include "text.h"
 #include "adjust.h"
 #include <cstdint>
 #include <memory>
@@ -63,6 +64,8 @@ struct Layer {
     bool isFill() const { return fill.kind != FILL_NONE; }
     Shape shape;                                 // a shape layer (a fill layer only inside its shape, and its stroke)
     bool isShape() const { return shape.kind != SHAPE_NONE; }
+    Text text; bool hasText = false;             // a text layer (a fill layer only where its letters are)
+    bool isText() const { return hasText; }
     uint8_t maskAt(int lx, int ly) const { return hasMask && maskOn ? mask[(size_t)ly * img.w + lx] : 255; }
 };
 
@@ -95,6 +98,7 @@ void addLayer(Doc& d, Layer l);                  // above the active one, and ma
 void addFillLayer(Doc& d, const Fill& f);        // above the active one, masked to the selection when there is one
 void renderFill(const Doc& d, Layer& l);         // a fill layer's pixels from its settings (canvas-sized); shapes too
 void addShapeLayer(Doc& d, const Shape& s, const Fill& f);   // above the active one, named "Rectangle 1"...
+void addTextLayer(Doc& d, const Text& t, const Fill& f);     // above the active one, named by its words
 int clipBase(const Doc& d, int i);               // the layer a clipped layer i is clipped to (i itself when it isn't)
 void deleteLayer(Doc& d);
 void duplicateLayer(Doc& d);

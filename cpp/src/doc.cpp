@@ -117,6 +117,7 @@ static float gradT(const Fill& f, float x, float y, float w, float h) {
 void renderFill(const Doc& d, Layer& l) {
     if (!l.isFill()) return;
     if (l.isShape() && (l.x || l.y)) l.shape.move((float)l.x, (float)l.y);   // a moved shape: its place is in its settings
+    if (l.isText() && (l.x || l.y)) { l.text.x += l.x; l.text.y += l.y; }    // and a moved text
     if (l.img.w != d.w || l.img.h != d.h || l.x || l.y) {   // a fill covers the canvas (its mask moves with it)
         l.img = Image(d.w, d.h);
         if (l.hasMask && l.mask.size() != (size_t)d.w * d.h) l.mask.assign((size_t)d.w * d.h, 255);
@@ -131,6 +132,12 @@ void renderFill(const Doc& d, Layer& l) {
             else { const float t = gradT(f, x + 0.5f, y + 0.5f, (float)d.w, (float)d.h); for (int k = 0; k < 3; ++k) c[k] = f.colour[k] + (f.colour2[k] - f.colour[k]) * t; }
             p[0] = to8(c[0]); p[1] = to8(c[1]); p[2] = to8(c[2]); p[3] = 255;
         }
+    }
+    if (l.isText()) {   // text: the fill only where its letters are
+        std::vector<float> tc;
+        textCoverage(l.text, d.w, d.h, tc, l.text.box);
+        for (size_t i = 0; i < tc.size(); ++i) l.img.px[i * 4 + 3] = to8(tc[i]);
+        return;
     }
     if (!l.isShape()) return;
     // a shape: the fill only inside it, the stroke over its outline
@@ -148,6 +155,15 @@ void renderFill(const Doc& d, Layer& l) {
             p[3] = to8(out);
         }
     }
+}
+void addTextLayer(Doc& d, const Text& t, const Fill& f) {
+    std::string name = t.str.substr(0, t.str.find('\n'));
+    if (name.size() > 30) name = name.substr(0, 30);
+    Layer l = emptyLayer(d, name.empty() ? "Text" : name);
+    l.fill = f; l.text = t; l.hasText = true;
+    renderFill(d, l);
+    addLayer(d, std::move(l));
+    d.editMask = false;
 }
 void addShapeLayer(Doc& d, const Shape& s, const Fill& f) {
     int n = 1;   // "Rectangle 3": one more than the shapes of its kind already there
@@ -491,6 +507,11 @@ bool openDoc(const std::string& path, Doc& d, std::string& err) {
                 auto sb = r.bytes();
                 if (!l.shape.load(std::string(sb.begin(), sb.end()))) { err = "A shape layer in the project is damaged"; return false; }
             }
+            if (flags & (1u << 16)) {   // a text layer's words and type
+                auto tb = r.bytes();
+                if (!l.text.load(std::string(tb.begin(), tb.end()))) { err = "A text layer in the project is damaged"; return false; }
+                l.hasText = true;
+            }
             n.layers.push_back(std::move(l));
         }
         if (!r.ok || n.layers.empty()) { err = "The project is damaged"; return false; }
@@ -588,7 +609,7 @@ bool saveProject(const Doc& d, const std::string& path, std::string& err) {
         putBytes(o, (const uint8_t*)l.name.data(), l.name.size());
         putU32(o, (uint32_t)l.x); putU32(o, (uint32_t)l.y);
         putF(o, l.opacity); putU32(o, l.blend);
-        putU32(o, (l.visible ? 1 : 0) | (l.hasMask ? 2 : 0) | (l.maskOn ? 4 : 0) | ((uint32_t)(l.label & 15) << 8) | (l.isAdjust() ? 1u << 12 : 0) | (l.clip ? 1u << 13 : 0) | (l.isFill() ? 1u << 14 : 0) | (l.isShape() ? 1u << 15 : 0));
+        putU32(o, (l.visible ? 1 : 0) | (l.hasMask ? 2 : 0) | (l.maskOn ? 4 : 0) | ((uint32_t)(l.label & 15) << 8) | (l.isAdjust() ? 1u << 12 : 0) | (l.clip ? 1u << 13 : 0) | (l.isFill() ? 1u << 14 : 0) | (l.isShape() ? 1u << 15 : 0) | (l.isText() ? 1u << 16 : 0));
         std::vector<uint8_t> png;
         stbi_write_png_to_func(toVec, &png, l.img.w, l.img.h, 4, l.img.px.data(), l.img.w * 4);
         putBytes(o, png.data(), png.size());
@@ -600,6 +621,7 @@ bool saveProject(const Doc& d, const std::string& path, std::string& err) {
         if (l.isAdjust()) { const std::string a = l.adj.save(); putBytes(o, (const uint8_t*)a.data(), a.size()); }
         if (l.isFill()) { const std::string f = l.fill.save(); putBytes(o, (const uint8_t*)f.data(), f.size()); }
         if (l.isShape()) { const std::string sh = l.shape.save(); putBytes(o, (const uint8_t*)sh.data(), sh.size()); }
+        if (l.isText()) { const std::string tx = l.text.save(); putBytes(o, (const uint8_t*)tx.data(), tx.size()); }
     }
     if (!writeFile(path, o)) { err = "Can't write " + path; return false; }
     return true;
