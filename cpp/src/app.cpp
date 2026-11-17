@@ -52,6 +52,14 @@ static const ImU32 C_BG = IM_COL32(0x1a, 0x1a, 0x1a, 255), C_PANEL = IM_COL32(0x
 
 static ImVec4 col4(ImU32 c) { return ImGui::ColorConvertU32ToFloat4(c); }
 
+// Script artifacts stay beside the executable so hooks work from any current folder.
+static std::filesystem::path scriptPath(const char* name) {
+    char* base = SDL_GetBasePath();
+    const std::filesystem::path path = (base ? std::filesystem::path(base) : std::filesystem::current_path()) / name;
+    if (base) SDL_free(base);
+    return path;
+}
+
 // ---------- layer colour tags: PhotoCraft's set and colours (Photoshop's labels), in its menu order ----------
 // swatch: the menu's square; eye: the darker shade that fills the layer row's eye column
 struct LabelColour { const char* name; ImU32 swatch, eye; };
@@ -4549,10 +4557,10 @@ void script(const std::string& what) {
         sliceActive = 0;
         if (what == "slices-export") {
             size_t written = 0; std::string err;
-            const auto folder = std::filesystem::path("cpp/build/slice-export-test");
+            const auto folder = scriptPath("slice-export-test");
             if (!writeSlices(folder, written, err)) fprintf(stderr, "slices-export: %s\n", err.c_str());
             else fprintf(stderr, "slices-export: wrote %zu PNG files; safe name=%s\n", written, safeSliceFilename(doc.slices[0].name).c_str());
-            const std::string project = "cpp/build/slices-roundtrip.chimera";
+            const std::string project = scriptPath("slices-roundtrip.chimera").u8string();
             Doc roundTrip;
             if (!saveProject(doc, project, err) || !openDoc(project, roundTrip, err)) fprintf(stderr, "slices-roundtrip: %s\n", err.c_str());
             else fprintf(stderr, "slices-roundtrip: restored %zu user slices\n", roundTrip.slices.size());
@@ -4579,7 +4587,7 @@ void script(const std::string& what) {
         frameEllipse = true;
         createFrame({doc.w * 7 / 12, doc.h / 5, doc.w * 11 / 12, doc.h * 4 / 5});
         std::string err;
-        const std::string project = "cpp/build/frame-roundtrip.chimera";
+        const std::string project = scriptPath("frame-roundtrip.chimera").u8string();
         Doc roundTrip;
         const bool saved = saveProject(doc, project, err) && openDoc(project, roundTrip, err);
         const bool ok = saved && roundTrip.layers.size() == 4 && roundTrip.layers[1].frame &&
