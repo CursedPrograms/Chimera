@@ -72,6 +72,10 @@ struct Doc {
     bool editMask = false;                       // painting / filters go to the active layer's mask
     std::vector<uint8_t> sel;                    // canvas-sized; empty() = nothing selected (everything is fair game)
     std::string path;                            // where it was opened from / saved to
+    // the marks on it (PhotoCraft's Color Sampler, Count, Note and Ruler tools): not part of the picture
+    struct Mark { float x = 0, y = 0; std::string text; };
+    std::vector<Mark> samplers, counts, notes;
+    float ruler[4] = {0, 0, 0, 0}; bool hasRuler = false;
     bool dirty = false;
 
     Layer& cur() { return layers[active]; }

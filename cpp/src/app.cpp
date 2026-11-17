@@ -106,7 +106,7 @@ static bool quit = false, askQuit = false;
 static std::string toast; static double toastUntil = 0;
 
 enum Tool { T_MOVE, T_RECT, T_ELLIPSE, T_LASSO, T_POLY, T_WAND, T_BRUSH, T_ERASER, T_BUCKET, T_DROPPER, T_HAND,
-            T_PENCIL, T_ZOOM, T_ROW, T_COL, T_CROP, T_GRADIENT, T_MAGIC_ERASER, T_RETOUCH, T_QUICK, T_OBJECT, T_REDEYE, T_HEAL, T_SHAPE, T_COUNT,
+            T_PENCIL, T_ZOOM, T_ROW, T_COL, T_CROP, T_GRADIENT, T_MAGIC_ERASER, T_RETOUCH, T_QUICK, T_OBJECT, T_REDEYE, T_HEAL, T_SHAPE, T_MARK, T_COUNT,
             T_NONE = T_COUNT };   // T_NONE: a tool on the strip Chimera doesn't have yet
 static int tool = T_BRUSH;
 static uint8_t fg[4] = {0, 0, 0, 255}, bgc[4] = {255, 255, 255, 255};   // black on white, as PhotoCraft (D)
@@ -1538,6 +1538,33 @@ static void applyCrop() {
     if (r.clip(doc.w, doc.h).empty()) return;
     remember("Crop"); cropCanvas(doc, r, cropDelete); changed(); selChanged(); fitNext = true;
 }
+// ---------- the marking tools: Color Sampler, Ruler, Note, Count (PhotoCraft's) ----------
+enum { MK_SAMPLER, MK_RULER, MK_NOTE, MK_COUNT };
+static int markMode() {
+    switch (Toolbar::current()) {
+    case Toolbar::RULER: return MK_RULER; case Toolbar::NOTE: return MK_NOTE; case Toolbar::COUNT_TOOL: return MK_COUNT;
+    default: return MK_SAMPLER;
+    }
+}
+static int markDrag = -1, noteSel = -1;
+static float countColour[3] = {0.0f, 0.482f, 0.718f};
+static std::vector<Doc::Mark>& markList(int mode) { return mode == MK_SAMPLER ? doc.samplers : mode == MK_COUNT ? doc.counts : doc.notes; }
+static int markNear(const std::vector<Doc::Mark>& v, ImVec2 c, float px) {
+    for (int i = (int)v.size() - 1; i >= 0; --i) if (std::hypot(v[i].x - c.x, v[i].y - c.y) * zoom <= px) return i;
+    return -1;
+}
+// the picture's colour under a sampler (the composite, made again only when the picture changed)
+static void sampledColour(float x, float y, uint8_t* rgb) {
+    static Image comp; static int ver = -1;
+    if (ver != docVersion || comp.w != doc.w || comp.h != doc.h) { comp = Image(doc.w, doc.h); composite(doc, comp, {0, 0, doc.w, doc.h}, false); ver = docVersion; }
+    const int ix = std::clamp((int)x, 0, doc.w - 1), iy = std::clamp((int)y, 0, doc.h - 1);
+    const uint8_t* q = comp.at(ix, iy);
+    rgb[0] = q[0]; rgb[1] = q[1]; rgb[2] = q[2];
+}
+static float rulerAngle() {   // degrees, counter-clockwise from 3 o'clock (y up), as PhotoCraft and Photoshop show it
+    return std::atan2(-(doc.ruler[3] - doc.ruler[1]), doc.ruler[2] - doc.ruler[0]) * 57.29578f;
+}
+
 static int shapeKind() {
     switch (Toolbar::current()) {
     case Toolbar::RECTANGLE: return SHAPE_RECT; case Toolbar::ELLIPSE: return SHAPE_ELLIPSE; case Toolbar::TRIANGLE: return SHAPE_TRIANGLE;
@@ -1691,6 +1718,21 @@ static void canvasInput() {
             changed(retouchTo(doc, stroke, c.x, c.y, rtSize, rtHard, retouchOpts(), true));
             break;
         }
+        case T_MARK: {
+            const int mm = markMode();
+            if (mm == MK_RULER) { doc.hasRuler = true; doc.ruler[0] = doc.ruler[2] = c.x; doc.ruler[1] = doc.ruler[3] = c.y; break; }
+            auto& v = markList(mm);
+            const int hit = markNear(v, c, 10);
+            if (io.KeyAlt) { if (hit >= 0) { remember("Delete Mark"); v.erase(v.begin() + hit); if (mm == MK_NOTE) noteSel = -1; } dragging = false; break; }
+            if (hit >= 0) { markDrag = hit; if (mm == MK_NOTE) noteSel = hit; break; }
+            if (c.x < 0 || c.y < 0 || c.x >= doc.w || c.y >= doc.h) { dragging = false; break; }
+            if (mm == MK_SAMPLER && v.size() >= 10) { say("Ten samplers at most: Alt+click one to take it away"); dragging = false; break; }
+            remember(mm == MK_SAMPLER ? "Color Sampler" : mm == MK_COUNT ? "Count" : "Note");
+            Doc::Mark k; k.x = c.x; k.y = c.y; v.push_back(k);
+            markDrag = (int)v.size() - 1;
+            if (mm == MK_NOTE) noteSel = markDrag;
+            break;
+        }
         case T_HEAL: {
             const int hm = healMode();
             if (hm == HM_HEALING && io.KeyAlt) { healSrcSet = true; healHaveOffset = false; healSrcX = c.x; healSrcY = c.y; say("Healing source set: paint over what to fix"); dragging = false; break; }
@@ -1726,6 +1768,12 @@ static void canvasInput() {
         case T_QUICK: if (std::hypot(c.x - quickPts[quickPts.size() - 2], c.y - quickPts.back()) * zoom > 3) { quickPts.push_back(c.x); quickPts.push_back(c.y); } break;
         case T_PENCIL: if (stroke.on) changed(pencilTo(doc, stroke, c.x, c.y, pencilSize, pencilOpacity, brushColour(), false, false)); break;
         case T_RETOUCH: if (stroke.on) changed(retouchTo(doc, stroke, c.x, c.y, rtSize, rtHard, retouchOpts(), false)); break;
+        case T_MARK:
+            if (markMode() == MK_RULER) { doc.ruler[2] = c.x; doc.ruler[3] = c.y; if (io.KeyShift) {   // in 45-degree steps
+                const float dx = c.x - doc.ruler[0], dy = c.y - doc.ruler[1], l = std::hypot(dx, dy), a = std::round(std::atan2(dy, dx) / 0.785398f) * 0.785398f;
+                doc.ruler[2] = doc.ruler[0] + std::cos(a) * l; doc.ruler[3] = doc.ruler[1] + std::sin(a) * l; } }
+            else if (markDrag >= 0) { auto& v = markList(markMode()); if (markDrag < (int)v.size()) { v[markDrag].x = std::clamp(c.x, 0.0f, (float)doc.w - 1); v[markDrag].y = std::clamp(c.y, 0.0f, (float)doc.h - 1); } }
+            break;
         case T_HEAL:
             if (healMode() >= HM_PATCH) { if (!patchDrag && lasso.size() >= 2 && std::hypot(c.x - lasso[lasso.size() - 2], c.y - lasso.back()) * zoom > 2) { lasso.push_back(c.x); lasso.push_back(c.y); } }
             else if (healPts.size() >= 2 && std::hypot(c.x - healPts[healPts.size() - 2], c.y - healPts.back()) * zoom > 2) { healPts.push_back(c.x); healPts.push_back(c.y); }
@@ -1749,6 +1797,10 @@ static void canvasInput() {
         case T_BRUSH: case T_ERASER: case T_PENCIL: case T_RETOUCH: strokeEnd(stroke); break;
         case T_CROP: if (std::fabs(cropR[2] - cropR[0]) < 2 || std::fabs(cropR[3] - cropR[1]) < 2) cropPending = false; break;
         case T_QUICK: quickSelectStroke(); break;
+        case T_MARK:
+            markDrag = -1;
+            if (markMode() == MK_RULER && std::hypot(doc.ruler[2] - doc.ruler[0], doc.ruler[3] - doc.ruler[1]) * zoom < 2) doc.hasRuler = false;
+            break;
         case T_SHAPE: {
             const Shape sh = shapeFromDrag(dragStart, c);
             if (std::fabs(sh.x1 - sh.x0) * zoom < 2 && std::fabs(sh.y1 - sh.y0) * zoom < 2) break;
@@ -1824,6 +1876,37 @@ static void drawCanvas() {
     // the Lasso draws nothing while you drag: its selection appears when you let go. The Polygonal Lasso shows its
     // points, since it's built click by click.
     if (!poly.empty()) path(poly, true);
+    {   // the marks: samplers, counts, notes and the ruler
+        for (size_t i = 0; i < doc.samplers.size(); ++i) {
+            const ImVec2 q = toScreen(doc.samplers[i].x, doc.samplers[i].y);
+            dl->AddCircle(q, 6, IM_COL32(0, 0, 0, 220), 16, 3); dl->AddCircle(q, 6, IM_COL32(255, 255, 255, 255), 16, 1.5f);
+            dl->AddLine(ImVec2(q.x - 10, q.y), ImVec2(q.x - 6, q.y), IM_COL32(255, 255, 255, 255), 1.5f); dl->AddLine(ImVec2(q.x + 6, q.y), ImVec2(q.x + 10, q.y), IM_COL32(255, 255, 255, 255), 1.5f);
+            dl->AddLine(ImVec2(q.x, q.y - 10), ImVec2(q.x, q.y - 6), IM_COL32(255, 255, 255, 255), 1.5f); dl->AddLine(ImVec2(q.x, q.y + 6), ImVec2(q.x, q.y + 10), IM_COL32(255, 255, 255, 255), 1.5f);
+            const std::string n = std::to_string(i + 1);
+            dl->AddText(ImVec2(q.x + 9, q.y + 5), IM_COL32(0, 0, 0, 255), n.c_str()); dl->AddText(ImVec2(q.x + 8, q.y + 4), IM_COL32(255, 255, 255, 255), n.c_str());
+        }
+        const ImU32 cc = IM_COL32((int)(countColour[0] * 255), (int)(countColour[1] * 255), (int)(countColour[2] * 255), 255);
+        for (size_t i = 0; i < doc.counts.size(); ++i) {
+            const ImVec2 q = toScreen(doc.counts[i].x, doc.counts[i].y);
+            const std::string n = std::to_string(i + 1);
+            const ImVec2 ts = ImGui::CalcTextSize(n.c_str());
+            dl->AddCircleFilled(q, std::max(9.0f, ts.x / 2 + 5), cc);
+            dl->AddText(ImVec2(q.x - ts.x / 2, q.y - ts.y / 2), IM_COL32(255, 255, 255, 255), n.c_str());
+        }
+        for (size_t i = 0; i < doc.notes.size(); ++i) {
+            const ImVec2 q = toScreen(doc.notes[i].x, doc.notes[i].y);
+            const bool sel = (int)i == noteSel && tool == T_MARK && markMode() == MK_NOTE;
+            dl->AddRectFilled(ImVec2(q.x, q.y - 16), ImVec2(q.x + 16, q.y), sel ? IM_COL32(255, 220, 90, 255) : IM_COL32(240, 200, 60, 255), 2);
+            dl->AddRect(ImVec2(q.x, q.y - 16), ImVec2(q.x + 16, q.y), IM_COL32(0, 0, 0, 200), 2);
+            for (int k = 0; k < 3; ++k) dl->AddLine(ImVec2(q.x + 3, q.y - 12 + k * 4), ImVec2(q.x + 13, q.y - 12 + k * 4), IM_COL32(60, 50, 10, 255), 1);
+            if (ImGui::IsWindowHovered() && std::hypot(io.MousePos.x - q.x - 8, io.MousePos.y - q.y + 8) < 10 && !doc.notes[i].text.empty()) ImGui::SetTooltip("%s", doc.notes[i].text.c_str());
+        }
+        if (doc.hasRuler) {
+            const ImVec2 a0 = toScreen(doc.ruler[0], doc.ruler[1]), a1 = toScreen(doc.ruler[2], doc.ruler[3]);
+            dl->AddLine(a0, a1, IM_COL32(0, 0, 0, 200), 3); dl->AddLine(a0, a1, IM_COL32(255, 255, 255, 255), 1.5f);
+            for (const ImVec2& e : {a0, a1}) { dl->AddLine(ImVec2(e.x - 6, e.y), ImVec2(e.x + 6, e.y), IM_COL32(255, 255, 255, 255), 1.5f); dl->AddLine(ImVec2(e.x, e.y - 6), ImVec2(e.x, e.y + 6), IM_COL32(255, 255, 255, 255), 1.5f); }
+        }
+    }
     if (tool == T_SHAPE && dragging) {   // the shape being drawn, outlined
         const std::vector<float> o = shapeOutline(shapeFromDrag(dragStart, dragNow));
         std::vector<ImVec2> pts;
@@ -1937,6 +2020,7 @@ static int ltTool(int id) {
     case Toolbar::QUICK_SELECTION: return T_QUICK; case Toolbar::OBJECT_SELECTION: return T_OBJECT; case Toolbar::RED_EYE: return T_REDEYE;
     case Toolbar::SPOT_HEALING: case Toolbar::REMOVE: case Toolbar::HEALING: case Toolbar::PATCH: case Toolbar::CONTENT_AWARE_MOVE: return T_HEAL;
     case Toolbar::RECTANGLE: case Toolbar::ELLIPSE: case Toolbar::TRIANGLE: case Toolbar::POLYGON: case Toolbar::STAR: case Toolbar::LINE: return T_SHAPE;
+    case Toolbar::COLOR_SAMPLER: case Toolbar::RULER: case Toolbar::NOTE: case Toolbar::COUNT_TOOL: return T_MARK;
     default: return T_NONE;
     }
 }
@@ -2078,6 +2162,49 @@ static void optionsBar() {
         selModes(); ImGui::SameLine(0, 14); ImGui::Checkbox("Sample all layers", &sampleAll); ImGui::SameLine(0, 14);
         ImGui::TextDisabled("Drag a box round an object: it's found inside the box");
         break;
+    case T_MARK: {
+        const int mm = markMode();
+        if (mm == MK_SAMPLER) {
+            if (doc.samplers.empty()) ImGui::TextDisabled("Click to place a sampler (up to ten), drag one to move it, Alt+click takes it away");
+            for (size_t i = 0; i < doc.samplers.size(); ++i) {
+                uint8_t c[3]; sampledColour(doc.samplers[i].x, doc.samplers[i].y, c);
+                if (i) ImGui::SameLine(0, 14);
+                ImGui::ColorButton(("##smp" + std::to_string(i)).c_str(), ImVec4(c[0] / 255.0f, c[1] / 255.0f, c[2] / 255.0f, 1), ImGuiColorEditFlags_NoTooltip, ImVec2(14, 14));
+                ImGui::SameLine(0, 4); ImGui::Text("#%d  %d %d %d", (int)i + 1, c[0], c[1], c[2]);
+            }
+            if (!doc.samplers.empty()) { ImGui::SameLine(0, 18); if (ImGui::Button("Clear All")) { remember("Clear Samplers"); doc.samplers.clear(); } }
+        } else if (mm == MK_RULER) {
+            if (!doc.hasRuler) ImGui::TextDisabled("Drag to measure; Shift keeps it to 45-degree steps");
+            else {
+                const float* r = doc.ruler;
+                ImGui::Text("X %.0f  Y %.0f   W %.0f  H %.0f   A %.1f\xc2\xb0   L %.1f px", r[0], r[1], r[2] - r[0], r[3] - r[1], rulerAngle(), std::hypot(r[2] - r[0], r[3] - r[1]));
+                ImGui::SameLine(0, 18);
+                if (ImGui::Button("Straighten Layer")) {   // the line made level: the layer turned by the ruler's angle
+                    float a = rulerAngle();
+                    while (a > 45) a -= 90;
+                    while (a < -45) a += 90;
+                    if (!pixelLayer()) say("Straighten works on a layer's pixels");
+                    else { remember("Straighten Layer"); transformLayer(doc, 1, 1, a); doc.hasRuler = false; changed(); }
+                }
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Turns the active layer so the ruler's line is level (or upright)");
+                ImGui::SameLine(); if (ImGui::Button("Clear")) doc.hasRuler = false;
+            }
+        } else if (mm == MK_COUNT) {
+            ImGui::Text("Count: %d", (int)doc.counts.size());
+            ImGui::SameLine(0, 14); ImGui::ColorEdit3("##cc", countColour, ImGuiColorEditFlags_NoInputs);
+            ImGui::SameLine(0, 14); if (ImGui::Button("Clear")) { remember("Clear Count"); doc.counts.clear(); }
+            ImGui::SameLine(0, 14); ImGui::TextDisabled("Click adds a number, Alt+click takes one away");
+        } else {
+            if (noteSel >= 0 && noteSel < (int)doc.notes.size()) {
+                char t[1024]; snprintf(t, sizeof t, "%s", doc.notes[noteSel].text.c_str());
+                ImGui::SetNextItemWidth(420);
+                if (ImGui::InputTextWithHint("##note", "Write the note here", t, sizeof t)) { doc.notes[noteSel].text = t; doc.dirty = true; }
+                ImGui::SameLine(0, 8); if (ImGui::Button("Delete")) { remember("Delete Note"); doc.notes.erase(doc.notes.begin() + noteSel); noteSel = -1; }
+            } else ImGui::TextDisabled("Click to add a note, click one to read and change it, Alt+click takes it away");
+            if (!doc.notes.empty()) { ImGui::SameLine(0, 14); if (ImGui::Button("Clear All")) { remember("Clear Notes"); doc.notes.clear(); noteSel = -1; } }
+        }
+        break;
+    }
     case T_SHAPE: {
         // the active shape layer's shape, or the next new shape's settings
         Layer& L = doc.cur();
@@ -3032,6 +3159,15 @@ void script(const std::string& what) {
         std::string err; const bool ok = saveImage(doc, what.substr(4), err);
         fprintf(stderr, "ico: %s %s\n", ok ? "saved" : "failed", err.c_str());
     }
+    if (what == "marks") {   // tests: samplers, counts, a note and a ruler, then the Ruler tool's bar
+        for (int i = 0; i < 3; ++i) { Doc::Mark k; k.x = doc.w * (0.3f + 0.2f * i); k.y = doc.h * 0.4f; doc.samplers.push_back(k); }
+        for (int i = 0; i < 4; ++i) { Doc::Mark k; k.x = doc.w * (0.2f + 0.15f * i); k.y = doc.h * 0.8f; doc.counts.push_back(k); }
+        Doc::Mark n; n.x = doc.w * 0.8f; n.y = doc.h * 0.2f; n.text = "Fix the sky here"; doc.notes.push_back(n);
+        doc.hasRuler = true; doc.ruler[0] = doc.w * 0.1f; doc.ruler[1] = doc.h * 0.3f; doc.ruler[2] = doc.w * 0.45f; doc.ruler[3] = doc.h * 0.2f;
+        Toolbar::select(what == "marks" ? Toolbar::RULER : Toolbar::COLOR_SAMPLER); syncTool();
+        fprintf(stderr, "marks: ruler angle %.1f\n", rulerAngle());
+    }
+    if (what == "samplers") { Doc::Mark k; k.x = doc.w * 0.5f; k.y = doc.h * 0.5f; doc.samplers.push_back(k); k.x = doc.w * 0.2f; doc.samplers.push_back(k); Toolbar::select(Toolbar::COLOR_SAMPLER); syncTool(); }
     if (what == "shapes") {   // tests: every shape, drawn as a drag would, with strokes and corners
         Toolbar::select(Toolbar::STAR); syncTool();
         const float W = (float)doc.w, H = (float)doc.h;
