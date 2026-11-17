@@ -290,6 +290,13 @@ static bool typeUnitsFollowResolution() {
         px144.scale==2 && std::fabs(mm.scale-25.4f/72.0f)<1e-6f && std::strcmp(mm.label,"mm")==0;
 }
 
+// after PhotoCraft (crates/doc/src/text.rs summary_follows_first_run).
+static bool textSummaryFollowsFirstStyleRun() {
+    Text t; t.str="ab"; TextStyle style; style.font="Example Family"; style.size=17; style.tracking=42; style.leading=1.4f;
+    t.runs={{2,style}}; t.syncSummary();
+    return t.font==style.font && t.size==style.size && t.tracking==style.tracking && t.leading==style.leading;
+}
+
 int runSelfTests() {
     struct Test { const char* name; bool (*run)(); };
     static const Test tests[] = {
@@ -311,6 +318,7 @@ int runSelfTests() {
         {"text layer name skips leading blank lines", textLayerNameSkipsLeadingBlankLines},
         {"smart quotes use opening and closing context", smartQuotesMapOpeningAndClosingContext},
         {"type unit conversion follows document resolution", typeUnitsFollowResolution},
+        {"text summary follows first character run", textSummaryFollowsFirstStyleRun},
     };
     int failed = 0;
     for (const Test& test : tests) {

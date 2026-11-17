@@ -46,6 +46,8 @@ struct Text {
     bool load(const std::string& blob);
     std::vector<TextRun> normalizedRuns() const;
     std::vector<ParagraphRun> normalizedParagraphs() const;
+    // after PhotoCraft (crates/doc/src/lib.rs TextLayer::sync_summary).
+    void syncSummary();
 };
 
 // the fonts on this PC (Windows' Fonts folder, the user's own): their files and names, sorted by name

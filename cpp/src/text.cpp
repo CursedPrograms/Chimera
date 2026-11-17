@@ -152,6 +152,17 @@ std::vector<ParagraphRun> Text::normalizedParagraphs() const {
     return out;
 }
 
+// after PhotoCraft (crates/doc/src/lib.rs TextLayer::sync_summary): simple layer fields mirror
+// the first resolved character run so existing options controls show the start style.
+void Text::syncSummary() {
+    const auto normalized=normalizedRuns();
+    if(normalized.empty()) return;
+    font=normalized.front().style.font;
+    size=normalized.front().style.size;
+    tracking=normalized.front().style.tracking;
+    leading=normalized.front().style.leading;
+}
+
 const std::vector<FontFile>& systemFonts() {
     static std::vector<FontFile> list;
     static bool done = false;
