@@ -60,3 +60,6 @@ float textAdvance(const Text& t);     // the first line's advance in pixels, for
 size_t textWordBoundary(const std::string& text, size_t index, bool forward);
 // after PhotoCraft (crates/ui-egui/src/tools/type_tool/keys.rs smart_quotes).
 std::string textSmartQuotes(const std::string& text);
+struct TextUnit { float scale; const char* label; };
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/defaults.rs type_unit).
+TextUnit textUnit(int units, float dpi);

@@ -55,6 +55,15 @@ std::string textSmartQuotes(const std::string& text) {
     return out;
 }
 
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/defaults.rs type_unit): points are the
+// model unit, pixels follow document resolution, and millimetres remain physical units.
+TextUnit textUnit(int units, float dpi) {
+    const float safeDpi=std::isfinite(dpi)?std::max(1.0f,dpi):72.0f;
+    if(units==1) return {safeDpi/72.0f,"px"};
+    if(units==2) return {25.4f/72.0f,"mm"};
+    return {1.0f,"pt"};
+}
+
 std::string Text::save() const {
     // Text settings and a path's editable Bezier knots live together in the project layer.
     auto hex = [](const std::string& s) { std::string o; char b[3]; for (unsigned char c : s) { snprintf(b, sizeof b, "%02x", c); o += b; } return o.empty() ? std::string("-") : o; };

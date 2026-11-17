@@ -2700,7 +2700,7 @@ static void typeEditor() {
     if (typeFocus) { ImGui::SetKeyboardFocusHere(); typeFocus = false; }
     if (ImGui::InputTextMultiline("##tb", typeBuf, sizeof typeBuf, ImVec2(360, ImGui::GetTextLineHeight() * 4 + 8))) {
         if (!typeMaskEditing) { Layer& L = doc.layers[typeLayer]; L.text.str = typeBuf; renderFill(doc, L); changed();
-            std::string nm = L.text.str.substr(0, L.text.str.find('\n')); if (nm.size() > 30) nm.resize(30); L.name = nm.empty() ? "Text" : nm; }
+            L.name = textLayerName(L.text.str); }
         else typeMask.str = typeBuf;
     }
     ImGui::TextDisabled("Ctrl+Enter or click away to finish, Esc too");

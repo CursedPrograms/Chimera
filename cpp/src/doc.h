@@ -128,6 +128,7 @@ void addFillLayer(Doc& d, const Fill& f);        // above the active one, masked
 void renderFill(const Doc& d, Layer& l);         // a fill layer's pixels from its settings (canvas-sized); shapes too
 void addShapeLayer(Doc& d, const Shape& s, const Fill& f);   // above the active one, named "Rectangle 1"...
 void addTextLayer(Doc& d, const Text& t, const Fill& f);     // above the active one, named by its words
+std::string textLayerName(const std::string& text);
 int clipBase(const Doc& d, int i);               // the layer a clipped layer i is clipped to (i itself when it isn't)
 void deleteLayer(Doc& d);
 void duplicateLayer(Doc& d);

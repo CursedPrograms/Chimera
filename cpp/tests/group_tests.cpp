@@ -269,7 +269,7 @@ static bool textLayerNameSkipsLeadingBlankLines() {
     addTextLayer(d,t,f);
     if(d.cur().name!="Title") return false;
     t.str="\nSubtitle"; addTextLayer(d,t,f);
-    return d.cur().name=="Subtitle";
+    return d.cur().name=="Subtitle" && textLayerName("\nSubtitle")=="Subtitle" && textLayerName("\n\n")=="Text";
 }
 
 // after PhotoCraft (crates/ui-egui/src/tools/type_tool/tests.rs smart_quotes_are_typographic).
@@ -279,6 +279,13 @@ static bool smartQuotesMapOpeningAndClosingContext() {
         textSmartQuotes("(\"x\")")=="(\xe2\x80\x9cx\xe2\x80\x9d)" &&
         textSmartQuotes("--'x'")=="--\xe2\x80\x98x\xe2\x80\x99" &&
         textSmartQuotes("\"\"")=="\xe2\x80\x9c\xe2\x80\x9d";
+}
+
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/tests.rs type_unit_follows_the_units_and_rulers_preference).
+static bool typeUnitsFollowResolution() {
+    const TextUnit pt=textUnit(0,72), px72=textUnit(1,72), px144=textUnit(1,144), mm=textUnit(2,144);
+    return pt.scale==1 && std::strcmp(pt.label,"pt")==0 && px72.scale==1 && std::strcmp(px72.label,"px")==0 &&
+        px144.scale==2 && std::fabs(mm.scale-25.4f/72.0f)<1e-6f && std::strcmp(mm.label,"mm")==0;
 }
 
 int runSelfTests() {
@@ -301,6 +308,7 @@ int runSelfTests() {
         {"type tool word boundaries", typeWordBoundariesMatchPhotoCraft},
         {"text layer name skips leading blank lines", textLayerNameSkipsLeadingBlankLines},
         {"smart quotes use opening and closing context", smartQuotesMapOpeningAndClosingContext},
+        {"type unit conversion follows document resolution", typeUnitsFollowResolution},
     };
     int failed = 0;
     for (const Test& test : tests) {

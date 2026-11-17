@@ -301,14 +301,18 @@ void renderFill(const Doc& d, Layer& l) {
         }
     }
 }
-void addTextLayer(Doc& d, const Text& t, const Fill& f) {
-    size_t first = t.str.find_first_not_of(" \t\r\n");
+std::string textLayerName(const std::string& text) {
+    size_t first = text.find_first_not_of(" \t\r\n");
     std::string name;
     if (first != std::string::npos) {
-        const size_t end = t.str.find_first_of("\r\n", first);
-        name = t.str.substr(first, end == std::string::npos ? std::string::npos : end - first);
+        const size_t end = text.find_first_of("\r\n", first);
+        name = text.substr(first, end == std::string::npos ? std::string::npos : end - first);
     }
     if (name.size() > 30) name = name.substr(0, 30);
+    return name.empty() ? "Text" : name;
+}
+void addTextLayer(Doc& d, const Text& t, const Fill& f) {
+    const std::string name=textLayerName(t.str);
     Layer l = emptyLayer(d, name.empty() ? "Text" : name);
     l.fill = f; l.text = t; l.hasText = true;
     renderFill(d, l);
