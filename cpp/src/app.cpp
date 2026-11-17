@@ -103,12 +103,21 @@ static bool showMask = false;                    // Alt-click on a mask: see it 
 static bool quit = false, askQuit = false;
 static std::string toast; static double toastUntil = 0;
 
-enum Tool { T_MOVE, T_RECT, T_ELLIPSE, T_LASSO, T_POLY, T_WAND, T_BRUSH, T_ERASER, T_BUCKET, T_DROPPER, T_HAND, T_COUNT,
+enum Tool { T_MOVE, T_RECT, T_ELLIPSE, T_LASSO, T_POLY, T_WAND, T_BRUSH, T_ERASER, T_BUCKET, T_DROPPER, T_HAND,
+            T_PENCIL, T_ZOOM, T_ROW, T_COL, T_CROP, T_GRADIENT, T_MAGIC_ERASER, T_RETOUCH, T_COUNT,
             T_NONE = T_COUNT };   // T_NONE: a tool on the strip Chimera doesn't have yet
 static int tool = T_BRUSH;
 static uint8_t fg[4] = {0, 0, 0, 255}, bgc[4] = {255, 255, 255, 255};   // black on white, as PhotoCraft (D)
 static float brushSize = 40, brushHard = 0.8f, brushOpacity = 1.0f;
 static float eraserSize = 40, eraserHard = 0.8f, eraserOpacity = 1.0f;
+static float pencilSize = 4, pencilOpacity = 1.0f;
+// the retouching brushes (Blur, Sharpen, Smudge, Dodge, Burn, Sponge, Clone Stamp, Background Eraser): one size and
+// hardness for them all, each its own strength; Dodge/Burn's range, the Sponge's mode, the Clone Stamp's source
+static float rtSize = 60, rtHard = 0.5f, rtStrength[9] = {0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 1.0f, 0.25f};
+static int rtRange = 1; static bool spongeDesat = false, cloneSet = false, cloneAligned = true, cloneHaveOffset = false;
+static float cloneSrcX = 0, cloneSrcY = 0, cloneDX = 0, cloneDY = 0;
+static int gradToolStyle = 0; static bool gradToolReverse = false; static float gradToolOpacity = 1.0f;
+static bool cropPending = false, cropDelete = true; static float cropR[4] = {0, 0, 0, 0};
 static int selMode = SEL_NEW; static float selFeather = 0;
 static int tolerance = 32; static bool contiguous = true, sampleAll = false; static float bucketOpacity = 1.0f;
 
@@ -1346,6 +1355,27 @@ static void pickColour(ImVec2 c, bool toBg) {
 
 static uint8_t* brushColour() { return fg; }
 
+static int retouchMode() {
+    switch (Toolbar::current()) {
+    case Toolbar::SHARPEN: return RT_SHARPEN; case Toolbar::SMUDGE: return RT_SMUDGE; case Toolbar::DODGE: return RT_DODGE;
+    case Toolbar::BURN: return RT_BURN; case Toolbar::SPONGE: return spongeDesat ? RT_SPONGE_DESAT : RT_SPONGE_SAT;
+    case Toolbar::CLONE_STAMP: return RT_CLONE; case Toolbar::BACKGROUND_ERASER: return RT_BG_ERASE;
+    default: return RT_BLUR;
+    }
+}
+static RetouchOpts retouchOpts() {
+    RetouchOpts o; o.mode = retouchMode();
+    const int slot = o.mode == RT_SPONGE_DESAT ? RT_SPONGE_SAT : o.mode;
+    o.strength = rtStrength[slot]; o.range = rtRange; o.srcDX = cloneDX; o.srcDY = cloneDY; o.tolerance = rtStrength[RT_BG_ERASE];
+    return o;
+}
+static void applyCrop() {
+    if (!cropPending) return;
+    Rect r{(int)std::lround(std::min(cropR[0], cropR[2])), (int)std::lround(std::min(cropR[1], cropR[3])), (int)std::lround(std::max(cropR[0], cropR[2])), (int)std::lround(std::max(cropR[1], cropR[3]))};
+    cropPending = false;
+    if (r.clip(doc.w, doc.h).empty()) return;
+    remember("Crop"); cropCanvas(doc, r, cropDelete); changed(); selChanged(); fitNext = true;
+}
 static void canvasInput() {
     ImGuiIO& io = ImGui::GetIO();
     const bool hovered = ImGui::IsItemHovered();
@@ -1378,6 +1408,36 @@ static void canvasInput() {
             dragging = false;
             break;
         case T_DROPPER: pickColour(c, io.KeyAlt); dragging = true; break;
+        case T_ZOOM: zoomAt(zoom * (io.KeyAlt ? 1 / 1.5f : 1.5f), m); dragging = false; break;
+        case T_ROW: case T_COL: {
+            const int y = std::clamp((int)c.y, 0, doc.h - 1), x = std::clamp((int)c.x, 0, doc.w - 1);
+            finishShape(t == T_ROW ? shapeRect(doc, 0, y, doc.w, y + 1) : shapeRect(doc, x, 0, x + 1, doc.h), modeFromKeys(), t == T_ROW ? "Single Row" : "Single Column");
+            dragging = false; break;
+        }
+        case T_CROP:
+            if (cropPending && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) { applyCrop(); dragging = false; }
+            else { cropPending = true; cropR[0] = cropR[2] = c.x; cropR[1] = cropR[3] = c.y; }
+            break;
+        case T_GRADIENT: break;   // drawn when the drag ends
+        case T_MAGIC_ERASER:
+            if (c.x >= 0 && c.y >= 0 && c.x < doc.w && c.y < doc.h) { remember("Magic Eraser"); magicErase(doc, (int)c.x, (int)c.y, tolerance, contiguous, sampleAll, 1.0f); changed(); }
+            dragging = false; break;
+        case T_PENCIL:
+            if (io.KeyAlt) { pickColour(c, false); dragging = false; break; }
+            if (!doc.cur().visible) { say("The layer is hidden: show it to paint"); dragging = false; break; }
+            remember("Pencil"); strokeBegin(doc, stroke);
+            changed(pencilTo(doc, stroke, c.x, c.y, pencilSize, pencilOpacity, brushColour(), false, true));
+            break;
+        case T_RETOUCH: {
+            const int mode = retouchMode();
+            if (mode == RT_CLONE && io.KeyAlt) { cloneSet = true; cloneHaveOffset = false; cloneSrcX = c.x; cloneSrcY = c.y; say("Clone source set: paint to copy from it"); dragging = false; break; }
+            if (mode == RT_CLONE && !cloneSet) { say("Alt+click where to copy from first"); dragging = false; break; }
+            if (doc.cur().isAdjust() || doc.cur().isFill() || doc.editMask) { say("Retouching works on a layer's pixels"); dragging = false; break; }
+            if (mode == RT_CLONE && (!cloneAligned || !cloneHaveOffset)) { cloneDX = cloneSrcX - c.x; cloneDY = cloneSrcY - c.y; cloneHaveOffset = true; }
+            remember(Toolbar::label(Toolbar::current())); strokeBegin(doc, stroke);
+            changed(retouchTo(doc, stroke, c.x, c.y, rtSize, rtHard, retouchOpts(), true));
+            break;
+        }
         case T_BRUSH: case T_ERASER:
             if (io.KeyAlt && t == T_BRUSH) { pickColour(c, false); dragging = false; break; }
             if (!doc.cur().visible) { say("The layer is hidden: show it to paint"); dragging = false; break; }
@@ -1399,6 +1459,9 @@ static void canvasInput() {
         }
         case T_LASSO: if (std::hypot(c.x - lasso[lasso.size() - 2], c.y - lasso.back()) * zoom > 2) { lasso.push_back(c.x); lasso.push_back(c.y); } break;
         case T_DROPPER: pickColour(c, io.KeyAlt); break;
+        case T_CROP: cropR[2] = c.x; cropR[3] = c.y; break;
+        case T_PENCIL: if (stroke.on) changed(pencilTo(doc, stroke, c.x, c.y, pencilSize, pencilOpacity, brushColour(), false, false)); break;
+        case T_RETOUCH: if (stroke.on) changed(retouchTo(doc, stroke, c.x, c.y, rtSize, rtHard, retouchOpts(), false)); break;
         case T_BRUSH: case T_ERASER:
             if (stroke.on) changed(strokeTo(doc, stroke, c.x, c.y, t == T_BRUSH ? brushSize : eraserSize, t == T_BRUSH ? brushHard : eraserHard, t == T_BRUSH ? brushOpacity : eraserOpacity, brushColour(), t == T_ERASER, false));
             break;
@@ -1415,9 +1478,20 @@ static void canvasInput() {
                              modeFromKeys(), t == T_RECT ? "Rectangle Select" : "Ellipse Select");
             break;
         case T_LASSO: if (lasso.size() >= 6) finishShape(shapePolygon(doc, lasso), modeFromKeys(), "Lasso"); lasso.clear(); break;
-        case T_BRUSH: case T_ERASER: strokeEnd(stroke); break;
+        case T_BRUSH: case T_ERASER: case T_PENCIL: case T_RETOUCH: strokeEnd(stroke); break;
+        case T_CROP: if (std::fabs(cropR[2] - cropR[0]) < 2 || std::fabs(cropR[3] - cropR[1]) < 2) cropPending = false; break;
+        case T_GRADIENT:
+            if (std::hypot(c.x - dragStart.x, c.y - dragStart.y) * zoom >= 3) {
+                if (doc.cur().isAdjust() || doc.cur().isFill()) { say("The Gradient tool paints a layer's pixels (or its mask)"); break; }
+                remember("Gradient"); gradientFill(doc, dragStart.x, dragStart.y, c.x, c.y, fg, bgc, gradToolStyle, gradToolReverse, gradToolOpacity); changed();
+            }
+            break;
         default: break;
         }
+    }
+    if (t == T_CROP && cropPending && !dragging && dlg == D_NONE) {   // Enter crops, Escape lets it go
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) applyCrop();
+        else if (ImGui::IsKeyPressed(ImGuiKey_Escape)) cropPending = false;
     }
     if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) && t != T_HAND && !ImGui::IsMouseDown(ImGuiMouseButton_Middle)) panning = false;
     if (t == T_HAND && panning) origin = ImVec2(originStart.x + m.x - panStart.x, originStart.y + m.y - panStart.y);
@@ -1457,9 +1531,31 @@ static void drawCanvas() {
     // points, since it's built click by click.
     if (!poly.empty()) path(poly, true);
     // the brush outline
-    if ((tool == T_BRUSH || tool == T_ERASER) && ImGui::IsWindowHovered()) {
-        const float r = (tool == T_BRUSH ? brushSize : eraserSize) * 0.5f * zoom;
-        const float h = (tool == T_BRUSH ? brushHard : eraserHard);
+    if (tool == T_CROP && cropPending) {   // what's kept, the rest dimmed, thirds as a guide
+        const ImVec2 a0 = toScreen(std::min(cropR[0], cropR[2]), std::min(cropR[1], cropR[3])), a1 = toScreen(std::max(cropR[0], cropR[2]), std::max(cropR[1], cropR[3]));
+        const ImVec2 c0 = toScreen(0, 0), c1 = toScreen((float)doc.w, (float)doc.h);
+        const ImU32 dim = IM_COL32(0, 0, 0, 140);
+        dl->AddRectFilled(c0, ImVec2(c1.x, a0.y), dim); dl->AddRectFilled(ImVec2(c0.x, a1.y), c1, dim);
+        dl->AddRectFilled(ImVec2(c0.x, a0.y), ImVec2(a0.x, a1.y), dim); dl->AddRectFilled(ImVec2(a1.x, a0.y), ImVec2(c1.x, a1.y), dim);
+        dl->AddRect(a0, a1, IM_COL32(255, 255, 255, 230), 0, 0, 1.5f);
+        for (int k = 1; k < 3; ++k) {
+            const float fx = a0.x + (a1.x - a0.x) * k / 3, fy = a0.y + (a1.y - a0.y) * k / 3;
+            dl->AddLine(ImVec2(fx, a0.y), ImVec2(fx, a1.y), IM_COL32(255, 255, 255, 90)); dl->AddLine(ImVec2(a0.x, fy), ImVec2(a1.x, fy), IM_COL32(255, 255, 255, 90));
+        }
+    }
+    if (tool == T_GRADIENT && dragging) {
+        const ImVec2 p0 = toScreen(dragStart.x, dragStart.y), p1 = toScreen(dragNow.x, dragNow.y);
+        dl->AddLine(p0, p1, IM_COL32(0, 0, 0, 200), 3); dl->AddLine(p0, p1, IM_COL32(255, 255, 255, 230), 1.5f);
+        dl->AddCircleFilled(p0, 3.5f, IM_COL32(255, 255, 255, 230)); dl->AddCircle(p1, 4.5f, IM_COL32(255, 255, 255, 230));
+    }
+    if (tool == T_RETOUCH && retouchMode() == RT_CLONE && cloneSet && ImGui::IsWindowHovered()) {   // where it copies from
+        const ImVec2 sp = dragging && cloneHaveOffset ? toScreen(dragNow.x + cloneDX, dragNow.y + cloneDY) : toScreen(cloneSrcX, cloneSrcY);
+        dl->AddLine(ImVec2(sp.x - 7, sp.y), ImVec2(sp.x + 7, sp.y), IM_COL32(255, 255, 255, 220), 1.5f);
+        dl->AddLine(ImVec2(sp.x, sp.y - 7), ImVec2(sp.x, sp.y + 7), IM_COL32(255, 255, 255, 220), 1.5f);
+    }
+    if ((tool == T_BRUSH || tool == T_ERASER || tool == T_PENCIL || tool == T_RETOUCH) && ImGui::IsWindowHovered()) {
+        const float r = (tool == T_BRUSH ? brushSize : tool == T_ERASER ? eraserSize : tool == T_PENCIL ? pencilSize : rtSize) * 0.5f * zoom;
+        const float h = (tool == T_BRUSH ? brushHard : tool == T_ERASER ? eraserHard : tool == T_PENCIL ? 1.0f : rtHard);
         dl->AddCircle(io.MousePos, r, IM_COL32(255, 255, 255, 200), 48, 1.0f);
         dl->AddCircle(io.MousePos, r + 1, IM_COL32(0, 0, 0, 160), 48, 1.0f);
         if (h < 0.98f) dl->AddCircle(io.MousePos, std::max(1.0f, r * h), IM_COL32(255, 255, 255, 90), 48, 1.0f);   // the solid core
@@ -1502,6 +1598,11 @@ static int ltTool(int id) {
     case Toolbar::LASSO: return T_LASSO; case Toolbar::POLYGON_LASSO: return T_POLY; case Toolbar::MAGIC_WAND: return T_WAND;
     case Toolbar::BRUSH: return T_BRUSH; case Toolbar::ERASER: return T_ERASER; case Toolbar::PAINT_BUCKET: return T_BUCKET;
     case Toolbar::EYEDROPPER: return T_DROPPER; case Toolbar::HAND: return T_HAND;
+    case Toolbar::PENCIL: return T_PENCIL; case Toolbar::ZOOM: return T_ZOOM;
+    case Toolbar::SINGLE_ROW_MARQUEE: return T_ROW; case Toolbar::SINGLE_COLUMN_MARQUEE: return T_COL;
+    case Toolbar::CROP: return T_CROP; case Toolbar::GRADIENT: return T_GRADIENT; case Toolbar::MAGIC_ERASER: return T_MAGIC_ERASER;
+    case Toolbar::BLUR: case Toolbar::SHARPEN: case Toolbar::SMUDGE: case Toolbar::DODGE: case Toolbar::BURN: case Toolbar::SPONGE:
+    case Toolbar::CLONE_STAMP: case Toolbar::BACKGROUND_ERASER: return T_RETOUCH;
     default: return T_NONE;
     }
 }
@@ -1600,6 +1701,46 @@ static void optionsBar() {
         ImGui::Checkbox("Contiguous", &contiguous); ImGui::SameLine(0, 10);
         ImGui::Checkbox("Sample all layers", &sampleAll);
         if (tool == T_BUCKET) { ImGui::SameLine(0, 10); float o = bucketOpacity * 100; if (sliderF("Opacity", &o, 1, 100, "%.0f%%")) bucketOpacity = o / 100; }
+        break;
+    case T_PENCIL: {
+        sliderF("Size", &pencilSize, 1, 200, "%.0f px", ImGuiSliderFlags_Logarithmic); ImGui::SameLine(0, 14);
+        float o = pencilOpacity * 100; if (sliderF("Opacity", &o, 1, 100, "%.0f%%")) pencilOpacity = o / 100; ImGui::SameLine(0, 14);
+        ImGui::TextDisabled("Hard-edged, every pixel all or nothing; Alt picks a colour");
+        break;
+    }
+    case T_RETOUCH: {
+        const int mode = retouchMode(), slot = mode == RT_SPONGE_DESAT ? RT_SPONGE_SAT : mode;
+        sliderF("Size", &rtSize, 1, 1000, "%.0f px", ImGuiSliderFlags_Logarithmic); ImGui::SameLine(0, 14);
+        float h = rtHard * 100; if (sliderF("Hardness", &h, 0, 100, "%.0f%%")) rtHard = h / 100; ImGui::SameLine(0, 14);
+        const char* what = mode == RT_DODGE || mode == RT_BURN ? "Exposure" : mode == RT_SPONGE_SAT || mode == RT_SPONGE_DESAT ? "Flow" : mode == RT_CLONE ? "Opacity" : mode == RT_BG_ERASE ? "Tolerance" : "Strength";
+        float s = rtStrength[slot] * 100; if (sliderF(what, &s, 1, 100, "%.0f%%")) rtStrength[slot] = s / 100;
+        if (mode == RT_DODGE || mode == RT_BURN) { ImGui::SameLine(0, 14); const char* rs[] = {"Shadows", "Midtones", "Highlights"}; ImGui::SetNextItemWidth(110); ImGui::Combo("##range", &rtRange, rs, 3); }
+        if (mode == RT_SPONGE_SAT || mode == RT_SPONGE_DESAT) { ImGui::SameLine(0, 14); int m2 = spongeDesat ? 1 : 0; const char* ms[] = {"Saturate", "Desaturate"}; ImGui::SetNextItemWidth(110); if (ImGui::Combo("##sp", &m2, ms, 2)) spongeDesat = m2 == 1; }
+        if (mode == RT_CLONE) { ImGui::SameLine(0, 14); ImGui::Checkbox("Aligned", &cloneAligned); ImGui::SameLine(0, 14); ImGui::TextDisabled(cloneSet ? "Alt+click sets a new source" : "Alt+click where to copy from"); }
+        if (mode == RT_BG_ERASE) { ImGui::SameLine(0, 14); ImGui::TextDisabled("Erases the colour under the brush's centre where you start"); }
+        break;
+    }
+    case T_GRADIENT: {
+        const char* names[GRAD_COUNT]; for (int k = 0; k < GRAD_COUNT; ++k) names[k] = gradStyleName(k);
+        ImGui::SetNextItemWidth(120); ImGui::Combo("##gstyle", &gradToolStyle, names, GRAD_COUNT); ImGui::SameLine(0, 14);
+        ImGui::Checkbox("Reverse", &gradToolReverse); ImGui::SameLine(0, 14);
+        float o = gradToolOpacity * 100; if (sliderF("Opacity", &o, 1, 100, "%.0f%%")) gradToolOpacity = o / 100; ImGui::SameLine(0, 14);
+        ImGui::TextDisabled("Drag across the picture: foreground to background colour, in the selection");
+        break;
+    }
+    case T_CROP:
+        ImGui::Checkbox("Delete cropped pixels", &cropDelete); ImGui::SameLine(0, 14);
+        if (ImGui::Button("Crop", ImVec2(70, 0))) applyCrop(); ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(70, 0))) cropPending = false; ImGui::SameLine(0, 14);
+        ImGui::TextDisabled("Drag what to keep; Enter or double-click crops, Escape cancels");
+        break;
+    case T_ZOOM: ImGui::TextDisabled("Click zooms in, Alt+click zooms out; the wheel zooms too"); break;
+    case T_ROW: case T_COL: selModes(); ImGui::SameLine(0, 14); ImGui::TextDisabled("Click: a selection one pixel %s", tool == T_ROW ? "high, across the picture" : "wide, down the picture"); break;
+    case T_MAGIC_ERASER:
+        sliderI("Tolerance", &tolerance, 0, 255); ImGui::SameLine(0, 10);
+        ImGui::Checkbox("Contiguous", &contiguous); ImGui::SameLine(0, 10);
+        ImGui::Checkbox("Sample all layers", &sampleAll); ImGui::SameLine(0, 10);
+        ImGui::TextDisabled("Click: what the Magic Wand would pick goes transparent");
         break;
     case T_MOVE: ImGui::TextDisabled("Drag to move the layer (and its mask); arrow keys nudge, Shift+arrows by 10"); break;
     case T_DROPPER: ImGui::TextDisabled("Click picks the foreground colour, Alt+click the background"); break;
@@ -2466,6 +2607,29 @@ void script(const std::string& what) {
         combineSel(doc, shapeEllipse(doc, doc.w / 8, doc.h / 8, doc.w / 3, doc.h / 2), SEL_NEW);
         changed(); selChanged();
         Toolbar::select(Toolbar::BRUSH); syncTool();
+    }
+    if (what == "tools") {   // tests: the retouching brushes, the gradient, the magic eraser and the crop, driven as a mouse would
+        auto strokeLine = [&](int mode, float x0, float y0, float x1, float y1, float size, float strength) {
+            RetouchOpts o; o.mode = mode; o.strength = strength; o.srcDX = -doc.w * 0.3f; o.srcDY = 0;
+            strokeBegin(doc, stroke);
+            for (int k = 0; k <= 40; ++k) retouchTo(doc, stroke, x0 + (x1 - x0) * k / 40, y0 + (y1 - y0) * k / 40, size, 0.4f, o, k == 0);
+            strokeEnd(stroke);
+        };
+        const float W = (float)doc.w, H = (float)doc.h;
+        strokeLine(RT_BLUR, W * 0.1f, H * 0.8f, W * 0.4f, H * 0.8f, 80, 1.0f);
+        strokeLine(RT_DODGE, W * 0.55f, H * 0.2f, W * 0.9f, H * 0.2f, 90, 0.8f);
+        strokeLine(RT_BURN, W * 0.55f, H * 0.35f, W * 0.9f, H * 0.35f, 90, 0.8f);
+        strokeLine(RT_SPONGE_DESAT, W * 0.55f, H * 0.5f, W * 0.9f, H * 0.5f, 90, 1.0f);
+        strokeLine(RT_CLONE, W * 0.7f, H * 0.7f, W * 0.8f, H * 0.7f, 90, 1.0f);
+        addLayer(doc, emptyLayer(doc, "Gradient"));
+        const uint8_t from[3] = {0, 123, 183}, to[3] = {255, 210, 80};
+        combineSel(doc, shapeRect(doc, (int)(W * 0.05f), (int)(H * 0.05f), (int)(W * 0.35f), (int)(H * 0.35f)), SEL_NEW);
+        gradientFill(doc, W * 0.05f, H * 0.05f, W * 0.35f, H * 0.35f, from, to, GRAD_DIAMOND, false, 1.0f);
+        deselect();
+        magicErase(doc, (int)(W * 0.2f), (int)(H * 0.2f), 20, true, false, 1.0f);   // a hole in its middle
+        cropCanvas(doc, Rect{(int)(W * 0.02f), (int)(H * 0.02f), (int)(W * 0.98f), (int)(H * 0.98f)}, true);
+        fprintf(stderr, "tools: %d x %d, %d layers\n", doc.w, doc.h, (int)doc.layers.size());
+        changed(); fitNext = true;
     }
     if (what == "clipfill") {   // tests: a gradient fill clipped to an ellipse, saved as a project and opened again
         addLayer(doc, emptyLayer(doc, "Shape"));

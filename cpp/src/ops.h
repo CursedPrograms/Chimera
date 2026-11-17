@@ -76,3 +76,24 @@ void strokeBegin(Doc& d, Stroke& s);
 // a segment of the stroke to canvas point (x, y); returns the canvas rect it changed
 Rect strokeTo(Doc& d, Stroke& s, float x, float y, float size, float hardness, float opacity, const uint8_t rgba[3], bool erase, bool first);
 void strokeEnd(Stroke& s);
+// the Pencil: the brush with a hard, aliased edge (every pixel is all or nothing)
+Rect pencilTo(Doc& d, Stroke& s, float x, float y, float size, float opacity, const uint8_t rgb[3], bool erase, bool first);
+
+// ---- the retouching brushes (Photoshop's, as PhotoCraft has them): each dab changes the pixels under it, in place
+enum Retouch { RT_BLUR, RT_SHARPEN, RT_SMUDGE, RT_DODGE, RT_BURN, RT_SPONGE_SAT, RT_SPONGE_DESAT, RT_CLONE, RT_BG_ERASE };
+struct RetouchOpts {
+    int mode = RT_BLUR;
+    float strength = 0.5f;                       // Blur/Sharpen/Smudge strength, Dodge/Burn exposure, Sponge flow: 0..1
+    int range = 1;                               // Dodge/Burn: 0 shadows, 1 midtones, 2 highlights
+    float srcDX = 0, srcDY = 0;                  // Clone Stamp: where it copies from, as an offset from the brush
+    float tolerance = 0.25f;                     // Background Eraser: how far from the sampled colour still goes
+};
+Rect retouchTo(Doc& d, Stroke& s, float x, float y, float size, float hardness, const RetouchOpts& o, bool first);
+
+// ---- the Gradient tool: from (x0, y0) to (x1, y1) in the foreground..background colours, into the selection (or the
+// whole layer); style: GradStyle
+void gradientFill(Doc& d, float x0, float y0, float x1, float y1, const uint8_t from[3], const uint8_t to[3], int style, bool reverse, float opacity);
+// the Crop tool: the canvas becomes r (layers keep their pixels, moved; what's outside is cut when `deleteCropped`)
+void cropCanvas(Doc& d, Rect r, bool deleteCropped);
+// the Magic Eraser: what the Magic Wand would pick at (x, y), made transparent on the active layer
+void magicErase(Doc& d, int x, int y, int tolerance, bool contiguous, bool sampleAll, float opacity);

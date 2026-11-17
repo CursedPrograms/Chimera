@@ -737,3 +737,213 @@ Rect strokeTo(Doc& d, Stroke& s, float x, float y, float size, float hardness, f
 }
 
 void strokeEnd(Stroke& s) { s.on = false; s.orig.px.clear(); s.cover.clear(); }
+
+Rect pencilTo(Doc& d, Stroke& s, float x, float y, float size, float opacity, const uint8_t rgb[3], bool erase, bool first) {
+    // hardness 1 and every pixel inside the circle fully: the brush's maths with an aliased dab
+    return strokeTo(d, s, x, y, std::max(1.0f, std::floor(size)), 1.0f, opacity, rgb, erase, first);
+}
+
+// ---------- the retouching brushes ----------
+// the dabs between the last point and this one, at the brush's spacing (as strokeTo)
+static std::vector<float> dabsTo(Stroke& s, float x, float y, float r, bool first) {
+    const float spacing = std::max(0.5f, r * 0.15f);
+    std::vector<float> dabs;
+    if (first) { dabs = {x, y}; s.rest = 0; }
+    else {
+        const float dx = x - s.lastX, dy = y - s.lastY, len = std::sqrt(dx * dx + dy * dy);
+        float t = spacing - s.rest;
+        while (t <= len) { dabs.push_back(s.lastX + dx * t / len); dabs.push_back(s.lastY + dy * t / len); t += spacing; }
+        s.rest = len - (t - spacing);
+    }
+    return dabs;
+}
+static float lumOf(const float* p) { return 0.3f * p[0] + 0.59f * p[1] + 0.11f * p[2]; }
+Rect retouchTo(Doc& d, Stroke& s, float x, float y, float size, float hardness, const RetouchOpts& op, bool first) {
+    Layer& l = d.cur();
+    Work& o = s.orig;                            // the layer as the stroke began (Clone Stamp copies from it)
+    if (o.mask) return {0, 0, 0, 0};             // retouching is for pixels, not masks
+    const float r = std::max(0.5f, size * 0.5f);
+    const float px0 = s.lastX, py0 = s.lastY;
+    std::vector<float> dabs = dabsTo(s, x, y, r, first);
+    s.lastX = x; s.lastY = y;
+    Rect changed{0, 0, 0, 0};
+    static float sampled[3] = {0, 0, 0};          // Background Eraser: the colour under the first dab
+    if (first && op.mode == RT_BG_ERASE) {
+        const int sx = (int)x - o.ox, sy = (int)y - o.oy;
+        if (sx >= 0 && sy >= 0 && sx < o.w && sy < o.h) { const float* p = o.at(sx, sy); sampled[0] = p[0]; sampled[1] = p[1]; sampled[2] = p[2]; }
+    }
+    float prevX = first ? x : px0, prevY = first ? y : py0;
+    auto get = [&](int px, int py, float out[4]) {   // the layer as it is now (straight RGBA 0..1)
+        px = std::clamp(px, 0, o.w - 1); py = std::clamp(py, 0, o.h - 1);
+        const uint8_t* q = &l.img.px[((size_t)py * o.w + px) * 4];
+        for (int c = 0; c < 4; ++c) out[c] = q[c] / 255.0f;
+    };
+    for (size_t k = 0; k + 1 < dabs.size(); k += 2) {
+        const float cx = dabs[k] - o.ox, cy = dabs[k + 1] - o.oy;
+        const float mdx = dabs[k] - prevX, mdy = dabs[k + 1] - prevY;   // Smudge: how far the brush moved since the last dab
+        prevX = dabs[k]; prevY = dabs[k + 1];
+        const int x0 = std::max(0, (int)std::floor(cx - r)), y0 = std::max(0, (int)std::floor(cy - r));
+        const int x1 = std::min(o.w, (int)std::ceil(cx + r) + 1), y1 = std::min(o.h, (int)std::ceil(cy + r) + 1);
+        if (x1 <= x0 || y1 <= y0) continue;
+        // this dab's result from the pixels as they are now, written after (so a dab doesn't read its own output)
+        std::vector<float> out((size_t)(x1 - x0) * (y1 - y0) * 4);
+        std::vector<float> wgt((size_t)(x1 - x0) * (y1 - y0), 0.0f);
+        for (int py = y0; py < y1; ++py)
+            for (int px = x0; px < x1; ++px) {
+                const float ddx = px + 0.5f - cx, ddy = py + 0.5f - cy;
+                float a = dabFalloff(std::sqrt(ddx * ddx + ddy * ddy) / r, hardness);
+                const int canvasX = px + o.ox, canvasY = py + o.oy;
+                if (d.hasSel()) a *= (canvasX >= 0 && canvasY >= 0 && canvasX < d.w && canvasY < d.h) ? d.sel[(size_t)canvasY * d.w + canvasX] / 255.0f : 0.0f;
+                const size_t j = (size_t)(py - y0) * (x1 - x0) + (px - x0);
+                if (a <= 0) continue;
+                float p[4]; get(px, py, p);
+                float* q = &out[j * 4];
+                for (int c = 0; c < 4; ++c) q[c] = p[c];
+                const float st = op.strength;
+                switch (op.mode) {
+                case RT_BLUR: case RT_SHARPEN: {   // a 3x3 neighbourhood (premultiplied), towards it or away from it
+                    float n[4] = {0, 0, 0, 0}, w = 0;
+                    for (int oy = -1; oy <= 1; ++oy) for (int ox = -1; ox <= 1; ++ox) {
+                        float s4[4]; get(px + ox, py + oy, s4);
+                        const float kw = (ox == 0 && oy == 0) ? 4.0f : (ox == 0 || oy == 0) ? 2.0f : 1.0f;
+                        for (int c = 0; c < 3; ++c) n[c] += s4[c] * s4[3] * kw;
+                        n[3] += s4[3] * kw; w += kw;
+                    }
+                    const float na = n[3] / w;
+                    const float t = a * st * (op.mode == RT_BLUR ? 1.0f : 0.5f);
+                    for (int c = 0; c < 3; ++c) {
+                        const float nc = n[3] > 1e-6f ? n[c] / n[3] : p[c];
+                        q[c] = op.mode == RT_BLUR ? p[c] + (nc - p[c]) * t : std::clamp(p[c] + (p[c] - nc) * t, 0.0f, 1.0f);
+                    }
+                    if (op.mode == RT_BLUR) q[3] = p[3] + (na - p[3]) * t;
+                    break;
+                }
+                case RT_SMUDGE: {   // the colour the brush dragged here from where it was
+                    float b[4]; get((int)std::floor(px + 0.5f - mdx), (int)std::floor(py + 0.5f - mdy), b);
+                    const float t = a * st;
+                    for (int c = 0; c < 4; ++c) q[c] = p[c] + (b[c] - p[c]) * t;
+                    break;
+                }
+                case RT_DODGE: case RT_BURN: case RT_SPONGE_SAT: case RT_SPONGE_DESAT: {
+                    // as the brush: one stroke never goes past its exposure (the stroke's coverage, from the pixels as
+                    // it began), most in the chosen tonal range (Dodge / Burn)
+                    float& cv = s.cover[(size_t)py * o.w + px];
+                    if (a <= cv) { a = 0; break; }
+                    cv = a;
+                    const float* p0 = o.at(px, py);
+                    const float L = lumOf(p0);
+                    if (op.mode == RT_DODGE || op.mode == RT_BURN) {
+                        const float rw = op.range == 0 ? (1 - L) * (1 - L) : op.range == 2 ? L * L : 1 - std::fabs(2 * L - 1) * 0.6f;
+                        const float t = cv * st * rw * 0.6f;
+                        for (int c = 0; c < 3; ++c) q[c] = op.mode == RT_DODGE ? p0[c] + (1 - p0[c]) * t : p0[c] * (1 - t);
+                    } else {
+                        const float t = cv * st, k2 = op.mode == RT_SPONGE_SAT ? 1 + t : 1 - t;
+                        for (int c = 0; c < 3; ++c) q[c] = std::clamp(L + (p0[c] - L) * k2, 0.0f, 1.0f);
+                    }
+                    q[3] = p0[3];
+                    a = 1;
+                    break;
+                }
+                case RT_CLONE: {   // from the layer as the stroke began, at the source offset
+                    const int sx = (int)std::floor(px + op.srcDX), sy = (int)std::floor(py + op.srcDY);
+                    if (sx < 0 || sy < 0 || sx >= o.w || sy >= o.h) { a = 0; break; }
+                    const float* src = o.at(sx, sy);
+                    float b[4] = {p[0], p[1], p[2], p[3]};
+                    const float sp[4] = {src[0], src[1], src[2], src[3] * a * st};
+                    compositePixel(BM_Normal, b, sp, canvasX, canvasY);
+                    for (int c = 0; c < 4; ++c) q[c] = b[c];
+                    a = 1;
+                    break;
+                }
+                case RT_BG_ERASE: {   // pixels near the sampled colour go transparent
+                    const float dist = std::sqrt((p[0] - sampled[0]) * (p[0] - sampled[0]) + (p[1] - sampled[1]) * (p[1] - sampled[1]) + (p[2] - sampled[2]) * (p[2] - sampled[2])) / 1.732f;
+                    const float keep = std::clamp((dist - op.tolerance) / 0.08f + 0.5f, 0.0f, 1.0f);
+                    q[3] = p[3] * (1 - a * (1 - keep));
+                    break;
+                }
+                }
+                wgt[j] = a;
+            }
+        for (int py = y0; py < y1; ++py)
+            for (int px = x0; px < x1; ++px) {
+                const size_t j = (size_t)(py - y0) * (x1 - x0) + (px - x0);
+                if (wgt[j] <= 0) continue;
+                uint8_t* dst = &l.img.px[((size_t)py * o.w + px) * 4];
+                for (int c = 0; c < 4; ++c) dst[c] = to8(out[j * 4 + c]);
+            }
+        changed = changed.unite(Rect{x0 + o.ox, y0 + o.oy, x1 + o.ox, y1 + o.oy});
+    }
+    d.dirty = true;
+    return changed;
+}
+
+// ---------- the Gradient tool ----------
+void gradientFill(Doc& d, float x0, float y0, float x1, float y1, const uint8_t from[3], const uint8_t to[3], int style, bool reverse, float opacity) {
+    Work o = getWork(d), r = o;
+    const float dx = x1 - x0, dy = y1 - y0, len2 = std::max(1e-6f, dx * dx + dy * dy), len = std::sqrt(len2);
+    const float a = std::atan2(dy, dx);
+    for (int y = 0; y < r.h; ++y)
+        for (int x = 0; x < r.w; ++x) {
+            const float px = x + r.ox + 0.5f - x0, py = y + r.oy + 0.5f - y0;
+            float t;
+            switch (style) {
+            case GRAD_RADIAL: t = std::sqrt(px * px + py * py) / len; break;
+            case GRAD_ANGLE: { float ang = std::atan2(py, px) - a; while (ang < 0) ang += 6.2831853f; while (ang >= 6.2831853f) ang -= 6.2831853f; t = ang / 6.2831853f; break; }
+            case GRAD_REFLECTED: t = std::fabs((px * dx + py * dy) / len2); break;
+            case GRAD_DIAMOND: { const float u = (px * dx + py * dy) / len, v = (-px * dy + py * dx) / len; t = (std::fabs(u) + std::fabs(v)) / len; break; }
+            default: t = (px * dx + py * dy) / len2; break;
+            }
+            t = std::clamp(t, 0.0f, 1.0f);
+            if (reverse) t = 1 - t;
+            float* q = r.at(x, y);
+            if (r.mask) { const float g = (from[0] + (to[0] - from[0]) * t) / 255.0f; q[0] = q[1] = q[2] = q[0] + (g - q[0]) * opacity; continue; }
+            float b[4] = {q[0], q[1], q[2], q[3]};
+            const float s[4] = {(from[0] + (to[0] - from[0]) * t) / 255.0f, (from[1] + (to[1] - from[1]) * t) / 255.0f, (from[2] + (to[2] - from[2]) * t) / 255.0f, opacity};
+            compositePixel(BM_Normal, b, s, x + r.ox, y + r.oy);
+            for (int c = 0; c < 4; ++c) q[c] = b[c];
+        }
+    putWork(d, o, r);
+    d.dirty = true;
+}
+
+// ---------- the Crop tool ----------
+void cropCanvas(Doc& d, Rect r, bool deleteCropped) {
+    r = r.clip(d.w, d.h);
+    if (r.empty()) return;
+    for (Layer& l : d.layers) {
+        l.x -= r.x0; l.y -= r.y0;
+        if (deleteCropped && !l.isAdjust() && !l.isFill()) {   // cut what's now outside the canvas
+            const int nx0 = std::max(0, -l.x), ny0 = std::max(0, -l.y);
+            const int nx1 = std::min(l.img.w, r.x1 - r.x0 - l.x), ny1 = std::min(l.img.h, r.y1 - r.y0 - l.y);
+            if (nx1 <= nx0 || ny1 <= ny0) { l.img = Image(1, 1); l.mask.assign(l.hasMask ? 1 : 0, 0); l.x = l.y = 0; continue; }
+            Image n(nx1 - nx0, ny1 - ny0);
+            std::vector<uint8_t> m(l.hasMask ? (size_t)n.w * n.h : 0);
+            for (int y = 0; y < n.h; ++y) {
+                memcpy(n.at(0, y), l.img.at(nx0, y + ny0), (size_t)n.w * 4);
+                if (l.hasMask) memcpy(&m[(size_t)y * n.w], &l.mask[(size_t)(y + ny0) * l.img.w + nx0], n.w);
+            }
+            l.img = std::move(n); l.mask = std::move(m);
+            l.x += nx0; l.y += ny0;
+        }
+    }
+    d.w = r.x1 - r.x0; d.h = r.y1 - r.y0;
+    d.sel.clear();
+    for (Layer& l : d.layers) if (l.isFill()) renderFill(d, l);
+    d.dirty = true;
+}
+
+// ---------- the Magic Eraser ----------
+void magicErase(Doc& d, int x, int y, int tolerance, bool contiguous, bool sampleAll, float opacity) {
+    const std::vector<uint8_t> pick = shapeWand(d, x, y, tolerance, contiguous, sampleAll);
+    Layer& l = d.cur();
+    if (l.isAdjust() || l.isFill()) return;
+    expandToCanvas(d, l);
+    for (int py = 0; py < l.img.h; ++py)
+        for (int px = 0; px < l.img.w; ++px) {
+            const int cx = px + l.x, cy = py + l.y;
+            if (cx < 0 || cy < 0 || cx >= d.w || cy >= d.h) continue;
+            const float t = pick[(size_t)cy * d.w + cx] / 255.0f * opacity * (d.hasSel() ? d.sel[(size_t)cy * d.w + cx] / 255.0f : 1.0f);
+            if (t > 0) { uint8_t* p = l.img.at(px, py); p[3] = (uint8_t)(p[3] * (1 - t) + 0.5f); }
+        }
+    d.dirty = true;
+}
