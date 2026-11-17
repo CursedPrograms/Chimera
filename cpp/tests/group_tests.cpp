@@ -272,6 +272,15 @@ static bool textLayerNameSkipsLeadingBlankLines() {
     return d.cur().name=="Subtitle";
 }
 
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/tests.rs smart_quotes_are_typographic).
+static bool smartQuotesMapOpeningAndClosingContext() {
+    return textSmartQuotes("\"Hello\"")=="\xe2\x80\x9cHello\xe2\x80\x9d" &&
+        textSmartQuotes("don't")=="don\xe2\x80\x99t" &&
+        textSmartQuotes("(\"x\")")=="(\xe2\x80\x9cx\xe2\x80\x9d)" &&
+        textSmartQuotes("--'x'")=="--\xe2\x80\x98x\xe2\x80\x99" &&
+        textSmartQuotes("\"\"")=="\xe2\x80\x9c\xe2\x80\x9d";
+}
+
 int runSelfTests() {
     struct Test { const char* name; bool (*run)(); };
     static const Test tests[] = {
@@ -291,6 +300,7 @@ int runSelfTests() {
         {"rich text runs normalize UTF-8 and persist", richTextRunsNormalizeAndPersist},
         {"type tool word boundaries", typeWordBoundariesMatchPhotoCraft},
         {"text layer name skips leading blank lines", textLayerNameSkipsLeadingBlankLines},
+        {"smart quotes use opening and closing context", smartQuotesMapOpeningAndClosingContext},
     };
     int failed = 0;
     for (const Test& test : tests) {

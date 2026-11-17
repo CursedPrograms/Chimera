@@ -58,3 +58,5 @@ bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float bo
 float textAdvance(const Text& t);     // the first line's advance in pixels, for path placement markers
 // after PhotoCraft (crates/text/src/layout/navigate.rs word_boundary): returns a character index.
 size_t textWordBoundary(const std::string& text, size_t index, bool forward);
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/keys.rs smart_quotes).
+std::string textSmartQuotes(const std::string& text);

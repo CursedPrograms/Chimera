@@ -39,6 +39,22 @@ size_t textWordBoundary(const std::string& text, size_t index, bool forward) {
     return i;
 }
 
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/keys.rs smart_quotes): quotes open after
+// whitespace, brackets and dashes; elsewhere they close. Existing non-ASCII text is preserved.
+std::string textSmartQuotes(const std::string& text) {
+    std::string out; out.reserve(text.size());
+    auto opening = [](unsigned char c) { return std::isspace(c) || c=='(' || c=='[' || c=='{' || c=='-' || c=='/'; };
+    for(size_t i=0;i<text.size();++i) {
+        const char c=text[i];
+        if(c=='"' || c=='\'') {
+            const bool open=out.empty() || opening(static_cast<unsigned char>(out.back()));
+            if(c=='"') out += open ? "\xe2\x80\x9c" : "\xe2\x80\x9d";
+            else out += open ? "\xe2\x80\x98" : "\xe2\x80\x99";
+        } else out.push_back(c);
+    }
+    return out;
+}
+
 std::string Text::save() const {
     // Text settings and a path's editable Bezier knots live together in the project layer.
     auto hex = [](const std::string& s) { std::string o; char b[3]; for (unsigned char c : s) { snprintf(b, sizeof b, "%02x", c); o += b; } return o.empty() ? std::string("-") : o; };
