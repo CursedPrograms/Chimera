@@ -2549,7 +2549,7 @@ static std::vector<uint8_t> strokeMask(const std::vector<float>& pts, float size
     }
     return m;
 }
-static bool pixelLayer() { const Layer& l = doc.cur(); return !l.isAdjust() && !l.isFill() && !doc.editMask; }
+static bool pixelLayer() { const Layer& l = doc.cur(); return !l.isAdjust() && !l.isFill() && !doc.editMask && !groupLocked(doc, l.groupId); }
 static void healStrokeEnd() {
     if (healPts.empty()) return;
     const int hm = healMode();
@@ -2613,7 +2613,9 @@ static void canvasInput() {
             rotateStartAngle = viewRotation;
             break;
         }
-        case T_MOVE: remember("Move"); moveStartX = doc.cur().x; moveStartY = doc.cur().y; moveGroupId = doc.cur().groupId; break;
+        case T_MOVE:
+            if (groupLocked(doc, doc.cur().groupId)) { say("This layer is locked by its group"); dragging = false; break; }
+            remember("Move"); moveStartX = doc.cur().x; moveStartY = doc.cur().y; moveGroupId = doc.cur().groupId; break;
         case T_LASSO: lasso = {c.x, c.y}; break;
         case T_MAGNETIC:
             magneticClick({c.x, c.y}, ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left));
@@ -4097,32 +4099,56 @@ static void layersPanel(float height) {
 
     ImGui::BeginChild("layerlist", ImVec2(0, height), false);
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    for (int i = (int)doc.layers.size() - 1; i >= 0; --i) {
-        Layer& l = doc.layers[i];
-        if (l.groupId) {
-            auto g = std::find_if(doc.groups.begin(), doc.groups.end(), [&](const LayerGroup& q) { return q.id == l.groupId; });
-            if (g != doc.groups.end()) {
-                const bool top = std::none_of(doc.layers.begin() + i + 1, doc.layers.end(), [&](const Layer& q) { return q.groupId == l.groupId; });
-                if (top) {
-                    const ImVec2 ga = ImGui::GetCursorScreenPos();
-                    const float gw = ImGui::GetContentRegionAvail().x, gh = 42;
-                    dl->AddRectFilled(ga, ImVec2(ga.x + gw, ga.y + gh), activeGroupId == g->id ? IM_COL32(0x16, 0x30, 0x40, 255) : C_PANEL);
-                    dl->AddLine(ImVec2(ga.x, ga.y + gh), ImVec2(ga.x + gw, ga.y + gh), C_LINE);
-                    dl->AddText(ImVec2(ga.x + 12, ga.y + 13), C_TEXT, g->expanded ? "v" : ">");
-                    dl->AddText(ImVec2(ga.x + 30, ga.y + 12), g->visible ? C_TEXT : C_DIM, g->name.c_str());
-                    ImGui::SetCursorScreenPos(ga);
-                    ImGui::PushID(g->id + 90000);
-                    if (ImGui::InvisibleButton("group_row", ImVec2(gw - 26, gh))) { activeGroupId = g->id; doc.active = i; doc.editMask = false; layerSelection.clear(); for (int j = 0; j < (int)doc.layers.size(); ++j) if (doc.layers[j].groupId == g->id) layerSelection.push_back(j); }
-                    ImGui::SetCursorScreenPos(ImVec2(ga.x + gw - 24, ga.y + 7));
-                    if (ImGui::SmallButton(g->expanded ? "-" : "+")) g->expanded = !g->expanded;
-                    ImGui::SetCursorScreenPos(ImVec2(ga.x + gw - 50, ga.y + 7));
-                    if (ImGui::SmallButton(g->visible ? "o" : "x")) { remember(g->visible ? "Hide Group" : "Show Group"); g->visible = !g->visible; changed(); }
-                    ImGui::PopID();
-                    ImGui::SetCursorScreenPos(ImVec2(ga.x, ga.y + gh + 1));
-                }
-                if (!g->expanded) continue;
+    const std::vector<LayerTreeEntry> tree = layerTreeWalk(doc);
+    for (auto it = tree.rbegin(); it != tree.rend(); ++it) {
+        const LayerTreeEntry& entry = *it;
+        if (entry.group) {
+            auto g = std::find_if(doc.groups.begin(), doc.groups.end(), [&](const LayerGroup& q) { return q.id == entry.id; });
+            if (g == doc.groups.end()) continue;
+            bool shown = true;
+            for (int parent = g->parentId; parent && shown;) {
+                auto p = std::find_if(doc.groups.begin(), doc.groups.end(), [&](const LayerGroup& q) { return q.id == parent; });
+                if (p == doc.groups.end()) break;
+                shown = p->expanded; parent = p->parentId;
             }
+            if (!shown) continue;
+            const ImVec2 ga = ImGui::GetCursorScreenPos();
+            const float gw = ImGui::GetContentRegionAvail().x, gh = 42;
+            dl->AddRectFilled(ga, ImVec2(ga.x + gw, ga.y + gh), activeGroupId == g->id ? IM_COL32(0x16, 0x30, 0x40, 255) : C_PANEL);
+            dl->AddLine(ImVec2(ga.x, ga.y + gh), ImVec2(ga.x + gw, ga.y + gh), C_LINE);
+            const float indent = 12.0f * entry.depth;
+            dl->AddText(ImVec2(ga.x + 12 + indent, ga.y + 13), C_TEXT, g->expanded ? "v" : ">");
+            dl->AddText(ImVec2(ga.x + 30 + indent, ga.y + 12), g->visible ? C_TEXT : C_DIM, g->name.c_str());
+            ImGui::SetCursorScreenPos(ImVec2(ga.x + indent, ga.y));
+            ImGui::PushID(g->id + 90000);
+            if (ImGui::InvisibleButton("group_row", ImVec2(gw - indent - 80, gh))) {
+                activeGroupId = g->id; doc.editMask = false; layerSelection.clear();
+                for (int j = 0; j < (int)doc.layers.size(); ++j) {
+                    int parent = doc.layers[j].groupId;
+                    while (parent && parent != g->id) { auto p = std::find_if(doc.groups.begin(), doc.groups.end(), [&](const LayerGroup& q) { return q.id == parent; }); parent = p == doc.groups.end() ? 0 : p->parentId; }
+                    if (parent == g->id) { doc.active = j; layerSelection.push_back(j); }
+                }
+            }
+            ImGui::SetCursorScreenPos(ImVec2(ga.x + gw - 24, ga.y + 7));
+            if (ImGui::SmallButton(g->expanded ? "-" : "+")) g->expanded = !g->expanded;
+            ImGui::SetCursorScreenPos(ImVec2(ga.x + gw - 50, ga.y + 7));
+            if (ImGui::SmallButton(g->visible ? "o" : "x")) { remember(g->visible ? "Hide Group" : "Show Group"); g->visible = !g->visible; changed(); }
+            ImGui::SetCursorScreenPos(ImVec2(ga.x + gw - 76, ga.y + 7));
+            if (ImGui::SmallButton(g->locked ? "L" : "U")) { remember(g->locked ? "Unlock Group" : "Lock Group"); g->locked = !g->locked; changed(); }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip(g->locked ? "Unlock this group and its contents" : "Lock this group and its contents");
+            ImGui::PopID();
+            ImGui::SetCursorScreenPos(ImVec2(ga.x, ga.y + gh + 1));
+            continue;
         }
+        int i = entry.layerIndex;
+        bool shown = true;
+        for (int parent = doc.layers[i].groupId; parent && shown;) {
+            auto g = std::find_if(doc.groups.begin(), doc.groups.end(), [&](const LayerGroup& q) { return q.id == parent; });
+            if (g == doc.groups.end()) break;
+            shown = g->expanded; parent = g->parentId;
+        }
+        if (!shown) continue;
+        Layer& l = doc.layers[i];
         ImGui::PushID(i);
         const ImVec2 a = ImGui::GetCursorScreenPos();
         const float w = ImGui::GetContentRegionAvail().x, h = 48;
@@ -4139,7 +4165,7 @@ static void layersPanel(float height) {
         if (l.visible) { dl->AddEllipse(ImVec2(a.x + 14, a.y + 24), 8, 5, C_TEXT, 0, 16, 1.5f); dl->AddCircleFilled(ImVec2(a.x + 14, a.y + 24), 2.5f, C_TEXT); }
         else dl->AddRect(ImVec2(a.x + 7, a.y + 17), ImVec2(a.x + 21, a.y + 31), C_LINE);
         // the layer's picture; click edits the pixels
-        const float indent = (l.clip && i > 0 ? 16.0f : 0.0f) + (l.groupId ? 12.0f : 0.0f);
+        const float indent = (l.clip && i > 0 ? 16.0f : 0.0f) + 12.0f * entry.depth;
         const ImVec2 tp(a.x + 28 + indent, a.y + 4);
         if (indent > 0) {   // clipped to the layer below: Photoshop's bent arrow
             const float ax = a.x + 34, ay = a.y + 12;
@@ -4894,14 +4920,14 @@ void script(const std::string& what) {
         remember("Group Layers");
         groupLayers(doc, layerSelection);
         activeGroupId = doc.cur().groupId;
-        LayerGroup& group = doc.groups.back(); group.opacity = 0.72f; group.hasMask = true; group.mask.assign((size_t)doc.w * doc.h, 255);
+        LayerGroup& group = doc.groups.back(); group.opacity = 0.72f; group.hasMask = true; group.mask.assign((size_t)doc.w * doc.h, 255); group.locked = true; group.expanded = true;
         for (int y = 0; y < doc.h; ++y) for (int x = 0; x < doc.w / 3; ++x) group.mask[(size_t)y * doc.w + x] = 0;
         Image before; composite(doc, before, {0, 0, doc.w, doc.h}, false);
         std::string err; const std::string project = scriptPath("groups-roundtrip.chimera").u8string(); Doc roundTrip;
         const bool saved = saveProject(doc, project, err) && openDoc(project, roundTrip, err);
         Image after; if (saved) composite(roundTrip, after, {0, 0, roundTrip.w, roundTrip.h}, false);
-        const bool same = saved && roundTrip.groups.size() == 1 && roundTrip.layers[1].groupId == roundTrip.layers[2].groupId && before.px == after.px;
-        fprintf(stderr, "layer-groups: %s; two children, group opacity and mask, project/composite round trip=%d\n", same ? "passed" : err.c_str(), saved);
+        const bool same = saved && roundTrip.groups.size() == 1 && roundTrip.groups[0].locked && groupLocked(roundTrip, roundTrip.groups[0].id) && roundTrip.layers[1].groupId == roundTrip.layers[2].groupId && before.px == after.px;
+        fprintf(stderr, "layer-groups: %s; two children, opacity, mask, inherited lock and project/composite round trip=%d\n", same ? "passed" : err.c_str(), saved);
         changed();
         return;
     }
