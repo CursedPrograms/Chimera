@@ -6,6 +6,7 @@
 #include "fx.h"
 #include "bathos.h"
 #include "mimicplug.h"
+#include "inoculantplug.h"
 #include "changeling.h"
 #include "segment.h"
 #include "quicksel.h"
@@ -105,7 +106,7 @@ static bool quit = false, askQuit = false;
 static std::string toast; static double toastUntil = 0;
 
 enum Tool { T_MOVE, T_RECT, T_ELLIPSE, T_LASSO, T_POLY, T_WAND, T_BRUSH, T_ERASER, T_BUCKET, T_DROPPER, T_HAND,
-            T_PENCIL, T_ZOOM, T_ROW, T_COL, T_CROP, T_GRADIENT, T_MAGIC_ERASER, T_RETOUCH, T_QUICK, T_OBJECT, T_REDEYE, T_COUNT,
+            T_PENCIL, T_ZOOM, T_ROW, T_COL, T_CROP, T_GRADIENT, T_MAGIC_ERASER, T_RETOUCH, T_QUICK, T_OBJECT, T_REDEYE, T_HEAL, T_COUNT,
             T_NONE = T_COUNT };   // T_NONE: a tool on the strip Chimera doesn't have yet
 static int tool = T_BRUSH;
 static uint8_t fg[4] = {0, 0, 0, 255}, bgc[4] = {255, 255, 255, 255};   // black on white, as PhotoCraft (D)
@@ -131,6 +132,12 @@ static float zoom = 1.0f; static ImVec2 origin(0, 0); static ImVec2 canvasPos, c
 static bool dragging = false, panning = false; static ImVec2 dragStart, dragNow, panStart, originStart;
 static int moveStartX = 0, moveStartY = 0;
 static std::vector<float> lasso, poly;
+// the healing tools (Spot Healing, Remove, Healing Brush, Patch, Content-Aware Move: one Chimera tool, five modes)
+enum { HM_SPOT, HM_REMOVE, HM_HEALING, HM_PATCH, HM_MOVE };
+static float healSizes[3] = {40, 90, 60};
+static std::vector<float> healPts;                       // the stroke being painted
+static bool healSrcSet = false, healAligned = true, healHaveOffset = false, patchDrag = false;
+static float healSrcX = 0, healSrcY = 0, healDX = 0, healDY = 0;
 static Stroke stroke;
 static std::vector<int> ants; static int antsVersion = -1;
 
@@ -1247,6 +1254,116 @@ static int mmSource = 0;
 static MimicPlug::Options mmOpt;
 static PluginRun mmRun;
 
+// ---------- File > Save with Inoculant / Open and Cure with Inoculant (Atelier's poison-and-antidote app) ----------
+enum { IN_NONE, IN_SAVE, IN_CURE };
+static int inMode = IN_NONE;
+static bool inAsk = false;
+static InoculantPlug::Protect inProtect;
+static InoculantPlug::Cure inCure;
+static Changeling::Job inJob, inCheck;              // the run, and the inspection of the picture to cure
+static std::string inSrc, inOut, inTemp, inErr, inVerdict;
+static bool inRunning = false, inChecking = false;
+static double inStarted = 0;
+
+static bool inoculantHave() { return !InoculantPlug::cli().empty(); }
+static void inoculantSave() { inMode = IN_SAVE; inAsk = true; inErr.clear(); inVerdict.clear(); }
+static void inoculantOpen() {
+    const std::string p = fileDialog(false, "Pictures|*.png;*.jpg;*.jpeg;*.bmp;*.webp|", nullptr, "");
+    if (p.empty()) return;
+    inMode = IN_CURE; inAsk = true; inSrc = p; inErr.clear(); inVerdict.clear();
+    if (inCheck.start(InoculantPlug::inspectArgs(p), Changeling::workDir())) inChecking = true;
+}
+// the last thing it said that's worth showing (the similarity, or the verdict)
+static std::string inSummary(Changeling::Job& j) {
+    const auto ls = j.lines();
+    std::string pick;
+    for (const auto& l : ls) if (l.find("similarity to you") != std::string::npos || l.find("Looks") == 0 || l.find("Maybe") == 0 || l.find("Likely") == 0 || l.find("faces ") == 0) pick = l;
+    return pick.empty() && !ls.empty() ? ls.back() : pick;
+}
+static void inoculantStart() {
+    std::string err;
+    if (inMode == IN_SAVE) {
+        std::string start = doc.path;
+        if (!start.empty()) start = u8path(start).replace_extension(".png").u8string();
+        const std::string out = fileDialog(true, "PNG|*.png|JPG|*.jpg|", "png", start);
+        if (out.empty()) return;
+        Doc d = newDoc(doc.w, doc.h, false);
+        composite(doc, d.layers[0].img, {0, 0, doc.w, doc.h}, false);
+        Image& img = d.layers[0].img;   // onto white: the cloak is worked out on what people will see
+        for (size_t i = 0; i < img.px.size(); i += 4) { const int a = img.px[i + 3]; for (int c = 0; c < 3; ++c) img.px[i + c] = (uint8_t)((img.px[i + c] * a + 255 * (255 - a) + 127) / 255); img.px[i + 3] = 255; }
+        inTemp = (u8path(Changeling::workDir()) / "inoculant-in.png").u8string();
+        if (!saveImage(d, inTemp, err)) { inErr = "Couldn't save the picture for it: " + err; return; }
+        inOut = out;
+        if (!inJob.start(InoculantPlug::protectArgs(inProtect, inTemp, out), Changeling::workDir())) { inErr = "Couldn't start inoculant-cli"; return; }
+    } else {
+        inOut = (u8path(Changeling::workDir()) / (u8path(inSrc).stem().u8string() + " (cured).png")).u8string();
+        std::error_code ec; std::filesystem::remove(u8path(inOut), ec);
+        if (!inJob.start(InoculantPlug::cureArgs(inCure, inSrc, inOut), Changeling::workDir())) { inErr = "Couldn't start inoculant-cli"; return; }
+    }
+    inRunning = true; inErr.clear(); inStarted = now();
+}
+static void inoculantDone() {
+    inRunning = false;
+    const std::string said = inSummary(inJob);
+    std::error_code fe; if (!std::filesystem::is_regular_file(u8path(inOut), fe)) { inErr = said.empty() ? "Inoculant didn't make the picture" : said; return; }
+    if (inMode == IN_SAVE) { say("Saved with Inoculant: " + u8path(inOut).filename().u8string() + (said.empty() ? "" : "  (" + said + ")")); }
+    else if (open(inOut)) say("Cured with Inoculant: " + u8path(inSrc).filename().u8string());
+    ImGui::CloseCurrentPopup();
+    inMode = IN_NONE;
+}
+static void drawInoculant() {
+    if (inAsk) { inAsk = false; ImGui::OpenPopup("inoculant"); }
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (!ImGui::BeginPopupModal("inoculant", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar)) return;
+    if (inChecking && inCheck.state() != Changeling::Job::RUNNING) { inChecking = false; inVerdict = inSummary(inCheck); }
+    if (inRunning) {
+        const auto st = inJob.state();
+        if (st == Changeling::Job::DONE) inoculantDone();
+        else if (st == Changeling::Job::FAILED) { inRunning = false; inErr = inSummary(inJob); if (inErr.empty()) inErr = "It stopped"; }
+    }
+    if (inMode == IN_NONE) { ImGui::EndPopup(); return; }
+    const bool save = inMode == IN_SAVE;
+    ImGui::PushStyleColor(ImGuiCol_Text, col4(C_PINK)); ImGui::TextUnformatted(save ? "Save with Inoculant" : "Open and Cure with Inoculant"); ImGui::PopStyleColor();
+    ImGui::SameLine(); ImGui::TextDisabled(save ? "a poison against face swaps and face recognition" : "washes off a cloak before it opens");
+    ImGui::Separator();
+    ImGui::BeginDisabled(inRunning);
+    ImGui::PushItemWidth(260);
+    if (save) {
+        ImGui::SliderFloat("Strength", &inProtect.strength, 1, 16, "%.1f levels");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("How far each pixel may move. More protects better and shows more.");
+        ImGui::SliderInt("Steps", &inProtect.steps, 10, 200);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("How long it works on the picture: more is stronger at the same strength.");
+        ImGui::SliderFloat("Robustness", &inProtect.robustness, 0, 1, "%.2f");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("How much it trains against being washed off (JPEG, blur, resizing).");
+        ImGui::SliderFloat("Texture", &inProtect.texture, 0, 1, "%.2f");
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Hide the change in busy areas (hair, cloth) rather than smooth skin.");
+        ImGui::TextDisabled("The whole picture, flattened; it protects the faces in it. PNG keeps the most of it.");
+    } else {
+        ImGui::TextUnformatted(u8path(inSrc).filename().u8string().c_str());
+        if (inChecking) ImGui::TextDisabled("Inspecting it...");
+        else if (!inVerdict.empty()) ImGui::TextWrapped("%s", inVerdict.c_str());
+        ImGui::SliderInt("JPEG", &inCure.jpeg, 10, 100, inCure.jpeg >= 100 ? "off" : "quality %d");
+        ImGui::SliderFloat("Blur", &inCure.blur, 0, 3, inCure.blur <= 0 ? "off" : "%.1f px");
+        ImGui::SliderInt("Median", &inCure.median, 0, 3, inCure.median <= 0 ? "off" : "%d px");
+        ImGui::SliderInt("Shrink and back", &inCure.resize, 25, 100, inCure.resize >= 100 ? "off" : "%d%%");
+        ImGui::SliderFloat("Noise", &inCure.noise, 0, 10, inCure.noise <= 0 ? "off" : "%.1f levels");
+        ImGui::TextDisabled("Each washes off more of a cloak and softens the picture a little.");
+    }
+    ImGui::PopItemWidth();
+    ImGui::EndDisabled();
+    if (inRunning) ImGui::Text("Working... %.0f s (the first run loads the face models)", now() - inStarted);
+    if (!inErr.empty()) ImGui::TextColored(col4(C_PINK), "%s", inErr.c_str());
+    ImGui::Separator();
+    if (inRunning) {
+        if (ImGui::Button("Stop", ImVec2(110, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) { inJob.stop(); inRunning = false; inErr = "Stopped"; }
+    } else {
+        if (ImGui::Button(save ? "Save..." : "Cure and Open", ImVec2(130, 0))) inoculantStart();
+        ImGui::SameLine();
+        if (ImGui::Button("Close", ImVec2(110, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) { inCheck.stop(); inChecking = false; inMode = IN_NONE; ImGui::CloseCurrentPopup(); }
+    }
+    ImGui::EndPopup();
+}
+
 static void mimicMenu() {
     const bool have = !MimicPlug::cli().empty();
     if (ImGui::MenuItem("Face Swap...", nullptr, false, have)) { mmAsk = true; mmRun.err.clear(); }
@@ -1417,6 +1534,63 @@ static void applyCrop() {
     if (r.clip(doc.w, doc.h).empty()) return;
     remember("Crop"); cropCanvas(doc, r, cropDelete); changed(); selChanged(); fitNext = true;
 }
+static int healMode() {
+    switch (Toolbar::current()) {
+    case Toolbar::REMOVE: return HM_REMOVE; case Toolbar::HEALING: return HM_HEALING; case Toolbar::PATCH: return HM_PATCH;
+    case Toolbar::CONTENT_AWARE_MOVE: return HM_MOVE; default: return HM_SPOT;
+    }
+}
+// a stroke as a canvas-sized mask: round stamps along it (soft: an edge that fades over the outer third)
+static std::vector<uint8_t> strokeMask(const std::vector<float>& pts, float size, bool soft) {
+    std::vector<uint8_t> m((size_t)doc.w * doc.h, 0);
+    const float r = std::max(0.5f, size * 0.5f), fade = std::max(1.0f, r * 0.35f);
+    auto stamp = [&](float cx, float cy) {
+        const int x0 = std::max(0, (int)std::floor(cx - r - 1)), x1 = std::min(doc.w - 1, (int)std::ceil(cx + r + 1));
+        const int y0 = std::max(0, (int)std::floor(cy - r - 1)), y1 = std::min(doc.h - 1, (int)std::ceil(cy + r + 1));
+        for (int y = y0; y <= y1; ++y)
+            for (int x = x0; x <= x1; ++x) {
+                const float d = std::hypot(x + 0.5f - cx, y + 0.5f - cy);
+                const float a = soft ? std::clamp((r - d) / fade, 0.0f, 1.0f) : (d <= r ? 1.0f : 0.0f);
+                uint8_t& v = m[(size_t)y * doc.w + x];
+                v = std::max(v, (uint8_t)std::lround(a * 255));
+            }
+    };
+    for (size_t i = 0; i + 1 < pts.size(); i += 2) {
+        stamp(pts[i], pts[i + 1]);
+        if (i + 3 < pts.size()) {
+            const float dx = pts[i + 2] - pts[i], dy = pts[i + 3] - pts[i + 1], len = std::hypot(dx, dy), step = std::max(1.0f, r * 0.25f);
+            for (float t = step; t < len; t += step) stamp(pts[i] + dx * t / len, pts[i + 1] + dy * t / len);
+        }
+    }
+    return m;
+}
+static bool pixelLayer() { const Layer& l = doc.cur(); return !l.isAdjust() && !l.isFill() && !doc.editMask; }
+static void healStrokeEnd() {
+    if (healPts.empty()) return;
+    const int hm = healMode();
+    const std::vector<float> pts = healPts;
+    healPts.clear();
+    if (hm == HM_HEALING) {
+        remember("Healing Brush");
+        healRegion(doc, strokeMask(pts, healSizes[HM_HEALING], true), (int)std::lround(healDX), (int)std::lround(healDY));
+        changed();
+        return;
+    }
+    say(hm == HM_REMOVE ? "Removing..." : "Healing...");
+    remember(hm == HM_REMOVE ? "Remove" : "Spot Healing");
+    if (contentAwareFill(doc, strokeMask(pts, healSizes[hm], false))) { changed(); say(""); }
+    else { hist.doUndo(doc); say("Nothing round it to copy from"); }
+}
+static void contentAwareFillSelection() {
+    if (!doc.hasSel()) { say("Select what to fill first"); return; }
+    if (!pixelLayer()) { say("Content-Aware Fill works on a layer's pixels"); return; }
+    say("Filling...");
+    remember("Content-Aware Fill");
+    if (contentAwareFill(doc, doc.sel)) { changed(); say(""); } else { hist.doUndo(doc); say("Nothing round it to copy from"); }
+}
+static bool insideSel(ImVec2 c) {
+    return doc.hasSel() && c.x >= 0 && c.y >= 0 && c.x < doc.w && c.y < doc.h && doc.sel[(size_t)(int)c.y * doc.w + (int)c.x] > 127;
+}
 static void canvasInput() {
     ImGuiIO& io = ImGui::GetIO();
     const bool hovered = ImGui::IsItemHovered();
@@ -1485,6 +1659,16 @@ static void canvasInput() {
             changed(retouchTo(doc, stroke, c.x, c.y, rtSize, rtHard, retouchOpts(), true));
             break;
         }
+        case T_HEAL: {
+            const int hm = healMode();
+            if (hm == HM_HEALING && io.KeyAlt) { healSrcSet = true; healHaveOffset = false; healSrcX = c.x; healSrcY = c.y; say("Healing source set: paint over what to fix"); dragging = false; break; }
+            if (!pixelLayer()) { say("The healing tools work on a layer's pixels"); dragging = false; break; }
+            if (hm == HM_HEALING && !healSrcSet) { say("Alt+click where to copy from first"); dragging = false; break; }
+            if (hm == HM_PATCH || hm == HM_MOVE) { patchDrag = insideSel(c); if (!patchDrag) lasso = {c.x, c.y}; break; }
+            if (hm == HM_HEALING && (!healAligned || !healHaveOffset)) { healDX = healSrcX - c.x; healDY = healSrcY - c.y; healHaveOffset = true; }
+            healPts = {c.x, c.y};
+            break;
+        }
         case T_BRUSH: case T_ERASER:
             if (io.KeyAlt && t == T_BRUSH) { pickColour(c, false); dragging = false; break; }
             if (!doc.cur().visible) { say("The layer is hidden: show it to paint"); dragging = false; break; }
@@ -1510,6 +1694,10 @@ static void canvasInput() {
         case T_QUICK: if (std::hypot(c.x - quickPts[quickPts.size() - 2], c.y - quickPts.back()) * zoom > 3) { quickPts.push_back(c.x); quickPts.push_back(c.y); } break;
         case T_PENCIL: if (stroke.on) changed(pencilTo(doc, stroke, c.x, c.y, pencilSize, pencilOpacity, brushColour(), false, false)); break;
         case T_RETOUCH: if (stroke.on) changed(retouchTo(doc, stroke, c.x, c.y, rtSize, rtHard, retouchOpts(), false)); break;
+        case T_HEAL:
+            if (healMode() >= HM_PATCH) { if (!patchDrag && lasso.size() >= 2 && std::hypot(c.x - lasso[lasso.size() - 2], c.y - lasso.back()) * zoom > 2) { lasso.push_back(c.x); lasso.push_back(c.y); } }
+            else if (healPts.size() >= 2 && std::hypot(c.x - healPts[healPts.size() - 2], c.y - healPts.back()) * zoom > 2) { healPts.push_back(c.x); healPts.push_back(c.y); }
+            break;
         case T_BRUSH: case T_ERASER:
             if (stroke.on) changed(strokeTo(doc, stroke, c.x, c.y, t == T_BRUSH ? brushSize : eraserSize, t == T_BRUSH ? brushHard : eraserHard, t == T_BRUSH ? brushOpacity : eraserOpacity, brushColour(), t == T_ERASER, false));
             break;
@@ -1529,6 +1717,21 @@ static void canvasInput() {
         case T_BRUSH: case T_ERASER: case T_PENCIL: case T_RETOUCH: strokeEnd(stroke); break;
         case T_CROP: if (std::fabs(cropR[2] - cropR[0]) < 2 || std::fabs(cropR[3] - cropR[1]) < 2) cropPending = false; break;
         case T_QUICK: quickSelectStroke(); break;
+        case T_HEAL: {
+            const int hm = healMode();
+            if (hm < HM_PATCH) { healStrokeEnd(); break; }
+            if (patchDrag) {
+                patchDrag = false;
+                const int dx = (int)std::lround(c.x - dragStart.x), dy = (int)std::lround(c.y - dragStart.y);
+                if (!dx && !dy) break;
+                if (hm == HM_PATCH) { remember("Patch"); healRegion(doc, doc.sel, dx, dy); changed(); }
+                else { say("Moving..."); remember("Content-Aware Move"); contentAwareMove(doc, dx, dy); changed(); selChanged(); say(""); }
+            } else {
+                if (lasso.size() >= 6) finishShape(shapePolygon(doc, lasso), modeFromKeys(), hm == HM_PATCH ? "Patch" : "Content-Aware Move");
+                lasso.clear();
+            }
+            break;
+        }
         case T_OBJECT: objectSelect(dragStart.x, dragStart.y, c.x, c.y); break;
         case T_GRADIENT:
             if (std::hypot(c.x - dragStart.x, c.y - dragStart.y) * zoom >= 3) {
@@ -1580,6 +1783,31 @@ static void drawCanvas() {
     // the Lasso draws nothing while you drag: its selection appears when you let go. The Polygonal Lasso shows its
     // points, since it's built click by click.
     if (!poly.empty()) path(poly, true);
+    if (tool == T_HEAL) {
+        const int hm = healMode();
+        if (dragging && !lasso.empty() && !patchDrag) path(lasso, true);
+        if (dragging && patchDrag) {   // the selection's outline where it's being dragged to
+            const float ox = dragNow.x - dragStart.x, oy = dragNow.y - dragStart.y;
+            for (size_t i = 0; i + 3 < ants.size(); i += 4)
+                dl->AddLine(toScreen(ants[i] + ox, ants[i + 1] + oy), toScreen(ants[i + 2] + ox, ants[i + 3] + oy), C_PINK, 1.5f);
+        }
+        if (hm < HM_PATCH && healPts.size() >= 2) {   // the stroke, until it's healed
+            const float w = std::max(1.0f, healSizes[hm] * zoom);
+            for (size_t i = 0; i + 1 < healPts.size(); i += 2) {
+                dl->AddCircleFilled(toScreen(healPts[i], healPts[i + 1]), w * 0.5f, IM_COL32(220, 40, 60, 90), 32);
+                if (i + 3 < healPts.size()) dl->AddLine(toScreen(healPts[i], healPts[i + 1]), toScreen(healPts[i + 2], healPts[i + 3]), IM_COL32(220, 40, 60, 90), w);
+            }
+        }
+        if (hm == HM_HEALING && healSrcSet && ImGui::IsWindowHovered()) {
+            const ImVec2 sp = dragging && healHaveOffset ? toScreen(dragNow.x + healDX, dragNow.y + healDY) : toScreen(healSrcX, healSrcY);
+            dl->AddLine(ImVec2(sp.x - 7, sp.y), ImVec2(sp.x + 7, sp.y), IM_COL32(255, 255, 255, 220), 1.5f);
+            dl->AddLine(ImVec2(sp.x, sp.y - 7), ImVec2(sp.x, sp.y + 7), IM_COL32(255, 255, 255, 220), 1.5f);
+        }
+        if (hm < HM_PATCH && ImGui::IsWindowHovered()) {
+            const float r = healSizes[hm] * 0.5f * zoom;
+            dl->AddCircle(io.MousePos, r, IM_COL32(255, 255, 255, 200), 48, 1.0f); dl->AddCircle(io.MousePos, r + 1, IM_COL32(0, 0, 0, 160), 48, 1.0f);
+        }
+    }
     // the brush outline
     if (tool == T_CROP && cropPending) {   // what's kept, the rest dimmed, thirds as a guide
         const ImVec2 a0 = toScreen(std::min(cropR[0], cropR[2]), std::min(cropR[1], cropR[3])), a1 = toScreen(std::max(cropR[0], cropR[2]), std::max(cropR[1], cropR[3]));
@@ -1660,6 +1888,7 @@ static int ltTool(int id) {
     case Toolbar::BLUR: case Toolbar::SHARPEN: case Toolbar::SMUDGE: case Toolbar::DODGE: case Toolbar::BURN: case Toolbar::SPONGE:
     case Toolbar::CLONE_STAMP: case Toolbar::BACKGROUND_ERASER: return T_RETOUCH;
     case Toolbar::QUICK_SELECTION: return T_QUICK; case Toolbar::OBJECT_SELECTION: return T_OBJECT; case Toolbar::RED_EYE: return T_REDEYE;
+    case Toolbar::SPOT_HEALING: case Toolbar::REMOVE: case Toolbar::HEALING: case Toolbar::PATCH: case Toolbar::CONTENT_AWARE_MOVE: return T_HEAL;
     default: return T_NONE;
     }
 }
@@ -1801,6 +2030,19 @@ static void optionsBar() {
         selModes(); ImGui::SameLine(0, 14); ImGui::Checkbox("Sample all layers", &sampleAll); ImGui::SameLine(0, 14);
         ImGui::TextDisabled("Drag a box round an object: it's found inside the box");
         break;
+    case T_HEAL: {
+        const int hm = healMode();
+        if (hm < HM_PATCH) { sliderF("Size", &healSizes[hm], 1, 1000, "%.0f px", ImGuiSliderFlags_Logarithmic); ImGui::SameLine(0, 14); }
+        if (hm == HM_HEALING) { ImGui::Checkbox("Aligned", &healAligned); ImGui::SameLine(0, 14); }
+        if (hm >= HM_PATCH) { selModes(); ImGui::SameLine(0, 14); }
+        const char* tips[] = {"Paint over a spot: it's filled from what's round it",
+                              "Paint over what should go (a person, a wire, a sign): it's filled from what's round it",
+                              healSrcSet ? "Paint over what to fix: texture from the source, colour from round it; Alt+click sets a new source" : "Alt+click where to copy from, then paint over what to fix",
+                              "Draw round what to fix, then drag the selection onto good texture",
+                              "Draw round an object, then drag it: it moves and where it was is filled"};
+        ImGui::TextDisabled("%s", tips[hm]);
+        break;
+    }
     case T_REDEYE:
         sliderF("Pupil Size", &pupilSize, 1, 100, "%.0f%%"); ImGui::SameLine(0, 14);
         sliderF("Darken", &redDarken, 1, 100, "%.0f%%"); ImGui::SameLine(0, 14);
@@ -2203,6 +2445,11 @@ static void menus() {
         if (item("Save Project", "Ctrl+S", !noDoc)) save();
         if (item("Save Project As...", nullptr, !noDoc)) saveAs(true);
         if (item("Export PNG / JPG...", "Ctrl+Shift+S", !noDoc)) saveAs(false);
+        if (item("Save with Inoculant...", nullptr, !noDoc && inoculantHave())) inoculantSave();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("%s", inoculantHave() ? "Export the picture protected against face swaps and face recognition" : "Needs Inoculant (Atelier) on this PC");
+        ImGui::Separator();
+        if (item("Open and Cure with Inoculant...", nullptr, inoculantHave())) inoculantOpen();
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("%s", inoculantHave() ? "Wash a cloak off a picture as it opens (and see if it has one)" : "Needs Inoculant (Atelier) on this PC");
         ImGui::Separator();
         if (item("Close", "Ctrl+W", !noDoc || tabs.size() > 1)) askCloseTab(curTab);
         ImGui::Separator();
@@ -2216,6 +2463,7 @@ static void menus() {
         if (item("Fill with Foreground", "Alt+Backspace")) fillWith(fg, "Fill");
         if (item("Fill with Background", "Ctrl+Backspace")) fillWith(bgc, "Fill");
         if (item("Clear", "Delete")) clearSelection();
+        if (item("Content-Aware Fill", "Shift+F5", doc.hasSel())) contentAwareFillSelection();
         ImGui::Separator();
         if (item("Free Transform...", "Ctrl+T")) openDlg(D_TRANSFORM);
         if (item("Flip Horizontal")) { remember("Flip"); flipLayer(doc, true); changed(); }
@@ -2404,6 +2652,7 @@ static void keys() {
     }
     if (alt && k(ImGuiKey_Backspace)) { fillWith(fg, "Fill"); return; }
     if (shift && k(ImGuiKey_F6)) { openDlg(D_FEATHER); return; }
+    if (shift && k(ImGuiKey_F5)) { contentAwareFillSelection(); return; }
     if (k(ImGuiKey_Delete) || k(ImGuiKey_Backspace)) { clearSelection(); return; }
     if (k(ImGuiKey_Enter) && poly.size() >= 6) { finishShape(shapePolygon(doc, poly), selMode, "Polygonal Lasso"); poly.clear(); return; }
     if (k(ImGuiKey_Escape)) { poly.clear(); lasso.clear(); return; }
@@ -2537,6 +2786,7 @@ void frame() {
     drawChangeling();
     drawBathos();
     drawMimic();
+    drawInoculant();
     updateThumbs();
     maskColours();
 
@@ -2588,7 +2838,8 @@ void init(SDL_Window* win, const std::string& prefDir, void (*status)(const char
         char* bp = SDL_GetBasePath();
         Changeling::init(prefDir, bp ? bp : "");
         Bathos::init(prefDir, bp ? bp : "");   // Filter > Bathos: Atelier's depth app, when it's on this PC
-        MimicPlug::init(prefDir, bp ? bp : "");   // Filter > Mimic: Atelier's face-swap app
+        MimicPlug::init(prefDir, bp ? bp : "");
+        InoculantPlug::init(prefDir, bp ? bp : "");   // File > Save with / Open and Cure with Inoculant   // Filter > Mimic: Atelier's face-swap app
         Toolbar::init(std::string(bp ? bp : "") + "assets/", prefDir);   // the tool strip's icons and its layout
         Toolbar::select(Toolbar::BRUSH);
         SDL_free(bp);
@@ -2678,6 +2929,29 @@ void script(const std::string& what) {
         combineSel(doc, shapeEllipse(doc, doc.w / 8, doc.h / 8, doc.w / 3, doc.h / 2), SEL_NEW);
         changed(); selChanged();
         Toolbar::select(Toolbar::BRUSH); syncTool();
+    }
+    if (what == "heal") {   // tests: Spot Healing on a stroke, Edit > Content-Aware Fill on a box, a Patch, a Content-Aware Move
+        auto ms = [](std::chrono::steady_clock::time_point t0) { return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count(); };
+        auto t0 = std::chrono::steady_clock::now();
+        Toolbar::select(Toolbar::SPOT_HEALING); syncTool();
+        healPts = {doc.w * 0.2f, doc.h * 0.5f, doc.w * 0.3f, doc.h * 0.55f};
+        healStrokeEnd();
+        fprintf(stderr, "heal: spot %.0f ms\n", ms(t0)); t0 = std::chrono::steady_clock::now();
+        combineSel(doc, shapeRect(doc, (int)(doc.w * 0.6f), (int)(doc.h * 0.1f), (int)(doc.w * 0.75f), (int)(doc.h * 0.25f)), SEL_NEW);
+        contentAwareFillSelection();
+        fprintf(stderr, "heal: content-aware fill %.0f ms\n", ms(t0)); t0 = std::chrono::steady_clock::now();
+        combineSel(doc, shapeEllipse(doc, (int)(doc.w * 0.1f), (int)(doc.h * 0.75f), (int)(doc.w * 0.2f), (int)(doc.h * 0.9f)), SEL_NEW);
+        remember("Patch"); healRegion(doc, doc.sel, (int)(doc.w * 0.15f), 0);
+        fprintf(stderr, "heal: patch %.0f ms\n", ms(t0)); t0 = std::chrono::steady_clock::now();
+        combineSel(doc, shapeEllipse(doc, (int)(doc.w * 0.45f), (int)(doc.h * 0.4f), (int)(doc.w * 0.55f), (int)(doc.h * 0.6f)), SEL_NEW);
+        remember("Content-Aware Move"); contentAwareMove(doc, (int)(doc.w * 0.12f), 0);
+        fprintf(stderr, "heal: content-aware move %.0f ms\n", ms(t0));
+        changed(); selChanged();
+    }
+    if (what == "inoculant-save" || what == "inoculant-cure") {   // tests: the dialog, open (no run)
+        if (what == "inoculant-save") inoculantSave();
+        else { inMode = IN_CURE; inAsk = true; inSrc = doc.path; if (inCheck.start(InoculantPlug::inspectArgs(doc.path), Changeling::workDir())) inChecking = true; }
+        fprintf(stderr, "inoculant: %s\n", InoculantPlug::cli().c_str());
     }
     if (what == "redeye") {   // tests: a click in the middle of the picture with the Red Eye tool
         const int n = redEye(doc, doc.w / 2, doc.h / 2, 50, 50);

@@ -8,9 +8,9 @@
 
 namespace Inpaint {
 
-static const int R = 3;                 // patch radius: 7 x 7 patches (PhotoCraft's default)
+static const int R = 4;                 // patch radius: 9 x 9 patches (PhotoCraft uses 7 x 7; 9 keeps more structure)
 static const int PSZ = 2 * R + 1;
-static const int EM_ITERS = 10, MIN_EM_ITERS = 3, PM_ITERS = 2, REFINE_EXTENT = 192;
+static const int EM_ITERS = 10, MIN_EM_ITERS = 3, PM_ITERS = 2, REFINE_EXTENT = 640;
 
 struct Rng {   // a fixed-seed hash generator: the same fill every time
     uint64_t s;
@@ -182,6 +182,24 @@ struct Solver {
             }
         }
     }
+    // the finish: each hole pixel copied from where its own best patch's centre is (the vote averages several
+    // sources and goes soft; this keeps the grain), then one more match so the copy is consistent
+    void sharpen() {
+        const int w = L.w;
+        for (int pass = 0; pass < 2; ++pass) {
+            std::vector<float> out = L.img;
+            for (int y = by0; y < by1; ++y)
+                for (int x = bx0; x < bx1; ++x) {
+                    const size_t i = (size_t)y * w + x;
+                    if (!L.hole[i]) continue;
+                    const int s = nnf[(size_t)(y - by0) * bw() + (x - bx0)];
+                    if (s < 0) continue;
+                    for (int c = 0; c < 3; ++c) out[i * 3 + c] = L.img[(size_t)s * 3 + c];
+                }
+            L.img.swap(out);
+            if (pass == 0) { costs(); patchmatch(7, 99, 2); }
+        }
+    }
     // each hole pixel from the patches over it, weighted by how well they match (sigma: the 75th percentile cost)
     void vote() {
         const int w = L.w;
@@ -283,6 +301,7 @@ bool complete(int w, int h, std::vector<float>& img, const std::vector<uint8_t>&
             for (int pass = 0; pass < pmIters; ++pass) S.patchmatch(pass + it * pmIters, (uint64_t)(li * 1000 + it) + 1, radius);
             S.vote();
         }
+        if (li == 0) S.sharpen();
         prevNnf.assign(S.nnf.size(), -1);
         for (size_t k = 0; k < S.nnf.size(); ++k) if (S.target[k]) prevNnf[k] = S.nnf[k];
         pbx0 = S.bx0; pby0 = S.by0; pbw = S.bw(); pbh = S.by1 - S.by0; pw = L.w;
