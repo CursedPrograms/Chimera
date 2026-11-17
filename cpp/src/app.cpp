@@ -130,6 +130,7 @@ static float rtSize = 60, rtHard = 0.5f, rtStrength[RT_COUNT] = {0.5f, 0.5f, 0.5
 // Pattern Stamp's patterns (built in, and Edit > Define Pattern), the History Brush's source, and the others' settings
 static std::vector<std::pair<std::string, Image>> patterns;
 static int patternPick = 0;
+static int customShapePick = 0;
 
 static float replaceTol = 0.3f; static int replaceMode = 2;
 static float mixWet = 0.5f, mixLoad = 0.5f, mixMix = 0.5f;
@@ -2360,12 +2361,52 @@ static int shapeKind() {
     switch (Toolbar::current()) {
     case Toolbar::RECTANGLE: return SHAPE_RECT; case Toolbar::ELLIPSE: return SHAPE_ELLIPSE; case Toolbar::TRIANGLE: return SHAPE_TRIANGLE;
     case Toolbar::POLYGON: return SHAPE_POLYGON; case Toolbar::STAR: return SHAPE_STAR; case Toolbar::LINE: return SHAPE_LINE;
+    case Toolbar::CUSTOM_SHAPE: return SHAPE_PATH;
     default: return SHAPE_RECT;
     }
+}
+// PhotoCraft's custom shape presets are paths in a 100 by 100 box; these starter paths use the same coordinates.
+static const char* CUSTOM_SHAPE_NAMES[] = {"Heart", "Arrow Right", "Arrow Left", "Cloud", "Speech Bubble", "Lightning", "Diamond", "Check Mark"};
+static const std::vector<std::vector<ImVec2>> CUSTOM_SHAPE_POINTS = {
+    {{50,96},{7,55},{2,37},{5,20},{15,7},{30,2},{43,8},{50,20},{57,8},{70,2},{85,7},{95,20},{98,37},{93,55}},
+    {{0,32},{57,32},{57,10},{100,50},{57,90},{57,68},{0,68}},
+    {{100,32},{43,32},{43,10},{0,50},{43,90},{43,68},{100,68}},
+    {{18,77},{5,76},{0,62},{2,49},{12,41},{21,41},{28,20},{43,10},{58,11},{72,22},{76,34},{91,35},{100,48},{99,64},{88,77}},
+    {{13,5},{87,5},{98,16},{98,60},{87,72},{52,72},{30,98},{34,72},{13,72},{2,60},{2,16}},
+    {{62,0},{23,51},{46,51},{34,100},{82,39},{58,39}},
+    {{50,0},{100,50},{50,100},{0,50}},
+    {{4,54},{20,37},{39,57},{80,10},{97,26},{39,90}}
+};
+static Shape customShapeFromDrag(ImVec2 a, ImVec2 b) {
+    // Fit the selected PhotoCraft-style preset path into the drag box without changing its outline.
+    Shape sh = shapeNext;
+    sh.kind = SHAPE_PATH;
+    float x0 = std::min(a.x, b.x), x1 = std::max(a.x, b.x), y0 = std::min(a.y, b.y), y1 = std::max(a.y, b.y);
+    if (ImGui::GetIO().KeyShift) {
+        const auto& bounds = CUSTOM_SHAPE_POINTS[std::clamp(customShapePick, 0, (int)CUSTOM_SHAPE_POINTS.size() - 1)];
+        float bx0 = 100, by0 = 100, bx1 = 0, by1 = 0;
+        for (const ImVec2& p : bounds) { bx0 = std::min(bx0, p.x); by0 = std::min(by0, p.y); bx1 = std::max(bx1, p.x); by1 = std::max(by1, p.y); }
+        const float ratio = (bx1 - bx0) / std::max(0.01f, by1 - by0);
+        float w = x1 - x0, h = y1 - y0;
+        if (w / std::max(h, 0.01f) > ratio) w = h * ratio; else h = w / ratio;
+        const float cx = (x0 + x1) * 0.5f, cy = (y0 + y1) * 0.5f;
+        x0 = cx - w * 0.5f; x1 = cx + w * 0.5f;
+        y0 = cy - h * 0.5f; y1 = cy + h * 0.5f;
+    }
+    sh.x0 = x0; sh.y0 = y0; sh.x1 = x1; sh.y1 = y1;
+    Subpath sp; sp.closed = true;
+    const auto& points = CUSTOM_SHAPE_POINTS[std::clamp(customShapePick, 0, (int)CUSTOM_SHAPE_POINTS.size() - 1)];
+    for (const ImVec2& p : points) {
+        Knot k; k.ax = k.ix = k.ox = x0 + p.x / 100.0f * (x1 - x0); k.ay = k.iy = k.oy = y0 + p.y / 100.0f * (y1 - y0);
+        sp.knots.push_back(k);
+    }
+    sh.path = {sp};
+    return sh;
 }
 // the shape a drag from a to b makes: Shift a square / circle / regular one (a line: in 45-degree steps), Alt from
 // the middle out
 static Shape shapeFromDrag(ImVec2 a, ImVec2 b) {
+    if (Toolbar::current() == Toolbar::CUSTOM_SHAPE) return customShapeFromDrag(a, b);
     Shape sh = shapeNext;
     sh.kind = shapeKind();
     const ImGuiIO& io = ImGui::GetIO();
@@ -2809,7 +2850,7 @@ static void canvasInput() {
         case T_SHAPE: {
             const Shape sh = shapeFromDrag(dragStart, c);
             if (std::fabs(sh.x1 - sh.x0) * zoom < 2 && std::fabs(sh.y1 - sh.y0) * zoom < 2) break;
-            remember(std::string("New ") + shapeName(sh.kind));
+            remember(Toolbar::current() == Toolbar::CUSTOM_SHAPE ? std::string("New ") + CUSTOM_SHAPE_NAMES[customShapePick] : std::string("New ") + shapeName(sh.kind));
             Fill f; f.kind = FILL_SOLID; for (int k = 0; k < 3; ++k) f.colour[k] = fg[k] / 255.0f;
             addShapeLayer(doc, sh, f);
             changed();
@@ -3170,7 +3211,7 @@ static int ltTool(int id) {
     case Toolbar::PATTERN_STAMP: case Toolbar::HISTORY_BRUSH: case Toolbar::ART_HISTORY_BRUSH: case Toolbar::COLOR_REPLACEMENT: case Toolbar::MIXER_BRUSH: return T_RETOUCH;
     case Toolbar::QUICK_SELECTION: return T_QUICK; case Toolbar::OBJECT_SELECTION: return T_OBJECT; case Toolbar::RED_EYE: return T_REDEYE;
     case Toolbar::SPOT_HEALING: case Toolbar::REMOVE: case Toolbar::HEALING: case Toolbar::PATCH: case Toolbar::CONTENT_AWARE_MOVE: return T_HEAL;
-    case Toolbar::RECTANGLE: case Toolbar::ELLIPSE: case Toolbar::TRIANGLE: case Toolbar::POLYGON: case Toolbar::STAR: case Toolbar::LINE: return T_SHAPE;
+    case Toolbar::RECTANGLE: case Toolbar::ELLIPSE: case Toolbar::TRIANGLE: case Toolbar::POLYGON: case Toolbar::STAR: case Toolbar::LINE: case Toolbar::CUSTOM_SHAPE: return T_SHAPE;
     case Toolbar::COLOR_SAMPLER: case Toolbar::RULER: case Toolbar::NOTE: case Toolbar::COUNT_TOOL: return T_MARK;
     case Toolbar::TYPE_H: case Toolbar::TYPE_V: case Toolbar::TYPE_H_MASK: case Toolbar::TYPE_V_MASK: return T_TYPE;
     case Toolbar::PEN: case Toolbar::FREEFORM_PEN: case Toolbar::CURVATURE_PEN: case Toolbar::ADD_ANCHOR: case Toolbar::DELETE_ANCHOR:
@@ -3561,6 +3602,11 @@ static void optionsBar() {
         bool ch = false;
         auto edited = [&](bool c) { if (live && ImGui::IsItemActivated()) remember("Shape"); ch |= c; };
         if (live) { ImGui::TextDisabled("%s", L.name.c_str()); ImGui::SameLine(0, 14); }
+        if (Toolbar::current() == Toolbar::CUSTOM_SHAPE) {
+            ImGui::SetNextItemWidth(160);
+            ImGui::Combo("Shape", &customShapePick, CUSTOM_SHAPE_NAMES, IM_ARRAYSIZE(CUSTOM_SHAPE_NAMES));
+            ImGui::SameLine(0, 12);
+        }
         edited(ImGui::Checkbox("Fill", &sh.fillOn));
         if (live && L.fill.kind == FILL_SOLID) { ImGui::SameLine(0, 4); edited(ImGui::ColorEdit3("##sfc", L.fill.colour, ImGuiColorEditFlags_NoInputs)); }
         ImGui::SameLine(0, 14);
@@ -3573,7 +3619,7 @@ static void optionsBar() {
         if (kind == SHAPE_POLYGON || kind == SHAPE_STAR) { ImGui::SameLine(0, 14); edited(sliderI("Sides", &sh.sides, 3, 64)); }
         if (kind == SHAPE_STAR) { float in = sh.inner * 100; ImGui::SameLine(0, 14); if (sliderF("Indent", &in, 5, 95, "%.0f%%")) { sh.inner = in / 100; edited(true); } else edited(false); }
         ImGui::SameLine(0, 14);
-        ImGui::TextDisabled(live ? "Changes this shape layer" : "Drag to draw: Shift keeps it regular, Alt draws from the middle");
+        ImGui::TextDisabled(live ? "Changes this shape layer" : Toolbar::current() == Toolbar::CUSTOM_SHAPE ? "Drag to place; Shift keeps proportions" : "Drag to draw: Shift keeps it regular, Alt draws from the middle");
         if (ch && live) { renderFill(doc, L); changed(); }
         break;
     }
@@ -4594,6 +4640,23 @@ void script(const std::string& what) {
                         roundTrip.layers[2].clip && roundTrip.layers[3].frame;
         fprintf(stderr, "frame: %s; two editable frames, clipped image, project round trip=%d\n",
                 ok ? "passed" : err.c_str(), saved);
+        return;
+    }
+    if (what == "custom-shape") {
+        Toolbar::select(Toolbar::CUSTOM_SHAPE); syncTool();
+        customShapePick = 0;
+        remember("New Heart");
+        Shape sh = customShapeFromDrag(ImVec2(doc.w * 0.18f, doc.h * 0.18f), ImVec2(doc.w * 0.48f, doc.h * 0.62f));
+        Fill fill; fill.kind = FILL_SOLID; fill.colour[0] = 0.85f; fill.colour[1] = 0.18f; fill.colour[2] = 0.26f;
+        addShapeLayer(doc, sh, fill);
+        doc.cur().name = "Heart";
+        customShapePick = 1;
+        sh = customShapeFromDrag(ImVec2(doc.w * 0.56f, doc.h * 0.25f), ImVec2(doc.w * 0.86f, doc.h * 0.55f));
+        addShapeLayer(doc, sh, fill);
+        doc.cur().name = "Arrow Right";
+        changed();
+        const bool ok = doc.layers.size() == 3 && doc.layers[1].shape.kind == SHAPE_PATH && doc.layers[1].shape.path[0].knots.size() == CUSTOM_SHAPE_POINTS[0].size() && doc.layers[2].shape.path[0].knots.size() == CUSTOM_SHAPE_POINTS[1].size();
+        fprintf(stderr, "custom-shape: %s; two editable SHAPE_PATH presets created\n", ok ? "passed" : "preset path check failed");
         return;
     }
     if (what == "about") { scriptDlg = D_ABOUT; return; }   // Help > About: the splash art
