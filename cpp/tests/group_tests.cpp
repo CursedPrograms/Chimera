@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <numeric>
 #include <vector>
 
 static Layer solidLayer(const Doc& d, const char* name, uint8_t r, uint8_t g, uint8_t b, uint8_t a = 255) {
@@ -151,6 +152,9 @@ static bool paragraphTextWrapsAndPersists() {
     point.font = defaultFont();
     std::vector<float> pointPixels; float pointBox[4];
     if (!textCoverage(point, 500, 300, pointPixels, pointBox)) return false;
+    Text scaled = point; scaled.scaleX = 1.5f; scaled.scaleY = 1.25f;
+    std::vector<float> scaledPixels; float scaledBox[4];
+    if (!textCoverage(scaled, 500, 300, scaledPixels, scaledBox)) return false;
     Text paragraph = point; paragraph.boxWidth = 90; paragraph.boxHeight = 100; paragraph.x = 160; paragraph.y = 100; paragraph.rotation = 90; paragraph.scaleX = 1.25f; paragraph.scaleY = 0.8f;
     std::vector<float> paragraphPixels; float paragraphBox[4];
     if (!textCoverage(paragraph, 500, 300, paragraphPixels, paragraphBox)) return false;
@@ -166,9 +170,43 @@ static bool paragraphTextWrapsAndPersists() {
     std::error_code ec; std::filesystem::remove(path, ec);
     const auto savedText = std::find_if(loaded.layers.begin(), loaded.layers.end(), [](const Layer& l) { return l.isText(); });
     return paragraphBox[3] - paragraphBox[1] > pointBox[3] - pointBox[1] + 10 &&
+           scaledBox[2] - scaledBox[0] > (pointBox[2] - pointBox[0]) * 1.2f && scaledBox[3] - scaledBox[1] > (pointBox[3] - pointBox[1]) * 1.1f &&
            std::fabs(roundTrip.boxWidth - paragraph.boxWidth) < 0.01f && roundTrip.boxHeight == paragraph.boxHeight && roundTrip.rotation == paragraph.rotation && roundTrip.scaleX == paragraph.scaleX && roundTrip.scaleY == paragraph.scaleY &&
            legacy.boxWidth == 0 && legacy.boxHeight == 0 && projectOk && savedText != loaded.layers.end() &&
            savedText->text.boxWidth == paragraph.boxWidth && savedText->text.boxHeight == paragraph.boxHeight && savedText->text.rotation == paragraph.rotation && savedText->text.scaleX == paragraph.scaleX && savedText->text.scaleY == paragraph.scaleY;
+}
+
+// PhotoCraft type-path placement keeps an editable Bezier path and places glyphs on its tangent.
+static bool textFollowsBezierPathAndPersists() {
+    Subpath curve;
+    Knot a; a.ax = 24; a.ay = 140; a.ox = 120; a.oy = 20;
+    Knot b; b.ax = 476; b.ay = 140; b.ix = 380; b.iy = 20;
+    curve.knots = {a, b};
+    Text text; text.str = "Text follows a curve"; text.size = 34; text.path = {curve}; text.pathText = true; text.pathStart = 12;
+    std::vector<float> coverage; float box[4];
+    if (!textCoverage(text, 500, 300, coverage, box)) return false;
+    const float ink = std::accumulate(coverage.begin(), coverage.end(), 0.0f);
+    Text closed = text; closed.path[0].closed = true;
+    const auto line = flattenPath(closed.path);
+    float length = 0;
+    for (size_t i = 2; i < line[0].size(); i += 2) length += std::hypot(line[0][i] - line[0][i - 2], line[0][i + 1] - line[0][i - 1]);
+    length += std::hypot(line[0][0] - line[0][line[0].size() - 2], line[0][1] - line[0][line[0].size() - 1]);
+    closed.pathStart = length - 40;
+    Text open = closed; open.path[0].closed = false;
+    std::vector<float> closedCoverage, openCoverage; float cb[4], ob[4];
+    if (!textCoverage(closed, 500, 300, closedCoverage, cb) || !textCoverage(open, 500, 300, openCoverage, ob)) return false;
+    const float closedInk = std::accumulate(closedCoverage.begin(), closedCoverage.end(), 0.0f);
+    const float openInk = std::accumulate(openCoverage.begin(), openCoverage.end(), 0.0f);
+    Text decoded;
+    if (!decoded.load(text.save())) return false;
+    Doc project = newDoc(500, 300, false); Fill fill; fill.kind = FILL_SOLID; addTextLayer(project, text, fill);
+    const std::filesystem::path path = std::filesystem::temp_directory_path() / "chimera-text-path-selftest.chimera";
+    std::string error; Doc loaded;
+    const bool saved = saveProject(project, path.u8string(), error) && openDoc(path.u8string(), loaded, error);
+    std::error_code ec; std::filesystem::remove(path, ec);
+    const auto layer = std::find_if(loaded.layers.begin(), loaded.layers.end(), [](const Layer& l) { return l.isText(); });
+    return ink > 100 && box[3] < 180 && closedInk > openInk * 1.4f && decoded.pathText && decoded.path.size() == 1 && decoded.path[0].knots.size() == 2 &&
+           saved && layer != loaded.layers.end() && layer->text.pathText && layer->text.path.size() == 1 && layer->text.pathStart == text.pathStart;
 }
 
 int runSelfTests() {
@@ -185,6 +223,7 @@ int runSelfTests() {
         {"partial pass-through group isolates adjustments", partialPassThroughGroupIsIsolated},
         {"group knockout uses composite shape", groupKnockoutUsesItsCompositeShape},
         {"paragraph text wraps and keeps legacy projects readable", paragraphTextWrapsAndPersists},
+        {"type follows and saves a Bezier path", textFollowsBezierPathAndPersists},
     };
     int failed = 0;
     for (const Test& test : tests) {

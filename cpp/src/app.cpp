@@ -2349,14 +2349,19 @@ static bool typeMoving = false;       // a Type-tool drag that moves the text wi
 static float typeMoveX = 0, typeMoveY = 0;
 static bool typeRotating = false;
 static float typeRotatePivotX = 0, typeRotatePivotY = 0, typeRotateStartAngle = 0, typeRotation0 = 0;
+static int typeScaleHandle = -1;
+static float typePointBox0[4] = {}, typeScaleX0 = 1, typeScaleY0 = 1;
+static float typePointAnchorX0 = 0, typePointAnchorY0 = 0, typePointRotation0 = 0;
 static bool typeBoxDrag = false;
 static int typeResizeHandle = -1;
 static float typeBoxX0 = 0, typeBoxY0 = 0, typeBoxW0 = 0, typeBoxH0 = 0;
+static float typeBoxAnchorX0 = 0, typeBoxAnchorY0 = 0, typeBoxScaleX0 = 1, typeBoxScaleY0 = 1, typeBoxRotation0 = 0;
 static bool typeIsMask() { return Toolbar::current() == Toolbar::TYPE_H_MASK || Toolbar::current() == Toolbar::TYPE_V_MASK; }
 static bool typeIsVertical() { return Toolbar::current() == Toolbar::TYPE_V || Toolbar::current() == Toolbar::TYPE_V_MASK; }
 static void typeCommit() {
     typeMoving = false;
     typeRotating = false;
+    typeScaleHandle = -1;
     typeBoxDrag = false;
     typeResizeHandle = -1;
     if (typeMaskEditing) {   // the letters as a selection
@@ -2385,6 +2390,14 @@ static ImVec2 typeToTextPoint(const Text& t, ImVec2 p) {
     return ImVec2(t.x + (cs * dx + sn * dy) / std::max(0.01f, t.scaleX),
                   t.y + (-sn * dx + cs * dy) / std::max(0.01f, t.scaleY));
 }
+// Use the press-time transform throughout a handle drag; moving the left/top edges also moves
+// the text anchor, so inverting with the changing anchor would make a rotated box wobble.
+static ImVec2 typeCanvasToBoxPoint(ImVec2 p) {
+    const float angle = typeBoxRotation0 * 0.017453292519943295f, cs = std::cos(angle), sn = std::sin(angle);
+    const float dx = p.x - typeBoxAnchorX0, dy = p.y - typeBoxAnchorY0;
+    return ImVec2(typeBoxAnchorX0 + (cs * dx + sn * dy) / std::max(0.01f, typeBoxScaleX0),
+                  typeBoxAnchorY0 + (-sn * dx + cs * dy) / std::max(0.01f, typeBoxScaleY0));
+}
 // after PhotoCraft (crates/ui-egui/src/tools/type_tool/pointer.rs box_handle_at): the eight
 // paragraph frame handles stay a fixed size on screen as zoom changes.
 static int typeBoxHandleAt(const Text& t, ImVec2 c) {
@@ -2399,6 +2412,58 @@ static int typeBoxHandleAt(const Text& t, ImVec2 c) {
         if (std::fabs(c.x - x) <= reach && std::fabs(c.y - y) <= reach) return i;
     }
     return -1;
+}
+// Point text uses its rendered bounds as the transform frame; paragraph text has its own frame.
+static int typePointHandleAt(const Text& t, ImVec2 c) {
+    if (t.boxWidth > 0) return -1;
+    const float mx = (t.box[0] + t.box[2]) * 0.5f, my = (t.box[1] + t.box[3]) * 0.5f;
+    const float p[16] = {t.box[0],t.box[1], t.box[2],t.box[1], t.box[2],t.box[3], t.box[0],t.box[3],
+                         mx,t.box[1], t.box[2],my, mx,t.box[3], t.box[0],my};
+    const float reach = 6.0f / std::max(zoom, 0.01f);
+    for (int i = 0; i < 8; ++i) if (std::fabs(c.x - p[i*2]) <= reach && std::fabs(c.y - p[i*2+1]) <= reach) return i;
+    return -1;
+}
+// after PhotoCraft (crates/ui-egui/src/tools/type_path_placement.rs): start type at the nearest
+// arc-length position on the active Work Path instead of snapping to its first anchor.
+static float typePathNearest(const BezierPath& path, float x, float y, float* distance = nullptr, int* selected = nullptr) {
+    const auto flat = flattenPath(path);
+    if (flat.empty()) { if (distance) *distance = INFINITY; return 0; }
+    float bestAlong = 0, best = 1e30f; int bestPath = -1;
+    size_t flatIndex = 0;
+    for (size_t pi = 0; pi < path.size(); ++pi) {
+        if (path[pi].knots.empty()) continue;
+        if (flatIndex >= flat.size()) break;
+        const auto& p = flat[flatIndex++];
+        if (p.size() < 4) continue;
+        const size_t n = p.size() / 2; float along = 0;
+        const size_t segments = path[pi].closed ? n : n - 1;
+        for (size_t i = 0; i < segments; ++i) {
+            const size_t j = (i + 1) % n;
+            const float ax = p[i * 2], ay = p[i * 2 + 1], dx = p[j * 2] - ax, dy = p[j * 2 + 1] - ay;
+            const float len2 = dx * dx + dy * dy, len = std::sqrt(len2);
+            if (len < 1e-5f) continue;
+            const float u = std::clamp(((x - ax) * dx + (y - ay) * dy) / len2, 0.0f, 1.0f);
+            const float ex = x - (ax + u * dx), ey = y - (ay + u * dy), dist = ex * ex + ey * ey;
+            if (dist < best) { best = dist; bestAlong = along + u * len; bestPath = (int)pi; }
+            along += len;
+        }
+    }
+    if (distance) *distance = std::sqrt(best);
+    if (selected) *selected = bestPath;
+    return bestAlong;
+}
+static float typePathLength(const BezierPath& path) {
+    const auto flat = flattenPath(path);
+    float longest = 0; size_t fi = 0;
+    for (size_t pi = 0; pi < path.size() && fi < flat.size(); ++pi) {
+        if (path[pi].knots.empty()) continue;
+        const auto& p = flat[fi++]; if (p.size() < 4) continue;
+        float length = 0;
+        for (size_t i = 2; i < p.size(); i += 2) length += std::hypot(p[i] - p[i - 2], p[i + 1] - p[i - 1]);
+        if (path[pi].closed) length += std::hypot(p[0] - p[p.size() - 2], p[1] - p[p.size() - 1]);
+        longest = std::max(longest, length);
+    }
+    return longest;
 }
 static void typeBegin(ImVec2 c) {
     // on a text layer's letters: edit it again; else new text where clicked (its first line's top a little above)
@@ -2424,6 +2489,15 @@ static void typeBegin(ImVec2 c) {
     typeLayer = doc.active;
     changed();
 }
+static void typeBeginOnPath(ImVec2 c, float at, int selected = -1) {
+    Text t = typeNext; t.vertical = false;
+    if (selected >= 0 && selected < (int)doc.workPath.size()) t.path = {doc.workPath[selected]}; else t.path = doc.workPath;
+    t.pathText = true; t.pathFlip = false; t.pathStart = at; t.x = c.x; t.y = c.y;
+    typeBuf[0] = 0; typeFocus = true;
+    remember("New Text on Path");
+    Fill f; f.kind = FILL_SOLID; for (int k = 0; k < 3; ++k) f.colour[k] = fg[k] / 255.0f;
+    addTextLayer(doc, t, f); typeLayer = doc.active; changed();
+}
 // after PhotoCraft (crates/ui-egui/src/tools/move_tool.rs text movement): keep the glyphs and
 // their hit box in the same document coordinates while preserving the drag's original grab offset.
 static void moveTextTo(float x, float y) {
@@ -2446,11 +2520,36 @@ static void typeRotateByPointer(ImVec2 now, bool snap) {
     Layer& L = doc.layers[typeLayer]; L.text.rotation = std::remainder(degrees, 360.0f);
     renderFill(doc, L); changed();
 }
+// after PhotoCraft (crates/ui-egui/src/tools/type_transform.rs): scale point text from its
+// press-time frame so each pointer update is stable and Shift keeps the original proportions.
+static void typeScaleByPointer(ImVec2 now, bool constrain) {
+    if (typeScaleHandle < 0 || typeLayer < 0 || typeLayer >= (int)doc.layers.size() || !doc.layers[typeLayer].isText()) return;
+    const int h = typeScaleHandle; const bool left = h == 0 || h == 3 || h == 7, right = h == 1 || h == 2 || h == 5;
+    const bool top = h == 0 || h == 1 || h == 4, bottom = h == 2 || h == 3 || h == 6;
+    float x0 = typePointBox0[0], y0 = typePointBox0[1], x1 = typePointBox0[2], y1 = typePointBox0[3];
+    if (left) x0 = std::min(now.x, x1 - 1.0f); if (right) x1 = std::max(now.x, x0 + 1.0f);
+    if (top) y0 = std::min(now.y, y1 - 1.0f); if (bottom) y1 = std::max(now.y, y0 + 1.0f);
+    float sx = typeScaleX0 * (x1 - x0) / std::max(1.0f, typePointBox0[2] - typePointBox0[0]);
+    float sy = typeScaleY0 * (y1 - y0) / std::max(1.0f, typePointBox0[3] - typePointBox0[1]);
+    if (constrain && (left || right) && (top || bottom)) { const float factor = std::max(sx / typeScaleX0, sy / typeScaleY0); sx = typeScaleX0 * factor; sy = typeScaleY0 * factor; }
+    Layer& L = doc.layers[typeLayer];
+    sx = std::clamp(sx, 0.01f, 100.0f); sy = std::clamp(sy, 0.01f, 100.0f);
+    // Point text's origin is its transform anchor. Keep the opposite edge planted as a handle
+    // moves, as Free Transform does; at a rotated angle the same scale stays about that anchor.
+    if (std::fabs(typePointRotation0) < 0.001f) {
+        if (left) L.text.x = typePointBox0[2] - (sx / typeScaleX0) * (typePointBox0[2] - typePointAnchorX0);
+        else if (right) L.text.x = typePointBox0[0] - (sx / typeScaleX0) * (typePointBox0[0] - typePointAnchorX0);
+        if (top) L.text.y = typePointBox0[3] - (sy / typeScaleY0) * (typePointBox0[3] - typePointAnchorY0);
+        else if (bottom) L.text.y = typePointBox0[1] - (sy / typeScaleY0) * (typePointBox0[1] - typePointAnchorY0);
+    }
+    L.text.scaleX = sx; L.text.scaleY = sy;
+    renderFill(doc, L); changed();
+}
 // after PhotoCraft (crates/ui-egui/src/tools/type_tool/pointer.rs resize_box): recompute each
 // frame from the press-time box so handle direction and Alt-centred resizing remain stable.
 static void typeResizeByPointer(ImVec2 now, bool fromCentre) {
     if (typeResizeHandle < 0 || typeLayer < 0 || typeLayer >= (int)doc.layers.size() || !doc.layers[typeLayer].isText()) return;
-    now = typeToTextPoint(doc.layers[typeLayer].text, now);
+    now = typeCanvasToBoxPoint(now);
     const int h = typeResizeHandle; const bool left = h == 0 || h == 3 || h == 7, right = h == 1 || h == 2 || h == 5;
     const bool top = h == 0 || h == 1 || h == 4, bottom = h == 2 || h == 3 || h == 6;
     float x0 = typeBoxX0, y0 = typeBoxY0, x1 = typeBoxX0 + typeBoxW0, y1 = typeBoxY0 + typeBoxH0;
@@ -2687,6 +2786,15 @@ static void canvasInput() {
     const ImVec2 c = toCanvas(m);
     const bool space = ImGui::IsKeyDown(ImGuiKey_Space) && !io.WantTextInput;
     const int t = space ? T_HAND : tool;
+    if (hovered && t == T_TYPE && typeLayer >= 0 && typeLayer < (int)doc.layers.size() && doc.layers[typeLayer].isText() && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        const int handle = typeBoxHandleAt(doc.layers[typeLayer].text, c);
+        const int pointHandle = io.KeyCtrl ? typePointHandleAt(doc.layers[typeLayer].text, c) : -1;
+        const int activeHandle = handle >= 0 ? handle : pointHandle;
+        if (activeHandle == 0 || activeHandle == 2) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNWSE);
+        else if (activeHandle == 1 || activeHandle == 3) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNESW);
+        else if (activeHandle == 4 || activeHandle == 6) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeNS);
+        else if (activeHandle == 5 || activeHandle == 7) ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+    }
 
     if (t == T_MAGNETIC && magneticActive() && (hovered || ImGui::IsMouseDown(ImGuiMouseButton_Left)))
         magneticUpdate({c.x, c.y}, ImGui::IsMouseDown(ImGuiMouseButton_Left), true);
@@ -2895,6 +3003,17 @@ static void canvasInput() {
                     if (groupLocked(doc, doc.cur().groupId)) { say("This layer is locked by its group"); dragging = false; break; }
                     remember("Resize Text Box"); typeResizeHandle = handle;
                     typeBoxX0 = activeText.x; typeBoxY0 = activeText.y; typeBoxW0 = activeText.boxWidth; typeBoxH0 = activeText.boxHeight;
+                    typeBoxAnchorX0 = activeText.x; typeBoxAnchorY0 = activeText.y;
+                    typeBoxScaleX0 = activeText.scaleX; typeBoxScaleY0 = activeText.scaleY; typeBoxRotation0 = activeText.rotation;
+                    typeBoxDrag = false; break;
+                }
+                const int pointHandle = io.KeyCtrl ? typePointHandleAt(activeText, c) : -1;
+                if (pointHandle >= 0) {
+                    if (groupLocked(doc, doc.cur().groupId)) { say("This layer is locked by its group"); dragging = false; break; }
+                    remember("Transform Text"); typeScaleHandle = pointHandle;
+                    std::copy(activeText.box, activeText.box + 4, typePointBox0);
+                    typeScaleX0 = activeText.scaleX; typeScaleY0 = activeText.scaleY;
+                    typePointAnchorX0 = activeText.x; typePointAnchorY0 = activeText.y; typePointRotation0 = activeText.rotation;
                     typeBoxDrag = false; break;
                 }
                 const bool inside = c.x >= b[0] && c.x <= b[2] && c.y >= b[1] && c.y <= b[3];
@@ -2923,7 +3042,14 @@ static void canvasInput() {
                 dragging = false;
             } else if (typeMaskEditing) {
                 typeCommit(); dragging = false;
-            } else { typeBegin(c); typeBoxDrag = typeLayer >= 0; }
+            } else {
+                float distance = 0;
+                int pathIndex = -1;
+                const float along = typePathNearest(doc.workPath, c.x, c.y, &distance, &pathIndex);
+                if (!typeIsMask() && typePathLength(doc.workPath) > 0 && distance * zoom <= 8.0f) typeBeginOnPath(c, along, pathIndex);
+                else typeBegin(c);
+                typeBoxDrag = typeLayer >= 0 && !doc.cur().text.pathText;
+            }
             break;
         case T_MARK: {
             const int mm = markMode();
@@ -2980,6 +3106,7 @@ static void canvasInput() {
         case T_TYPE:
             if (typeRotating) typeRotateByPointer(c, io.KeyShift);
             else if (typeMoving) typeMoveByPointer(dragStart, c);
+            else if (typeScaleHandle >= 0) typeScaleByPointer(c, io.KeyShift);
             else if (typeBoxDrag && typeLayer >= 0 && typeLayer < (int)doc.layers.size() && doc.layers[typeLayer].isText()
                      && std::hypot(c.x - dragStart.x, c.y - dragStart.y) * zoom >= 3) {
                 Layer& L = doc.layers[typeLayer];
@@ -3060,7 +3187,7 @@ static void canvasInput() {
     if (dragging && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
         dragging = false;
         switch (t) {
-        case T_TYPE: typeMoving = false; typeRotating = false; typeBoxDrag = false; typeResizeHandle = -1; break;
+        case T_TYPE: typeMoving = false; typeRotating = false; typeBoxDrag = false; typeResizeHandle = -1; typeScaleHandle = -1; break;
         case T_ROTATE: {
             const ImVec2 pivot(canvasPos.x + canvasSize.x * 0.5f, canvasPos.y + canvasSize.y * 0.5f);
             const float pointer = std::atan2(m.y - pivot.y, m.x - pivot.x);
@@ -3273,6 +3400,12 @@ static void drawCanvas() {
         }
     }
     if (tool == T_TYPE) {   // the text layers' boxes, faint; the one being typed in, clear
+        const auto workPath = flattenPath(doc.workPath);
+        for (size_t i = 0; i < workPath.size(); ++i) {
+            std::vector<ImVec2> points;
+            for (size_t k = 0; k + 1 < workPath[i].size(); k += 2) points.push_back(toScreen(workPath[i][k], workPath[i][k + 1]));
+            if (points.size() >= 2) dl->AddPolyline(points.data(), (int)points.size(), IM_COL32(0, 123, 183, 155), doc.workPath[i].closed ? ImDrawFlags_Closed : 0, 1.5f);
+        }
         for (int i = 0; i < (int)doc.layers.size(); ++i) {
             const Layer& L = doc.layers[i];
             if (!L.isText() || !L.visible) continue;
@@ -3286,11 +3419,13 @@ static void drawCanvas() {
             };
             const ImVec2 frame[4] = {framePoint(x0, y0), framePoint(x1, y0), framePoint(x1, y1), framePoint(x0, y1)};
             dl->AddPolyline(frame, 4, i == typeLayer ? C_PINK : IM_COL32(255, 255, 255, 70), ImDrawFlags_Closed, i == typeLayer ? 1.5f : 1.0f);
-            if (i == typeLayer && L.text.boxWidth > 0) {
-                const float mx = (x0 + x1) * 0.5f, my = (y0 + y1) * 0.5f;
-                const float handles[16] = {x0,y0, x1,y0, x1,y1, x0,y1, mx,y0, x1,my, mx,y1, x0,my};
+            if (i == typeLayer) {
+                const float hx0 = L.text.boxWidth > 0 ? x0 : b[0], hy0 = L.text.boxWidth > 0 ? y0 : b[1];
+                const float hx1 = L.text.boxWidth > 0 ? x1 : b[2], hy1 = L.text.boxWidth > 0 ? y1 : b[3];
+                const float mx = (hx0 + hx1) * 0.5f, my = (hy0 + hy1) * 0.5f;
+                const float handles[16] = {hx0,hy0, hx1,hy0, hx1,hy1, hx0,hy1, mx,hy0, hx1,my, mx,hy1, hx0,my};
                 for (int k = 0; k < 8; ++k) {
-                    const ImVec2 p = framePoint(handles[k * 2], handles[k * 2 + 1]);
+                    const ImVec2 p = L.text.boxWidth > 0 ? framePoint(handles[k * 2], handles[k * 2 + 1]) : toScreen(handles[k * 2], handles[k * 2 + 1]);
                     dl->AddRectFilled(ImVec2(p.x - 3.5f, p.y - 3.5f), ImVec2(p.x + 3.5f, p.y + 3.5f), IM_COL32(255,255,255,255));
                     dl->AddRect(ImVec2(p.x - 3.5f, p.y - 3.5f), ImVec2(p.x + 3.5f, p.y + 3.5f), C_PINK);
                 }
@@ -3349,6 +3484,15 @@ static void drawCanvas() {
         const ImVec2 a = toScreen(std::min(dragStart.x, dragNow.x), std::min(dragStart.y, dragNow.y));
         const ImVec2 b = toScreen(std::max(dragStart.x, dragNow.x), std::max(dragStart.y, dragNow.y));
         dl->AddRect(a, b, C_PINK, 0, 0, 2.0f);
+    }
+    if (tool == T_TYPE && typeLayer >= 0 && typeLayer < (int)doc.layers.size() && doc.layers[typeLayer].isText() && doc.layers[typeLayer].text.pathText) {
+        const Text& t = doc.layers[typeLayer].text;
+        const auto paths = flattenPath(t.path);
+        for (size_t i = 0; i < paths.size(); ++i) {
+            std::vector<ImVec2> points;
+            for (size_t k = 0; k + 1 < paths[i].size(); k += 2) points.push_back(toScreen(paths[i][k], paths[i][k + 1]));
+            if (points.size() >= 2) dl->AddPolyline(points.data(), (int)points.size(), C_PINK, !t.path.empty() && t.path.front().closed ? ImDrawFlags_Closed : 0, 1.0f);
+        }
     }
     if (tool == T_SHAPE && dragging) {   // the shape being drawn, outlined
         const std::vector<float> o = shapeOutline(shapeFromDrag(dragStart, dragNow));
@@ -3874,6 +4018,25 @@ static void optionsBar() {
                 if (ImGui::Selectable(f.name.c_str(), f.path == cur)) { if (live) remember("Font"); t.font = f.path; ch = true; }
             }
             ImGui::EndCombo();
+        }
+        if (live && t.pathText) {
+            ImGui::SameLine(0, 8);
+            if (ImGui::Button("Path...")) ImGui::OpenPopup("##typePathSettings");
+            if (ImGui::BeginPopup("##typePathSettings")) {
+                if (ImGui::Button("Remove Path")) { remember("Remove Text Path"); t.pathText = false; t.path.clear(); t.pathStart = 0; ch = true; ImGui::CloseCurrentPopup(); }
+                edited(ImGui::Checkbox("Flip Side", &t.pathFlip));
+                const float length = typePathLength(t.path);
+                if (length > 0) { ImGui::SetNextItemWidth(240); edited(sliderF("Path Start", &t.pathStart, 0, length, "%.0f px")); }
+                ImGui::EndPopup();
+            }
+        } else if (live && !t.vertical && t.boxWidth <= 0 && typePathLength(doc.workPath) > 0) {
+            ImGui::SameLine(0, 8);
+            if (ImGui::Button("Type on Path")) {
+                int pathIndex = -1;
+                remember("Type on Path"); t.pathStart = typePathNearest(doc.workPath, t.x, t.y, nullptr, &pathIndex);
+                t.path = pathIndex >= 0 && pathIndex < (int)doc.workPath.size() ? BezierPath{doc.workPath[pathIndex]} : doc.workPath;
+                t.pathText = true; t.pathFlip = false; ch = true;
+            }
         }
         ImGui::SameLine(0, 10); edited(sliderF("Size", &t.size, 4, 1000, "%.0f px", ImGuiSliderFlags_Logarithmic));
         if (live && L.fill.kind == FILL_SOLID) { ImGui::SameLine(0, 10); edited(ImGui::ColorEdit3("##tc", L.fill.colour, ImGuiColorEditFlags_NoInputs)); }
@@ -5109,6 +5272,7 @@ void script(const std::string& what) {
         Fill f; f.kind = FILL_SOLID; f.colour[0] = 1; f.colour[1] = 1; f.colour[2] = 1;
         addTextLayer(doc, t, f); typeLayer = doc.active; snprintf(typeBuf, sizeof typeBuf, "%s", t.str.c_str());
         typeResizeHandle = 2; typeBoxX0 = t.x; typeBoxY0 = t.y; typeBoxW0 = t.boxWidth; typeBoxH0 = t.boxHeight;
+        typeBoxAnchorX0 = t.x; typeBoxAnchorY0 = t.y; typeBoxScaleX0 = t.scaleX; typeBoxScaleY0 = t.scaleY; typeBoxRotation0 = t.rotation;
         typeResizeByPointer(ImVec2(t.x + t.boxWidth + 40, t.y + t.boxHeight + 24), false); typeResizeHandle = -1;
         typeRotating = true; typeRotatePivotX = doc.cur().text.x; typeRotatePivotY = doc.cur().text.y;
         typeRotateStartAngle = 0; typeRotation0 = doc.cur().text.rotation;
@@ -5116,8 +5280,25 @@ void script(const std::string& what) {
         const float x = doc.cur().text.x, y = doc.cur().text.y;
         remember("Move Text"); typeMoving = true; typeMoveX = x; typeMoveY = y;
         typeMoveByPointer(ImVec2(0, 0), ImVec2(72, 48)); typeMoving = false;
-        const bool ok = doc.cur().isText() && std::fabs(doc.cur().text.x - x - 72) < 0.01f && std::fabs(doc.cur().text.y - y - 48) < 0.01f && std::fabs(doc.cur().text.boxWidth - 320) < 0.01f && std::fabs(doc.cur().text.boxHeight - 204) < 0.01f && std::fabs(doc.cur().text.rotation - 20) < 0.1f && doc.cur().text.box[3] > doc.cur().text.box[1] + 64;
-        fprintf(stderr, "text-move: %s; paragraph wraps, resizes (%.1f x %.1f), rotates (%.1f°), and moves\n", ok ? "passed" : "type interaction check failed", doc.cur().text.boxWidth, doc.cur().text.boxHeight, doc.cur().text.rotation);
+        const bool paragraphOk = doc.cur().isText() && std::fabs(doc.cur().text.x - x - 72) < 0.01f && std::fabs(doc.cur().text.y - y - 48) < 0.01f && std::fabs(doc.cur().text.boxWidth - 320) < 0.01f && std::fabs(doc.cur().text.boxHeight - 204) < 0.01f && std::fabs(doc.cur().text.rotation - 20) < 0.1f && doc.cur().text.box[3] > doc.cur().text.box[1] + 64;
+        Text point; point.str = "Point text transform handles"; point.size = 40; point.x = doc.w * 0.55f; point.y = doc.h * 0.72f;
+        addTextLayer(doc, point, f); typeLayer = doc.active; snprintf(typeBuf, sizeof typeBuf, "%s", point.str.c_str());
+        const float pointW = doc.cur().text.box[2] - doc.cur().text.box[0], pointH = doc.cur().text.box[3] - doc.cur().text.box[1];
+        const float pointLeft = doc.cur().text.box[0], pointTop = doc.cur().text.box[1];
+        typeScaleHandle = 2; std::copy(doc.cur().text.box, doc.cur().text.box + 4, typePointBox0);
+        typeScaleX0 = doc.cur().text.scaleX; typeScaleY0 = doc.cur().text.scaleY;
+        typePointAnchorX0 = doc.cur().text.x; typePointAnchorY0 = doc.cur().text.y; typePointRotation0 = doc.cur().text.rotation;
+        typeScaleByPointer(ImVec2(typePointBox0[2] + pointW * 0.25f, typePointBox0[3] + pointH * 0.25f), false); typeScaleHandle = -1;
+        const bool pointOk = doc.cur().text.scaleX > 1.2f && doc.cur().text.scaleY > 1.2f && std::fabs(doc.cur().text.box[0] - pointLeft) < 1.5f && std::fabs(doc.cur().text.box[1] - pointTop) < 1.5f;
+        typeNext = Text(); typeNext.size = 34;
+        Subpath curve; Knot p0; p0.ax = doc.w * 0.15f; p0.ay = doc.h * 0.82f; p0.ox = doc.w * 0.35f; p0.oy = doc.h * 0.67f;
+        Knot p1; p1.ax = doc.w * 0.85f; p1.ay = doc.h * 0.82f; p1.ix = doc.w * 0.65f; p1.iy = doc.h * 0.67f;
+        curve.knots = {p0, p1}; doc.workPath = {curve};
+        typeBeginOnPath(ImVec2(p0.ax, p0.ay), typePathNearest(doc.workPath, p0.ax, p0.ay));
+        doc.cur().text.str = "Text follows a curved path"; snprintf(typeBuf, sizeof typeBuf, "%s", doc.cur().text.str.c_str()); renderFill(doc, doc.cur()); changed();
+        std::vector<float> pathCoverage; float pathBox[4]; const bool pathRendered = textCoverage(doc.cur().text, doc.w, doc.h, pathCoverage, pathBox);
+        const bool pathOk = pathRendered && std::count_if(pathCoverage.begin(), pathCoverage.end(), [](float a) { return a > 0.1f; }) > 100;
+        fprintf(stderr, "text-move: %s; paragraph %d, point scale %d, path text %d\n", paragraphOk && pointOk && pathOk ? "passed" : "type transform check failed", paragraphOk ? 1 : 0, pointOk ? 1 : 0, pathOk ? 1 : 0);
         return;
     }
     if (what == "artboard") {
