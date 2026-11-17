@@ -1775,7 +1775,118 @@ static void pcropCancel() {
     pcropDragPart = -1;
     pcropCustomSize = false;
 }
-// Warp the visible composite into a new flattened image using the chosen homography.
+// Invert the unit-output-to-source homography so document geometry can move forward.
+static bool inverseHomography(const double h[8], double inv[9]) {
+    const double a = h[0], b = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], k = h[7], i = 1;
+    const double A = e * i - f * k, B = c * k - b * i, C = b * f - c * e;
+    const double D = f * g - d * i, E = a * i - c * g, F = c * d - a * f;
+    const double G = d * k - e * g, H = b * g - a * k, I = a * e - b * d;
+    const double det = a * A + b * D + c * G;
+    if (!std::isfinite(det) || std::fabs(det) < 1e-12)
+        return false;
+    const double cof[9] = {A, B, C, D, E, F, G, H, I};
+    for (int n = 0; n < 9; ++n)
+        inv[n] = cof[n] / det;
+    return true;
+}
+// Map one source-canvas point through the inverse crop transform.
+static bool mapPerspectivePoint(const double inv[9], int w, int h, double x, double y, ImVec2 &out) {
+    const double z = inv[6] * x + inv[7] * y + inv[8];
+    if (!std::isfinite(z) || std::fabs(z) < 1e-12)
+        return false;
+    const double u = (inv[0] * x + inv[1] * y + inv[2]) / z;
+    const double v = (inv[3] * x + inv[4] * y + inv[5]) / z;
+    if (!std::isfinite(u) || !std::isfinite(v))
+        return false;
+    out = ImVec2((float)(u * w), (float)(v * h));
+    return true;
+}
+// Sample a layer through the homography with premultiplied alpha to avoid dark fringes.
+static void sampleWarpPixel(const Layer &layer, float sx, float sy, uint8_t out[4]) {
+    const float fx = sx - layer.x - 0.5f, fy = sy - layer.y - 0.5f;
+    const int x0 = (int)std::floor(fx), y0 = (int)std::floor(fy);
+    const float tx = fx - x0, ty = fy - y0;
+    float alpha = 0, color[3] = {};
+    for (int yy = 0; yy < 2; ++yy)
+        for (int xx = 0; xx < 2; ++xx) {
+            const int x = x0 + xx, y = y0 + yy;
+            if (x < 0 || y < 0 || x >= layer.img.w || y >= layer.img.h)
+                continue;
+            const float weight = (xx ? tx : 1 - tx) * (yy ? ty : 1 - ty);
+            const uint8_t *p = layer.img.at(x, y);
+            const float a = p[3] / 255.0f;
+            alpha += a * weight;
+            for (int c = 0; c < 3; ++c)
+                color[c] += p[c] / 255.0f * a * weight;
+        }
+    out[3] = to8(alpha);
+    for (int c = 0; c < 3; ++c)
+        out[c] = alpha > 1e-8f ? to8(color[c] / alpha) : 0;
+}
+// Warp a mask with the same inverse map as its layer pixels.
+static std::vector<uint8_t> warpLayerMask(const Layer &layer, const double h[8], int w, int ht) {
+    std::vector<uint8_t> out;
+    if (!layer.hasMask)
+        return out;
+    out.assign((size_t)w * ht, 0);
+    for (int y = 0; y < ht; ++y)
+        for (int x = 0; x < w; ++x) {
+            const double u = (x + 0.5) / w, v = (y + 0.5) / ht, z = h[6] * u + h[7] * v + 1;
+            if (std::fabs(z) < 1e-12)
+                continue;
+            const float sx = (float)((h[0] * u + h[1] * v + h[2]) / z) - layer.x - 0.5f;
+            const float sy = (float)((h[3] * u + h[4] * v + h[5]) / z) - layer.y - 0.5f;
+            const int x0 = (int)std::floor(sx), y0 = (int)std::floor(sy);
+            const float tx = sx - x0, ty = sy - y0;
+            float value = 0;
+            for (int yy = 0; yy < 2; ++yy)
+                for (int xx = 0; xx < 2; ++xx) {
+                    const int x1 = x0 + xx, y1 = y0 + yy;
+                    if (x1 < 0 || y1 < 0 || x1 >= layer.img.w || y1 >= layer.img.h)
+                        continue;
+                    const size_t i = (size_t)y1 * layer.img.w + x1;
+                    if (i >= layer.mask.size())
+                        continue;
+                    value += layer.mask[i] * (xx ? tx : 1 - tx) * (yy ? ty : 1 - ty);
+                }
+            out[(size_t)y * w + x] = (uint8_t)std::lround(value);
+        }
+    return out;
+}
+// Warp one raster layer or its mask while keeping its blend and visibility settings.
+static Layer warpPerspectiveLayer(const Doc &sourceDoc, Layer source, const double h[8], int w, int ht,
+                                  bool rasterize) {
+    if (rasterize)
+        renderFill(sourceDoc, source);
+    Layer out = source;
+    out.img = Image(w, ht);
+    out.x = out.y = 0;
+    if (source.isAdjust()) {
+        out.mask = warpLayerMask(source, h, w, ht);
+        return out;
+    }
+    if (source.isFill() && !rasterize) {
+        out.mask = warpLayerMask(source, h, w, ht);
+        return out;
+    }
+    for (int y = 0; y < ht; ++y)
+        for (int x = 0; x < w; ++x) {
+            const double u = (x + 0.5) / w, v = (y + 0.5) / ht, z = h[6] * u + h[7] * v + 1;
+            if (std::fabs(z) < 1e-12)
+                continue;
+            const float sx = (float)((h[0] * u + h[1] * v + h[2]) / z);
+            const float sy = (float)((h[3] * u + h[4] * v + h[5]) / z);
+            sampleWarpPixel(source, sx, sy, out.img.at(x, y));
+        }
+    out.mask = warpLayerMask(source, h, w, ht);
+    if (rasterize) {
+        out.fill = Fill{};
+        out.shape = Shape{};
+        out.hasText = false;
+    }
+    return out;
+}
+// Warp the image and preserve editable layers and document geometry where possible.
 static void applyPerspectiveCrop() {
     if (!pcropPending)
         return;
@@ -1789,53 +1900,114 @@ static void applyPerspectiveCrop() {
         return;
     }
     const int w = std::clamp(pcropOutW, 1, 16384), ht = std::clamp(pcropOutH, 1, 16384);
-    if ((int64_t)w * ht > 100'000'000) {
+    if ((int64_t)w * ht * std::max<size_t>(1, doc.layers.size()) > 100'000'000) {
         say("Perspective Crop output is too large");
         return;
     }
-    Image src;
-    composite(doc, src, {0, 0, doc.w, doc.h}, false);
-    Image out(w, ht);
-    for (int y = 0; y < ht; ++y)
-        for (int x = 0; x < w; ++x) {
-            const double u = (x + 0.5) / w, v = (y + 0.5) / ht, z = h[6] * u + h[7] * v + 1.0;
-            if (std::fabs(z) < 1e-10)
-                continue;
-            const float sx = (float)((h[0] * u + h[1] * v + h[2]) / z), sy = (float)((h[3] * u + h[4] * v + h[5]) / z);
-            if (sx < 0 || sy < 0 || sx >= src.w || sy >= src.h)
-                continue;
-            const int x0 = (int)sx, y0 = (int)sy, x1 = std::min(x0 + 1, src.w - 1), y1 = std::min(y0 + 1, src.h - 1);
-            const float fx = sx - x0, fy = sy - y0;
-            uint8_t *d = out.at(x, y);
-            for (int c = 0; c < 4; ++c) {
-                const float a = src.at(x0, y0)[c] * (1 - fx) + src.at(x1, y0)[c] * fx;
-                const float b = src.at(x0, y1)[c] * (1 - fx) + src.at(x1, y1)[c] * fx;
-                d[c] = (uint8_t)std::lround(a * (1 - fy) + b * fy);
-            }
-        }
+    double inv[9];
+    if (!inverseHomography(h, inv)) {
+        say("Those corners do not make an invertible perspective");
+        return;
+    }
     remember("Perspective Crop");
+    Doc sourceDoc = doc;
+    Doc warpedDoc;
+    warpedDoc.w = w;
+    warpedDoc.h = ht;
+    warpedDoc.active = std::clamp(doc.active, 0, (int)doc.layers.size() - 1);
+    bool rasterized = false;
+    for (const Layer &source : sourceDoc.layers) {
+        const bool vectorLayer = source.isShape() || source.isText();
+        rasterized = rasterized || vectorLayer;
+        warpedDoc.layers.push_back(warpPerspectiveLayer(sourceDoc, source, h, w, ht, vectorLayer));
+    }
+    for (Layer &layer : warpedDoc.layers)
+        if (layer.isFill() && !layer.isShape() && !layer.isText())
+            renderFill(warpedDoc, layer);
     doc.w = w;
     doc.h = ht;
-    doc.layers.clear();
-    doc.active = 0;
-    doc.sel.clear();
-    doc.slices.clear();
+    doc.layers = std::move(warpedDoc.layers);
+    doc.active = warpedDoc.active;
     sliceActive = -1;
-    Layer result = emptyLayer(doc, "Perspective Crop");
-    result.img = std::move(out);
-    result.x = result.y = 0;
-    doc.layers.push_back(std::move(result));
-    doc.samplers.clear();
-    doc.counts.clear();
-    doc.notes.clear();
-    doc.hasRuler = false;
-    doc.workPath.clear();
-    doc.historyState.reset();
+    auto mapMarks = [&](std::vector<Doc::Mark> &marks) {
+        for (auto &mark : marks) {
+            ImVec2 p;
+            if (mapPerspectivePoint(inv, w, ht, mark.x, mark.y, p)) {
+                mark.x = p.x;
+                mark.y = p.y;
+            }
+        }
+    };
+    mapMarks(doc.samplers);
+    mapMarks(doc.counts);
+    mapMarks(doc.notes);
+    for (auto &subpath : doc.workPath)
+        for (Knot &knot : subpath.knots) {
+            ImVec2 p;
+            if (mapPerspectivePoint(inv, w, ht, knot.ax, knot.ay, p)) {
+                knot.ax = p.x;
+                knot.ay = p.y;
+            }
+            if (mapPerspectivePoint(inv, w, ht, knot.ix, knot.iy, p)) {
+                knot.ix = p.x;
+                knot.iy = p.y;
+            }
+            if (mapPerspectivePoint(inv, w, ht, knot.ox, knot.oy, p)) {
+                knot.ox = p.x;
+                knot.oy = p.y;
+            }
+        }
+    if (doc.hasRuler) {
+        ImVec2 a, b;
+        if (mapPerspectivePoint(inv, w, ht, doc.ruler[0], doc.ruler[1], a) &&
+            mapPerspectivePoint(inv, w, ht, doc.ruler[2], doc.ruler[3], b)) {
+            doc.ruler[0] = a.x;
+            doc.ruler[1] = a.y;
+            doc.ruler[2] = b.x;
+            doc.ruler[3] = b.y;
+        }
+    }
+    for (Slice &slice : doc.slices) {
+        ImVec2 p[4];
+        const double x[4] = {(double)slice.rect.x0, (double)slice.rect.x1, (double)slice.rect.x1,
+                             (double)slice.rect.x0};
+        const double y[4] = {(double)slice.rect.y0, (double)slice.rect.y0, (double)slice.rect.y1,
+                             (double)slice.rect.y1};
+        bool valid = true;
+        for (int i = 0; i < 4; ++i)
+            valid = mapPerspectivePoint(inv, w, ht, x[i], y[i], p[i]) && valid;
+        if (valid) {
+            slice.rect = {(int)std::floor(std::min({p[0].x, p[1].x, p[2].x, p[3].x})),
+                          (int)std::floor(std::min({p[0].y, p[1].y, p[2].y, p[3].y})),
+                          (int)std::ceil(std::max({p[0].x, p[1].x, p[2].x, p[3].x})),
+                          (int)std::ceil(std::max({p[0].y, p[1].y, p[2].y, p[3].y}))};
+            slice.rect = slice.rect.clip(w, ht);
+        } else
+            slice.rect = {};
+    }
+    doc.slices.erase(
+        std::remove_if(doc.slices.begin(), doc.slices.end(), [](const Slice &s) { return s.rect.empty(); }),
+        doc.slices.end());
+    doc.sel.clear();
+    if (!sourceDoc.sel.empty()) {
+        doc.sel.assign((size_t)w * ht, 0);
+        for (int y = 0; y < ht; ++y)
+            for (int x = 0; x < w; ++x) {
+                const double u = (x + 0.5) / w, v = (y + 0.5) / ht, z = h[6] * u + h[7] * v + 1;
+                if (std::fabs(z) < 1e-12)
+                    continue;
+                const int sx = (int)std::floor((h[0] * u + h[1] * v + h[2]) / z);
+                const int sy = (int)std::floor((h[3] * u + h[4] * v + h[5]) / z);
+                if (sx >= 0 && sy >= 0 && sx < sourceDoc.w && sy < sourceDoc.h)
+                    doc.sel[(size_t)y * w + x] = sourceDoc.sel[(size_t)sy * sourceDoc.w + sx];
+            }
+    }
     pcropCancel();
     changed();
     selChanged();
     fitNext = true;
-    say("Perspective Crop flattened the visible image");
+    say(rasterized ? "Perspective Crop rasterized shape and text layers; other layers were preserved"
+                   : "Perspective Crop preserved the layers");
 }
 // Return free rectangles that tile the canvas around the stored user slices.
 static std::vector<Rect> autoSliceRects() {
@@ -4111,14 +4283,80 @@ void script(const std::string& what) {
         fprintf(stderr, "magnetic-lasso: 16 live-wire anchors traced in %zu path points\n", points);
         return;
     }
-    if (what == "perspective-crop-preview" || what == "perspective-crop") {
-        Toolbar::select(Toolbar::PERSPECTIVE_CROP); syncTool();
+    if (what == "perspective-crop-preview" || what == "perspective-crop" || what == "perspective-crop-preserve") {
+        Toolbar::select(Toolbar::PERSPECTIVE_CROP);
+        syncTool();
+        if (what == "perspective-crop-preserve") {
+            Fill gradient;
+            gradient.kind = FILL_GRADIENT;
+            addFillLayer(doc, gradient);
+            Layer pixels = emptyLayer(doc, "Masked Pixels");
+            pixels.img = Image(doc.w, doc.h);
+            for (int y = doc.h / 4; y < doc.h * 3 / 4; ++y)
+                for (int x = doc.w / 4; x < doc.w * 3 / 4; ++x) {
+                    uint8_t *p = pixels.img.at(x, y);
+                    p[0] = 230;
+                    p[1] = 80;
+                    p[2] = 40;
+                    p[3] = 210;
+                }
+            pixels.hasMask = true;
+            pixels.mask.assign((size_t)doc.w * doc.h, 255);
+            for (int y = 0; y < doc.h; ++y)
+                for (int x = 0; x < doc.w / 8; ++x)
+                    pixels.mask[(size_t)y * doc.w + x] = 0;
+            addLayer(doc, std::move(pixels));
+            Shape shape;
+            shape.kind = SHAPE_RECT;
+            shape.x0 = doc.w * 0.15f;
+            shape.y0 = doc.h * 0.2f;
+            shape.x1 = doc.w * 0.3f;
+            shape.y1 = doc.h * 0.4f;
+            Fill solid;
+            solid.kind = FILL_SOLID;
+            addShapeLayer(doc, shape, solid);
+            Text words;
+            words.str = "Port";
+            words.size = 64;
+            words.x = doc.w * 0.65f;
+            words.y = doc.h * 0.3f;
+            addTextLayer(doc, words, solid);
+            addAdjustmentLayer(doc, ADJ_BRIGHTNESS_CONTRAST);
+            doc.samplers.push_back({doc.w * 0.25f, doc.h * 0.25f, "Sample"});
+            doc.notes.push_back({doc.w * 0.7f, doc.h * 0.7f, "Keep me"});
+            doc.counts.push_back({doc.w * 0.75f, doc.h * 0.4f, "1"});
+            doc.hasRuler = true;
+            doc.ruler[0] = doc.w * 0.2f;
+            doc.ruler[1] = doc.h * 0.2f;
+            doc.ruler[2] = doc.w * 0.8f;
+            doc.ruler[3] = doc.h * 0.8f;
+            Subpath path;
+            Knot knot;
+            knot.ax = knot.ix = knot.ox = doc.w * 0.4f;
+            knot.ay = knot.iy = knot.oy = doc.h * 0.5f;
+            path.knots.push_back(knot);
+            doc.workPath.push_back(path);
+            doc.historyState = std::make_shared<const std::vector<Layer>>(doc.layers);
+        }
         const float q[8] = {doc.w * 0.22f, doc.h * 0.18f, doc.w * 0.78f, doc.h * 0.12f,
                             doc.w * 0.84f, doc.h * 0.82f, doc.w * 0.16f, doc.h * 0.76f};
         pcropSet(q);
         if (what == "perspective-crop") {
             applyPerspectiveCrop();
             fprintf(stderr, "perspective-crop: warped the visible image to %d x %d pixels\n", doc.w, doc.h);
+        } else if (what == "perspective-crop-preserve") {
+            applyPerspectiveCrop();
+            const bool ok = doc.layers.size() == 6 && doc.layers[2].hasMask &&
+                            doc.layers[2].mask.size() == (size_t)doc.w * doc.h && doc.layers[1].isFill() &&
+                            doc.layers[5].isAdjust() && !doc.layers[3].isShape() && !doc.layers[4].isText() &&
+                            doc.samplers.size() == 1 && doc.notes.size() == 1 && doc.counts.size() == 1 &&
+                            doc.hasRuler && !doc.workPath.empty() && !!doc.historyState;
+            fprintf(stderr,
+                    "perspective-crop-preserve: %s; %zu layers, %zu samplers, %zu notes, %zu counts, ruler=%d, "
+                    "work-path=%zu, history=%d\n",
+                    ok ? "all preservation checks passed" : "preservation check failed", doc.layers.size(),
+                    doc.samplers.size(), doc.notes.size(), doc.counts.size(), doc.hasRuler, doc.workPath.size(),
+                    !!doc.historyState);
         } else {
             fprintf(stderr, "perspective-crop-preview: four-corner homography preview\n");
         }
