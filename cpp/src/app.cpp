@@ -22,6 +22,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -2052,6 +2053,17 @@ static bool createSlice(Rect r) {
     changed();
     return true;
 }
+// Replace Windows-forbidden filename characters and remove trailing dots or spaces.
+static std::string safeSliceFilename(const std::string& input) {
+    std::string name = input;
+    for (char& c : name) if (c == '\\' || c == '/' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|') c = '_';
+    while (!name.empty() && (name.back() == '.' || name.back() == ' ')) name.pop_back();
+    if (name.empty()) name = "slice";
+    const std::string upper = [&]() { std::string s = name; for (char& c : s) c = (char)std::toupper((unsigned char)c); return s; }();
+    if (upper == "CON" || upper == "PRN" || upper == "AUX" || upper == "NUL" ||
+        (upper.size() == 4 && (upper.rfind("COM", 0) == 0 || upper.rfind("LPT", 0) == 0) && upper[3] >= '1' && upper[3] <= '9')) name = "_" + name;
+    return name;
+}
 // Write each user slice and free canvas rectangle as a standalone PNG.
 static bool writeSlices(const std::filesystem::path& folder, size_t& written, std::string& err) {
     std::error_code ec;
@@ -2066,6 +2078,7 @@ static bool writeSlices(const std::filesystem::path& folder, size_t& written, st
     for (Rect r : autoSliceRects()) slices.push_back({r, "auto_" + std::to_string(slices.size() + 1)});
     Image all(doc.w, doc.h);
     composite(doc, all, {0, 0, doc.w, doc.h}, false);
+    std::vector<std::string> usedNames;
     for (const auto& slice : slices) {
         const Rect r = slice.first;
         Image part(r.x1 - r.x0, r.y1 - r.y0);
@@ -2073,7 +2086,14 @@ static bool writeSlices(const std::filesystem::path& folder, size_t& written, st
         Doc output = newDoc(part.w, part.h, false);
         output.layers[0].img = std::move(part);
         std::string err;
-        if (!saveImage(output, (folder / std::filesystem::u8path(slice.second + ".png")).u8string(), err)) return false;
+        std::string name;
+        for (unsigned int suffix = 1;; ++suffix) {
+            std::string candidate = safeSliceFilename(slice.second);
+            if (suffix > 1) candidate += "_" + std::to_string(suffix);
+            if (std::find(usedNames.begin(), usedNames.end(), candidate) == usedNames.end()) { name = std::move(candidate); break; }
+        }
+        usedNames.push_back(name);
+        if (!saveImage(output, (folder / std::filesystem::u8path(name + ".png")).u8string(), err)) return false;
         ++written;
     }
     return true;
@@ -3224,13 +3244,49 @@ static void optionsBar() {
         ImGui::TextDisabled("Drag rectangles to mark parts of the picture for export");
         break;
     case T_SLICE_SELECT:
-        ImGui::BeginDisabled(sliceActive < 0 || sliceActive >= (int)doc.slices.size());
-        if (ImGui::Button("Delete Slice")) {
-            remember("Delete Slice"); doc.slices.erase(doc.slices.begin() + sliceActive); sliceActive = -1; changed();
+        if (sliceActive >= 0 && sliceActive < (int)doc.slices.size()) {
+            Slice& slice = doc.slices[sliceActive];
+            static int editingSliceId = -1;
+            static char sliceName[128] = {};
+            if (editingSliceId != slice.id) {
+                editingSliceId = slice.id;
+                snprintf(sliceName, sizeof sliceName, "%s", slice.name.c_str());
+            }
+            ImGui::SetNextItemWidth(140);
+            const bool nameChanged = ImGui::InputText("Name", sliceName, sizeof sliceName);
+            if (ImGui::IsItemActivated()) remember("Rename Slice");
+            if (nameChanged) {
+                slice.name = sliceName;
+                changed();
+            }
+            ImGui::SameLine(0, 8);
+            Rect r = slice.rect;
+            int x = r.x0, y = r.y0, width = r.x1 - r.x0, height = r.y1 - r.y0;
+            ImGui::PushItemWidth(80);
+            auto edit = [&](const char* label, int& value, int lo, int hi) {
+                const bool didChange = sliderI(label, &value, lo, std::max(lo, hi));
+                if (ImGui::IsItemActivated()) remember("Slice Bounds");
+                if (didChange) changed();
+                return didChange;
+            };
+            if (edit("X", x, 0, doc.w - width)) r.x0 = x, r.x1 = x + width;
+            ImGui::SameLine(0, 4);
+            if (edit("Y", y, 0, doc.h - height)) r.y0 = y, r.y1 = y + height;
+            ImGui::SameLine(0, 4);
+            if (edit("W", width, 1, doc.w - r.x0)) r.x1 = r.x0 + width;
+            ImGui::SameLine(0, 4);
+            if (edit("H", height, 1, doc.h - r.y0)) r.y1 = r.y0 + height;
+            ImGui::PopItemWidth();
+            slice.rect = r;
+            ImGui::SameLine(0, 8);
+            if (ImGui::Button("Delete Slice")) {
+                remember("Delete Slice"); doc.slices.erase(doc.slices.begin() + sliceActive); sliceActive = -1; changed();
+            }
+        } else {
+            ImGui::TextDisabled("Click a slice to select it; drag to move");
+            ImGui::SameLine(0, 10);
         }
-        ImGui::EndDisabled(); ImGui::SameLine(0, 14);
-        if (ImGui::Button("Export Slices...")) exportSlices(); ImGui::SameLine(0, 14);
-        ImGui::TextDisabled(sliceActive >= 0 && sliceActive < (int)doc.slices.size() ? doc.slices[sliceActive].name.c_str() : "Click a slice to select it; drag to move");
+        if (ImGui::Button("Export Slices...")) exportSlices();
         break;
     case T_ZOOM: ImGui::TextDisabled("Click zooms in, Alt+click zooms out; the wheel zooms too"); break;
     case T_ROTATE:
@@ -4367,12 +4423,13 @@ void script(const std::string& what) {
         doc.slices.clear(); sliceActive = -1;
         createSlice({doc.w / 10, doc.h / 8, doc.w * 48 / 100, doc.h * 7 / 8});
         createSlice({doc.w * 52 / 100, doc.h / 5, doc.w * 9 / 10, doc.h * 4 / 5});
+        if (what == "slices-export") doc.slices[0].name = "bad:/unsafe. ";
         sliceActive = 0;
         if (what == "slices-export") {
             size_t written = 0; std::string err;
             const auto folder = std::filesystem::path("cpp/build/slice-export-test");
             if (!writeSlices(folder, written, err)) fprintf(stderr, "slices-export: %s\n", err.c_str());
-            else fprintf(stderr, "slices-export: wrote %zu PNG files\n", written);
+            else fprintf(stderr, "slices-export: wrote %zu PNG files; safe name=%s\n", written, safeSliceFilename(doc.slices[0].name).c_str());
             const std::string project = "cpp/build/slices-roundtrip.chimera";
             Doc roundTrip;
             if (!saveProject(doc, project, err) || !openDoc(project, roundTrip, err)) fprintf(stderr, "slices-roundtrip: %s\n", err.c_str());
