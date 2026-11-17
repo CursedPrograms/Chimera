@@ -1,6 +1,7 @@
 // Chimera - the document: layers (each with its own size, position and an optional mask), a selection and
 // undo. Pixels are 8-bit RGBA, straight alpha; masks and the selection are 8-bit (255 = shown / selected).
 #pragma once
+#include "shape.h"
 #include "adjust.h"
 #include <cstdint>
 #include <string>
@@ -59,6 +60,8 @@ struct Layer {
     bool clip = false;                           // a clipping mask: it only shows where the layer below it (its base) does
     Fill fill;                                   // a fill layer (Solid Colour, Gradient): its pixels come from these
     bool isFill() const { return fill.kind != FILL_NONE; }
+    Shape shape;                                 // a shape layer (a fill layer only inside its shape, and its stroke)
+    bool isShape() const { return shape.kind != SHAPE_NONE; }
     uint8_t maskAt(int lx, int ly) const { return hasMask && maskOn ? mask[(size_t)ly * img.w + lx] : 255; }
 };
 
@@ -82,7 +85,8 @@ Doc newDoc(int w, int h, bool white);
 Layer emptyLayer(const Doc& d, const std::string& name);
 void addLayer(Doc& d, Layer l);                  // above the active one, and makes it active
 void addFillLayer(Doc& d, const Fill& f);        // above the active one, masked to the selection when there is one
-void renderFill(const Doc& d, Layer& l);         // a fill layer's pixels from its settings (canvas-sized)
+void renderFill(const Doc& d, Layer& l);         // a fill layer's pixels from its settings (canvas-sized); shapes too
+void addShapeLayer(Doc& d, const Shape& s, const Fill& f);   // above the active one, named "Rectangle 1"...
 int clipBase(const Doc& d, int i);               // the layer a clipped layer i is clipped to (i itself when it isn't)
 void deleteLayer(Doc& d);
 void duplicateLayer(Doc& d);

@@ -116,6 +116,7 @@ static float gradT(const Fill& f, float x, float y, float w, float h) {
 }
 void renderFill(const Doc& d, Layer& l) {
     if (!l.isFill()) return;
+    if (l.isShape() && (l.x || l.y)) l.shape.move((float)l.x, (float)l.y);   // a moved shape: its place is in its settings
     if (l.img.w != d.w || l.img.h != d.h || l.x || l.y) {   // a fill covers the canvas (its mask moves with it)
         l.img = Image(d.w, d.h);
         if (l.hasMask && l.mask.size() != (size_t)d.w * d.h) l.mask.assign((size_t)d.w * d.h, 255);
@@ -131,6 +132,31 @@ void renderFill(const Doc& d, Layer& l) {
             p[0] = to8(c[0]); p[1] = to8(c[1]); p[2] = to8(c[2]); p[3] = 255;
         }
     }
+    if (!l.isShape()) return;
+    // a shape: the fill only inside it, the stroke over its outline
+    std::vector<float> fc, sc;
+    shapeCoverage(l.shape, d.w, d.h, fc, sc);
+    const float* st = l.shape.stroke;
+    for (int y = 0; y < d.h; ++y) {
+        uint8_t* p = l.img.at(0, y);
+        for (int x = 0; x < d.w; ++x, p += 4) {
+            const size_t i = (size_t)y * d.w + x;
+            const float a = fc[i], b = sc.empty() ? 0.0f : sc[i];
+            const float out = b + a * (1 - b);   // the stroke over the fill
+            if (out <= 0) { p[0] = p[1] = p[2] = p[3] = 0; continue; }
+            for (int k = 0; k < 3; ++k) p[k] = to8((st[k] * b + p[k] / 255.0f * a * (1 - b)) / out);
+            p[3] = to8(out);
+        }
+    }
+}
+void addShapeLayer(Doc& d, const Shape& s, const Fill& f) {
+    int n = 1;   // "Rectangle 3": one more than the shapes of its kind already there
+    for (const Layer& l : d.layers) if (l.isShape() && l.shape.kind == s.kind) ++n;
+    Layer l = emptyLayer(d, std::string(shapeName(s.kind)) + " " + std::to_string(n));
+    l.fill = f; l.shape = s;
+    renderFill(d, l);
+    addLayer(d, std::move(l));
+    d.editMask = false;
 }
 void addFillLayer(Doc& d, const Fill& f) {
     Layer l = emptyLayer(d, f.kind == FILL_SOLID ? "Color Fill" : "Gradient Fill");
@@ -461,6 +487,10 @@ bool openDoc(const std::string& path, Doc& d, std::string& err) {
                 auto fb = r.bytes();
                 if (!l.fill.load(std::string(fb.begin(), fb.end()))) { err = "A fill layer in the project is damaged"; return false; }
             }
+            if (flags & (1u << 15)) {   // a shape layer's shape
+                auto sb = r.bytes();
+                if (!l.shape.load(std::string(sb.begin(), sb.end()))) { err = "A shape layer in the project is damaged"; return false; }
+            }
             n.layers.push_back(std::move(l));
         }
         if (!r.ok || n.layers.empty()) { err = "The project is damaged"; return false; }
@@ -558,7 +588,7 @@ bool saveProject(const Doc& d, const std::string& path, std::string& err) {
         putBytes(o, (const uint8_t*)l.name.data(), l.name.size());
         putU32(o, (uint32_t)l.x); putU32(o, (uint32_t)l.y);
         putF(o, l.opacity); putU32(o, l.blend);
-        putU32(o, (l.visible ? 1 : 0) | (l.hasMask ? 2 : 0) | (l.maskOn ? 4 : 0) | ((uint32_t)(l.label & 15) << 8) | (l.isAdjust() ? 1u << 12 : 0) | (l.clip ? 1u << 13 : 0) | (l.isFill() ? 1u << 14 : 0));
+        putU32(o, (l.visible ? 1 : 0) | (l.hasMask ? 2 : 0) | (l.maskOn ? 4 : 0) | ((uint32_t)(l.label & 15) << 8) | (l.isAdjust() ? 1u << 12 : 0) | (l.clip ? 1u << 13 : 0) | (l.isFill() ? 1u << 14 : 0) | (l.isShape() ? 1u << 15 : 0));
         std::vector<uint8_t> png;
         stbi_write_png_to_func(toVec, &png, l.img.w, l.img.h, 4, l.img.px.data(), l.img.w * 4);
         putBytes(o, png.data(), png.size());
@@ -569,6 +599,7 @@ bool saveProject(const Doc& d, const std::string& path, std::string& err) {
         }
         if (l.isAdjust()) { const std::string a = l.adj.save(); putBytes(o, (const uint8_t*)a.data(), a.size()); }
         if (l.isFill()) { const std::string f = l.fill.save(); putBytes(o, (const uint8_t*)f.data(), f.size()); }
+        if (l.isShape()) { const std::string sh = l.shape.save(); putBytes(o, (const uint8_t*)sh.data(), sh.size()); }
     }
     if (!writeFile(path, o)) { err = "Can't write " + path; return false; }
     return true;

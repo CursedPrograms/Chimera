@@ -51,7 +51,7 @@ add_library(imgui STATIC
 target_include_directories(imgui PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
 target_link_libraries(imgui PUBLIC SDL2::SDL2 OpenGL::GL)
 
-set(SOURCES src/main.cpp src/app.cpp src/doc.cpp src/ops.cpp src/quicksel.cpp src/inpaint.cpp src/blend.cpp src/adjust.cpp src/refine.cpp src/fx.cpp src/fx2.cpp src/segment.cpp src/changeling.cpp src/bathos.cpp src/mimicplug.cpp src/inoculantplug.cpp src/atelier.cpp src/splash.cpp src/toolbar.cpp)
+set(SOURCES src/main.cpp src/app.cpp src/doc.cpp src/ops.cpp src/quicksel.cpp src/inpaint.cpp src/shape.cpp src/blend.cpp src/adjust.cpp src/refine.cpp src/fx.cpp src/fx2.cpp src/segment.cpp src/changeling.cpp src/bathos.cpp src/mimicplug.cpp src/inoculantplug.cpp src/atelier.cpp src/splash.cpp src/toolbar.cpp)
 if(WIN32)
     list(APPEND SOURCES src/app.rc)
 endif()
@@ -81,7 +81,7 @@ if(WIN32)
 endif()
 
 # a timing check of the operations (not shipped)
-add_executable(ltbench src/bench.cpp src/doc.cpp src/ops.cpp src/blend.cpp src/adjust.cpp src/refine.cpp src/fx.cpp src/fx2.cpp src/inpaint.cpp)
+add_executable(ltbench src/bench.cpp src/doc.cpp src/ops.cpp src/blend.cpp src/adjust.cpp src/refine.cpp src/fx.cpp src/fx2.cpp src/inpaint.cpp src/shape.cpp)
 target_include_directories(ltbench PRIVATE ${STB_DIR} src)
 if(MSVC)
     target_compile_options(ltbench PRIVATE /utf-8 /O2 /fp:fast /D_CRT_SECURE_NO_WARNINGS)

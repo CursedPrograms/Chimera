@@ -106,7 +106,7 @@ static bool quit = false, askQuit = false;
 static std::string toast; static double toastUntil = 0;
 
 enum Tool { T_MOVE, T_RECT, T_ELLIPSE, T_LASSO, T_POLY, T_WAND, T_BRUSH, T_ERASER, T_BUCKET, T_DROPPER, T_HAND,
-            T_PENCIL, T_ZOOM, T_ROW, T_COL, T_CROP, T_GRADIENT, T_MAGIC_ERASER, T_RETOUCH, T_QUICK, T_OBJECT, T_REDEYE, T_HEAL, T_COUNT,
+            T_PENCIL, T_ZOOM, T_ROW, T_COL, T_CROP, T_GRADIENT, T_MAGIC_ERASER, T_RETOUCH, T_QUICK, T_OBJECT, T_REDEYE, T_HEAL, T_SHAPE, T_COUNT,
             T_NONE = T_COUNT };   // T_NONE: a tool on the strip Chimera doesn't have yet
 static int tool = T_BRUSH;
 static uint8_t fg[4] = {0, 0, 0, 255}, bgc[4] = {255, 255, 255, 255};   // black on white, as PhotoCraft (D)
@@ -132,6 +132,9 @@ static float zoom = 1.0f; static ImVec2 origin(0, 0); static ImVec2 canvasPos, c
 static bool dragging = false, panning = false; static ImVec2 dragStart, dragNow, panStart, originStart;
 static int moveStartX = 0, moveStartY = 0;
 static std::vector<float> lasso, poly;
+// the shape tools: new shapes take these (and the foreground colour); with a shape layer active, the options bar
+// changes that layer's shape instead
+static Shape shapeNext = [] { Shape s; s.radius = 0; s.sides = 5; s.inner = 0.5f; s.weight = 4; s.strokeWidth = 3; return s; }();
 // the healing tools (Spot Healing, Remove, Healing Brush, Patch, Content-Aware Move: one Chimera tool, five modes)
 enum { HM_SPOT, HM_REMOVE, HM_HEALING, HM_PATCH, HM_MOVE };
 static float healSizes[3] = {40, 90, 60};
@@ -1535,6 +1538,34 @@ static void applyCrop() {
     if (r.clip(doc.w, doc.h).empty()) return;
     remember("Crop"); cropCanvas(doc, r, cropDelete); changed(); selChanged(); fitNext = true;
 }
+static int shapeKind() {
+    switch (Toolbar::current()) {
+    case Toolbar::RECTANGLE: return SHAPE_RECT; case Toolbar::ELLIPSE: return SHAPE_ELLIPSE; case Toolbar::TRIANGLE: return SHAPE_TRIANGLE;
+    case Toolbar::POLYGON: return SHAPE_POLYGON; case Toolbar::STAR: return SHAPE_STAR; case Toolbar::LINE: return SHAPE_LINE;
+    default: return SHAPE_RECT;
+    }
+}
+// the shape a drag from a to b makes: Shift a square / circle / regular one (a line: in 45-degree steps), Alt from
+// the middle out
+static Shape shapeFromDrag(ImVec2 a, ImVec2 b) {
+    Shape sh = shapeNext;
+    sh.kind = shapeKind();
+    const ImGuiIO& io = ImGui::GetIO();
+    float dx = b.x - a.x, dy = b.y - a.y;
+    if (sh.kind == SHAPE_LINE) {
+        if (io.KeyShift) {   // the nearest 45 degrees
+            const float l = std::hypot(dx, dy), ang = std::round(std::atan2(dy, dx) / 0.785398f) * 0.785398f;
+            dx = std::cos(ang) * l; dy = std::sin(ang) * l;
+        }
+        sh.x0 = a.x; sh.y0 = a.y; sh.x1 = a.x + dx; sh.y1 = a.y + dy;
+        return sh;
+    }
+    if (io.KeyShift) { const float m = std::max(std::fabs(dx), std::fabs(dy)); dx = dx < 0 ? -m : m; dy = dy < 0 ? -m : m; }
+    if (io.KeyAlt) { sh.x0 = a.x - dx; sh.y0 = a.y - dy; sh.x1 = a.x + dx; sh.y1 = a.y + dy; }
+    else { sh.x0 = a.x; sh.y0 = a.y; sh.x1 = a.x + dx; sh.y1 = a.y + dy; }
+    return sh;
+}
+
 static int healMode() {
     switch (Toolbar::current()) {
     case Toolbar::REMOVE: return HM_REMOVE; case Toolbar::HEALING: return HM_HEALING; case Toolbar::PATCH: return HM_PATCH;
@@ -1718,6 +1749,15 @@ static void canvasInput() {
         case T_BRUSH: case T_ERASER: case T_PENCIL: case T_RETOUCH: strokeEnd(stroke); break;
         case T_CROP: if (std::fabs(cropR[2] - cropR[0]) < 2 || std::fabs(cropR[3] - cropR[1]) < 2) cropPending = false; break;
         case T_QUICK: quickSelectStroke(); break;
+        case T_SHAPE: {
+            const Shape sh = shapeFromDrag(dragStart, c);
+            if (std::fabs(sh.x1 - sh.x0) * zoom < 2 && std::fabs(sh.y1 - sh.y0) * zoom < 2) break;
+            remember(std::string("New ") + shapeName(sh.kind));
+            Fill f; f.kind = FILL_SOLID; for (int k = 0; k < 3; ++k) f.colour[k] = fg[k] / 255.0f;
+            addShapeLayer(doc, sh, f);
+            changed();
+            break;
+        }
         case T_HEAL: {
             const int hm = healMode();
             if (hm < HM_PATCH) { healStrokeEnd(); break; }
@@ -1784,6 +1824,12 @@ static void drawCanvas() {
     // the Lasso draws nothing while you drag: its selection appears when you let go. The Polygonal Lasso shows its
     // points, since it's built click by click.
     if (!poly.empty()) path(poly, true);
+    if (tool == T_SHAPE && dragging) {   // the shape being drawn, outlined
+        const std::vector<float> o = shapeOutline(shapeFromDrag(dragStart, dragNow));
+        std::vector<ImVec2> pts;
+        for (size_t i = 0; i + 1 < o.size(); i += 2) pts.push_back(toScreen(o[i], o[i + 1]));
+        if (pts.size() >= 2) { dl->AddPolyline(pts.data(), (int)pts.size(), IM_COL32(0, 0, 0, 200), ImDrawFlags_Closed, 3); dl->AddPolyline(pts.data(), (int)pts.size(), C_PINK, ImDrawFlags_Closed, 1.5f); }
+    }
     if (tool == T_HEAL) {
         const int hm = healMode();
         if (dragging && !lasso.empty() && !patchDrag) path(lasso, true);
@@ -1890,6 +1936,7 @@ static int ltTool(int id) {
     case Toolbar::CLONE_STAMP: case Toolbar::BACKGROUND_ERASER: return T_RETOUCH;
     case Toolbar::QUICK_SELECTION: return T_QUICK; case Toolbar::OBJECT_SELECTION: return T_OBJECT; case Toolbar::RED_EYE: return T_REDEYE;
     case Toolbar::SPOT_HEALING: case Toolbar::REMOVE: case Toolbar::HEALING: case Toolbar::PATCH: case Toolbar::CONTENT_AWARE_MOVE: return T_HEAL;
+    case Toolbar::RECTANGLE: case Toolbar::ELLIPSE: case Toolbar::TRIANGLE: case Toolbar::POLYGON: case Toolbar::STAR: case Toolbar::LINE: return T_SHAPE;
     default: return T_NONE;
     }
 }
@@ -2031,6 +2078,31 @@ static void optionsBar() {
         selModes(); ImGui::SameLine(0, 14); ImGui::Checkbox("Sample all layers", &sampleAll); ImGui::SameLine(0, 14);
         ImGui::TextDisabled("Drag a box round an object: it's found inside the box");
         break;
+    case T_SHAPE: {
+        // the active shape layer's shape, or the next new shape's settings
+        Layer& L = doc.cur();
+        const bool live = L.isShape();
+        Shape& sh = live ? L.shape : shapeNext;
+        const int kind = live ? sh.kind : shapeKind();
+        bool ch = false;
+        auto edited = [&](bool c) { if (live && ImGui::IsItemActivated()) remember("Shape"); ch |= c; };
+        if (live) { ImGui::TextDisabled("%s", L.name.c_str()); ImGui::SameLine(0, 14); }
+        edited(ImGui::Checkbox("Fill", &sh.fillOn));
+        if (live && L.fill.kind == FILL_SOLID) { ImGui::SameLine(0, 4); edited(ImGui::ColorEdit3("##sfc", L.fill.colour, ImGuiColorEditFlags_NoInputs)); }
+        ImGui::SameLine(0, 14);
+        edited(ImGui::Checkbox("Stroke", &sh.strokeOn));
+        ImGui::SameLine(0, 4); edited(ImGui::ColorEdit3("##ssc", sh.stroke, ImGuiColorEditFlags_NoInputs));
+        ImGui::SameLine(0, 8); edited(sliderF("Width", &sh.strokeWidth, 0.5f, 200, "%.1f px", ImGuiSliderFlags_Logarithmic));
+        ImGui::SameLine(0, 14);
+        if (kind == SHAPE_LINE) edited(sliderF("Weight", &sh.weight, 0.5f, 500, "%.1f px", ImGuiSliderFlags_Logarithmic));
+        else if (kind != SHAPE_ELLIPSE) edited(sliderF("Radius", &sh.radius, 0, 500, "%.0f px"));
+        if (kind == SHAPE_POLYGON || kind == SHAPE_STAR) { ImGui::SameLine(0, 14); edited(sliderI("Sides", &sh.sides, 3, 64)); }
+        if (kind == SHAPE_STAR) { float in = sh.inner * 100; ImGui::SameLine(0, 14); if (sliderF("Indent", &in, 5, 95, "%.0f%%")) { sh.inner = in / 100; edited(true); } else edited(false); }
+        ImGui::SameLine(0, 14);
+        ImGui::TextDisabled(live ? "Changes this shape layer" : "Drag to draw: Shift keeps it regular, Alt draws from the middle");
+        if (ch && live) { renderFill(doc, L); changed(); }
+        break;
+    }
     case T_HEAL: {
         const int hm = healMode();
         if (hm < HM_PATCH) { sliderF("Size", &healSizes[hm], 1, 1000, "%.0f px", ImGuiSliderFlags_Logarithmic); ImGui::SameLine(0, 14); }
@@ -2293,7 +2365,7 @@ static void fillPanel() {
     Layer& l = doc.cur();
     Fill& f = l.fill;
     ImGui::TextColored(col4(C_PINK), "PROPERTIES");
-    ImGui::SameLine(); ImGui::TextDisabled("%s", f.kind == FILL_SOLID ? "Color Fill" : "Gradient Fill");
+    ImGui::SameLine(); ImGui::TextDisabled("%s", l.isShape() ? (std::string(shapeName(l.shape.kind)) + (f.kind == FILL_SOLID ? " (colour)" : " (gradient)")).c_str() : f.kind == FILL_SOLID ? "Color Fill" : "Gradient Fill");
     ImGui::PushItemWidth(-1);
     bool ch = false;
     if (f.kind == FILL_SOLID) ch |= adjColor("##fc", f.colour);
@@ -2959,6 +3031,25 @@ void script(const std::string& what) {
     if (what.rfind("ico:", 0) == 0) {   // tests: File > Export ICO to a file
         std::string err; const bool ok = saveImage(doc, what.substr(4), err);
         fprintf(stderr, "ico: %s %s\n", ok ? "saved" : "failed", err.c_str());
+    }
+    if (what == "shapes") {   // tests: every shape, drawn as a drag would, with strokes and corners
+        Toolbar::select(Toolbar::STAR); syncTool();
+        const float W = (float)doc.w, H = (float)doc.h;
+        const int kinds[] = {SHAPE_RECT, SHAPE_ELLIPSE, SHAPE_TRIANGLE, SHAPE_POLYGON, SHAPE_STAR, SHAPE_LINE};
+        for (int i = 0; i < 6; ++i) {
+            Shape sh = shapeNext; sh.kind = kinds[i];
+            const float cx = W * (0.12f + 0.15f * i), cy = H * 0.5f, r = std::min(W, H) * 0.12f;
+            sh.x0 = cx - r; sh.y0 = cy - r; sh.x1 = cx + r; sh.y1 = cy + r;
+            if (i == 0) sh.radius = r * 0.3f;
+            if (i == 3) sh.sides = 6;
+            if (i == 4) { sh.sides = 5; sh.inner = 0.45f; sh.radius = 3; }
+            if (i == 5) { sh.y0 = cy + r; sh.y1 = cy - r; sh.weight = 8; }
+            sh.strokeOn = i % 2 == 1; sh.strokeWidth = 6; sh.stroke[0] = 1; sh.stroke[1] = 1; sh.stroke[2] = 1;
+            Fill f; f.kind = i == 2 ? FILL_GRADIENT : FILL_SOLID; f.colour[0] = 0; f.colour[1] = 0.482f; f.colour[2] = 0.718f;
+            addShapeLayer(doc, sh, f);
+        }
+        fprintf(stderr, "shapes: %d layers\n", (int)doc.layers.size());
+        changed();
     }
     if (what == "redeye") {   // tests: a click in the middle of the picture with the Red Eye tool
         const int n = redEye(doc, doc.w / 2, doc.h / 2, 50, 50);
