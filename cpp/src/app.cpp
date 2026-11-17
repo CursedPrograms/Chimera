@@ -2416,7 +2416,15 @@ static void drawCanvas() {
             dl->AddLine(ImVec2(q0.x + (q3.x-q0.x)*t, q0.y + (q3.y-q0.y)*t), ImVec2(q1.x + (q2.x-q1.x)*t, q1.y + (q2.y-q1.y)*t), IM_COL32(255, 255, 255, 90));
         }
     }
-    if (tool == T_OBJECT && dragging) dl->AddRect(toScreen(dragStart.x, dragStart.y), toScreen(dragNow.x, dragNow.y), C_PINK, 0, 0, 1.5f);
+    if (tool == T_OBJECT && dragging) {
+        const ImVec2 q[4] = {
+            toScreen(dragStart.x, dragStart.y),
+            toScreen(dragNow.x, dragStart.y),
+            toScreen(dragNow.x, dragNow.y),
+            toScreen(dragStart.x, dragNow.y)
+        };
+        dl->AddPolyline(q, 4, C_PINK, ImDrawFlags_Closed, 1.5f);
+    }
     if (tool == T_QUICK && ImGui::IsWindowHovered()) {
         const float r = quickSize * 0.5f * zoom;
         dl->AddCircle(io.MousePos, r, IM_COL32(255, 255, 255, 200), 48, 1.0f); dl->AddCircle(io.MousePos, r + 1, IM_COL32(0, 0, 0, 160), 48, 1.0f);
