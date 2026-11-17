@@ -245,10 +245,12 @@ static bool richTextRunsNormalizeAndPersist() {
     const auto runs=t.normalizedRuns(); const auto paragraphs=t.normalizedParagraphs();
     Text decoded; const bool loaded=decoded.load(t.save());
     Text old; const bool oldLoaded=old.load("text2 41 - - 48 10 20 0 0 0 1.2 0 0 1 1 0 0 0 0 -1");
-    const bool result=loaded && oldLoaded && runs.size()==3 && runs[0].bytes==1 && runs[1].bytes==2 && runs[2].bytes==1 &&
-        runs[0].style.bold && runs[1].style.italic && runs[1].style.size==27 &&
-        paragraphs.size()==2 && paragraphs[0].bytes==1 && paragraphs[1].bytes==3 &&
-        paragraphs[0].style.align==2 && decoded.runs.size()==2 && decoded.runs[0].bytes==1 && decoded.runs[0].style==first && decoded.runs[1].style==second && decoded.paragraphs.size()==1 &&
+    Text over=t; over.runs={{0,first},{100,second},{5,first}};
+    const auto clipped=over.normalizedRuns(); Text empty=t; empty.str.clear(); empty.runs={{0,first}};
+    const bool result=loaded && oldLoaded && runs.size()==2 && runs[0].bytes==1 && runs[1].bytes==3 &&
+        runs[0].style.bold && runs[1].style.italic && runs[1].style.size==27 && clipped.size()==1 && clipped[0].bytes==4 && clipped[0].style==second &&
+        paragraphs.size()==1 && paragraphs[0].bytes==4 && paragraphs[0].style.align==2 &&
+        empty.normalizedRuns().size()==1 && empty.normalizedRuns()[0].style==first && decoded.runs.size()==2 && decoded.runs[0].bytes==1 && decoded.runs[0].style==first && decoded.runs[1].style==second && decoded.paragraphs.size()==1 &&
         decoded.paragraphs[0].style.firstIndent==7.5f && old.runs.empty();
     return result;
 }

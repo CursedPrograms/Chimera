@@ -80,19 +80,27 @@ bool Text::load(const std::string& blob) {
 // their boundaries are UTF-8 character boundaries; any missing tail inherits the layer style.
 std::vector<TextRun> Text::normalizedRuns() const {
     TextStyle base; base.font=font; base.size=size; base.tracking=tracking; base.leading=leading;
-    std::vector<TextRun> out; size_t at=0;
+    std::vector<TextRun> out;
     auto boundary = [&](size_t n) { n=std::min(n,str.size()); while (n<str.size() && n && (static_cast<unsigned char>(str[n])&0xc0)==0x80) ++n; return n; };
-    for (const TextRun& run : runs) { const size_t end=boundary(at+run.bytes); if(end>at) out.push_back({end-at,run.style}); at=end; if(at==str.size()) break; }
-    if(at<str.size()) out.push_back({str.size()-at, out.empty()?base:out.back().style});
+    size_t raw=0, at=0;
+    if(str.empty()) return {{0,runs.empty()?base:runs.front().style}};
+    for (const TextRun& run : runs) {
+        const size_t end=boundary(run.bytes>str.size()-std::min(raw,str.size())?str.size():raw+run.bytes);
+        if(end>at) out.push_back({end-at,run.style});
+        at=end;
+        if(raw<str.size()) raw=std::min(str.size(),raw+std::min(run.bytes,str.size()-raw));
+        if(raw>=str.size()) break;
+    }
+    if(at<str.size()) { const TextStyle tail=out.empty()?(runs.empty()?base:runs.back().style):out.back().style; if(!out.empty()&&out.back().style==tail) out.back().bytes+=str.size()-at; else out.push_back({str.size()-at,tail}); }
     return out;
 }
 
 // after PhotoCraft (crates/doc/src/lib.rs TextLayer::paragraph_runs): paragraph runs cover text bytes.
 std::vector<ParagraphRun> Text::normalizedParagraphs() const {
-    std::vector<ParagraphRun> out; size_t at=0;
-    for(const ParagraphRun& run:paragraphs) { size_t end=std::min(str.size(),at+run.bytes); while(end<str.size() && end && (static_cast<unsigned char>(str[end])&0xc0)==0x80)++end; if(end>at)out.push_back({end-at,run.style}); at=end; if(at==str.size())break; }
-    if(at<str.size())out.push_back({str.size()-at,out.empty()?ParagraphStyle{}:out.back().style});
-    if(str.empty() && out.empty()) out.push_back({0,ParagraphStyle{}});
+    std::vector<ParagraphRun> out; size_t raw=0,at=0;
+    if(str.empty()) return {{0,paragraphs.empty()?ParagraphStyle{}:paragraphs.front().style}};
+    for(const ParagraphRun& run:paragraphs) { const size_t limit=run.bytes>str.size()-std::min(raw,str.size())?str.size():raw+run.bytes; size_t end=limit; while(end<str.size()&&end&&(static_cast<unsigned char>(str[end])&0xc0)==0x80)++end; if(end>at)out.push_back({end-at,run.style}); at=end; raw=limit; if(raw>=str.size())break; }
+    if(at<str.size()) { const ParagraphStyle tail=out.empty()?(paragraphs.empty()?ParagraphStyle{}:paragraphs.back().style):out.back().style; if(!out.empty()&&out.back().style.align==tail.align&&out.back().style.autoLeading==tail.autoLeading&&out.back().style.firstIndent==tail.firstIndent&&out.back().style.startIndent==tail.startIndent&&out.back().style.endIndent==tail.endIndent&&out.back().style.spaceBefore==tail.spaceBefore&&out.back().style.spaceAfter==tail.spaceAfter)out.back().bytes+=str.size()-at; else out.push_back({str.size()-at,tail}); }
     return out;
 }
 
