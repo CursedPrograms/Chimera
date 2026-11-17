@@ -401,11 +401,12 @@ void dropFile(const std::string& path) {
     else placeAsLayer(path);
 }
 
-static void saveAs(bool project) {
+static void saveAs(bool project, bool icon = false) {
     std::string start = doc.path;
-    if (!start.empty()) start = u8path(start).replace_extension(project ? ".chimera" : ".png").u8string();
+    if (!start.empty()) start = u8path(start).replace_extension(project ? ".chimera" : icon ? ".ico" : ".png").u8string();
     const std::string p = project ? fileDialog(true, "Chimera project|*.chimera|", "chimera", start)
-                                  : fileDialog(true, "PNG|*.png|JPG|*.jpg|", "png", start);
+                        : icon ? fileDialog(true, "Icon (16 to 256 px)|*.ico|", "ico", start)
+                               : fileDialog(true, "PNG|*.png|JPG|*.jpg|Icon (16 to 256 px)|*.ico|", "png", start);
     if (p.empty()) return;
     std::string err;
     if (!(project ? saveProject(doc, p, err) : saveImage(doc, p, err))) { say(err); return; }
@@ -2445,6 +2446,8 @@ static void menus() {
         if (item("Save Project", "Ctrl+S", !noDoc)) save();
         if (item("Save Project As...", nullptr, !noDoc)) saveAs(true);
         if (item("Export PNG / JPG...", "Ctrl+Shift+S", !noDoc)) saveAs(false);
+        if (item("Export ICO...", nullptr, !noDoc)) saveAs(false, true);
+        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", "A Windows icon: the picture at 16, 24, 32, 48, 64, 128 and 256 px in one .ico (not square: fitted, transparent round it)");
         if (item("Save with Inoculant...", nullptr, !noDoc && inoculantHave())) inoculantSave();
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("%s", inoculantHave() ? "Export the picture protected against face swaps and face recognition" : "Needs Inoculant (Atelier) on this PC");
         ImGui::Separator();
@@ -2952,6 +2955,10 @@ void script(const std::string& what) {
         if (what == "inoculant-save") inoculantSave();
         else { inMode = IN_CURE; inAsk = true; inSrc = doc.path; if (inCheck.start(InoculantPlug::inspectArgs(doc.path), Changeling::workDir())) inChecking = true; }
         fprintf(stderr, "inoculant: %s\n", InoculantPlug::cli().c_str());
+    }
+    if (what.rfind("ico:", 0) == 0) {   // tests: File > Export ICO to a file
+        std::string err; const bool ok = saveImage(doc, what.substr(4), err);
+        fprintf(stderr, "ico: %s %s\n", ok ? "saved" : "failed", err.c_str());
     }
     if (what == "redeye") {   // tests: a click in the middle of the picture with the Red Eye tool
         const int n = redEye(doc, doc.w / 2, doc.h / 2, 50, 50);

@@ -479,12 +479,63 @@ bool openDoc(const std::string& path, Doc& d, std::string& err) {
 
 static void toVec(void* ctx, void* data, int size) { auto* v = (std::vector<uint8_t>*)ctx; v->insert(v->end(), (uint8_t*)data, (uint8_t*)data + size); }
 
+// a square of side n with the picture fitted in its middle (transparent round it), averaged down (or bilinear up)
+static std::vector<uint8_t> iconSquare(const Image& src, int n) {
+    std::vector<uint8_t> o((size_t)n * n * 4, 0);
+    const float k = (float)n / std::max(src.w, src.h);
+    const float dw = src.w * k, dh = src.h * k, ox = (n - dw) / 2, oy = (n - dh) / 2;
+    for (int y = 0; y < n; ++y)
+        for (int x = 0; x < n; ++x) {
+            // the source area under this pixel (at least one source pixel: bilinear-ish when enlarging)
+            const float sx0 = (x - ox) / k, sx1 = (x + 1 - ox) / k, sy0 = (y - oy) / k, sy1 = (y + 1 - oy) / k;
+            if (sx1 <= 0 || sy1 <= 0 || sx0 >= src.w || sy0 >= src.h) continue;
+            const int x0 = std::max(0, (int)std::floor(sx0)), x1 = std::min(src.w, std::max(x0 + 1, (int)std::ceil(sx1)));
+            const int y0 = std::max(0, (int)std::floor(sy0)), y1 = std::min(src.h, std::max(y0 + 1, (int)std::ceil(sy1)));
+            double acc[4] = {0, 0, 0, 0}; double cnt = 0;
+            for (int yy = y0; yy < y1; ++yy)
+                for (int xx = x0; xx < x1; ++xx) {
+                    const uint8_t* q = &src.px[((size_t)yy * src.w + xx) * 4];
+                    const double a = q[3] / 255.0;
+                    for (int c = 0; c < 3; ++c) acc[c] += q[c] * a;   // (colours weighted by alpha: no dark fringes)
+                    acc[3] += q[3]; cnt += 1;
+                }
+            uint8_t* t = &o[((size_t)y * n + x) * 4];
+            const double alpha = acc[3] / cnt;
+            for (int c = 0; c < 3; ++c) t[c] = alpha > 0 ? (uint8_t)std::min(255.0, acc[c] / cnt / (alpha / 255.0) + 0.5) : 0;
+            t[3] = (uint8_t)(alpha + 0.5);
+        }
+    return o;
+}
+// Windows' .ico: 16 to 256 px, each a PNG inside (as icons have been since Vista)
+static bool iconData(const Image& img, std::vector<uint8_t>& out) {
+    static const int SIZES[] = {16, 24, 32, 48, 64, 128, 256};
+    const int n = (int)(sizeof SIZES / sizeof SIZES[0]);
+    std::vector<std::vector<uint8_t>> pngs(n);
+    for (int i = 0; i < n; ++i) {
+        const std::vector<uint8_t> sq = iconSquare(img, SIZES[i]);
+        if (!stbi_write_png_to_func(toVec, &pngs[i], SIZES[i], SIZES[i], 4, sq.data(), SIZES[i] * 4)) return false;
+    }
+    auto u16 = [&](uint32_t v) { out.push_back((uint8_t)v); out.push_back((uint8_t)(v >> 8)); };
+    auto u32 = [&](uint32_t v) { u16(v & 0xffff); u16(v >> 16); };
+    out.clear(); u16(0); u16(1); u16((uint32_t)n);
+    uint32_t offset = 6 + 16 * n;
+    for (int i = 0; i < n; ++i) {
+        out.push_back((uint8_t)(SIZES[i] >= 256 ? 0 : SIZES[i])); out.push_back((uint8_t)(SIZES[i] >= 256 ? 0 : SIZES[i]));
+        out.push_back(0); out.push_back(0); u16(1); u16(32); u32((uint32_t)pngs[i].size()); u32(offset);
+        offset += (uint32_t)pngs[i].size();
+    }
+    for (const auto& p : pngs) out.insert(out.end(), p.begin(), p.end());
+    return true;
+}
+
 bool saveImage(const Doc& d, const std::string& path, std::string& err) {
     Image out;
     composite(d, out, {0, 0, d.w, d.h}, false);
     std::vector<uint8_t> data;
     int ok;
-    if (endsWith(path, ".jpg") || endsWith(path, ".jpeg")) {
+    if (endsWith(path, ".ico")) {
+        ok = iconData(out, data);
+    } else if (endsWith(path, ".jpg") || endsWith(path, ".jpeg")) {
         // JPG has no transparency: onto white
         Image rgb(d.w, d.h);
         std::vector<uint8_t> px((size_t)d.w * d.h * 3);
