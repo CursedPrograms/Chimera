@@ -5224,6 +5224,17 @@ static bool jobRunning() { return !clOut.empty() || !btOut.empty() || !mmRun.out
 bool busy() { return jobRunning() || Changeling::stepsLoading(); }
 
 void script(const std::string& what) {
+    if (what == "text-empty") {
+        Toolbar::select(Toolbar::TYPE_H); syncTool();
+        const size_t before = doc.layers.size();
+        Text empty; empty.x = doc.w * 0.5f; empty.y = doc.h * 0.5f;
+        Fill fill; fill.kind = FILL_SOLID;
+        addTextLayer(doc, empty, fill); typeLayer = doc.active; typeBuf[0] = 0;
+        typeCommit();
+        const bool ok = doc.layers.size() == before;
+        fprintf(stderr, "text-empty: %s; empty new text layer removed on commit\n", ok ? "passed" : "failed");
+        return;
+    }
     if (what == "empty") return;                             // the empty start, as it is
     noDoc = false;                                           // the scripts work on the blank document
     if (what == "rotate-view") {
