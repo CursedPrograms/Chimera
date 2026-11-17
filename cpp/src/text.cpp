@@ -9,12 +9,35 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <cwctype>
 #include <limits>
 #include <map>
 #include <mutex>
 #include <sstream>
 
 namespace fs = std::filesystem;
+
+// after PhotoCraft (crates/text/src/layout/navigate.rs word_boundary): skip separators then
+// consume the adjacent alphanumeric run, counting Unicode code points rather than UTF-8 bytes.
+size_t textWordBoundary(const std::string& text, size_t index, bool forward) {
+    std::vector<std::pair<size_t, uint32_t>> chars;
+    for (size_t i=0; i<text.size();) {
+        const size_t start=i; const unsigned char c=static_cast<unsigned char>(text[i++]); uint32_t cp=c;
+        if (c>=0xF0 && i+2<text.size()) { cp=(c&7u)<<18; cp|=(static_cast<unsigned char>(text[i++])&63u)<<12; cp|=(static_cast<unsigned char>(text[i++])&63u)<<6; cp|=static_cast<unsigned char>(text[i++])&63u; }
+        else if (c>=0xE0 && i+1<text.size()) { cp=(c&15u)<<12; cp|=(static_cast<unsigned char>(text[i++])&63u)<<6; cp|=static_cast<unsigned char>(text[i++])&63u; }
+        else if (c>=0xC0 && i<text.size()) { cp=(c&31u)<<6; cp|=static_cast<unsigned char>(text[i++])&63u; }
+        chars.push_back({start,cp});
+    }
+    auto alnum=[](uint32_t cp) {
+        if (cp<128) return std::isalnum(static_cast<unsigned char>(cp))!=0;
+        if (cp<=static_cast<uint32_t>(WCHAR_MAX)) return std::iswalnum(static_cast<wint_t>(cp))!=0;
+        return false;
+    };
+    size_t i=std::min(index,chars.size());
+    if(forward) { while(i<chars.size()&&!alnum(chars[i].second))++i; while(i<chars.size()&&alnum(chars[i].second))++i; }
+    else { while(i>0&&!alnum(chars[i-1].second))--i; while(i>0&&alnum(chars[i-1].second))--i; }
+    return i;
+}
 
 std::string Text::save() const {
     // Text settings and a path's editable Bezier knots live together in the project layer.

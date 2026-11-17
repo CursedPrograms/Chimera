@@ -56,3 +56,5 @@ std::string defaultFont();
 // coverage (0..1) of the text over a w x h canvas; box: where it is (x0, y0, x1, y1), for picking and outlines
 bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float box[4]);
 float textAdvance(const Text& t);     // the first line's advance in pixels, for path placement markers
+// after PhotoCraft (crates/text/src/layout/navigate.rs word_boundary): returns a character index.
+size_t textWordBoundary(const std::string& text, size_t index, bool forward);

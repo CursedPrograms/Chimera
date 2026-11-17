@@ -255,6 +255,14 @@ static bool richTextRunsNormalizeAndPersist() {
     return result;
 }
 
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/tests.rs word_boundaries).
+static bool typeWordBoundariesMatchPhotoCraft() {
+    const std::string text="hello big world";
+    return textWordBoundary(text,0,true)==5 && textWordBoundary(text,7,false)==6 &&
+        textWordBoundary(text,15,false)==10 && textWordBoundary("hello",99,true)==5 &&
+        textWordBoundary("hello",0,false)==0;
+}
+
 int runSelfTests() {
     struct Test { const char* name; bool (*run)(); };
     static const Test tests[] = {
@@ -272,6 +280,7 @@ int runSelfTests() {
         {"type follows and saves a Bezier path", textFollowsBezierPathAndPersists},
         {"text path placement respects open ends and closed seams", textPathPlacementRangeBehaves},
         {"rich text runs normalize UTF-8 and persist", richTextRunsNormalizeAndPersist},
+        {"type tool word boundaries", typeWordBoundariesMatchPhotoCraft},
     };
     int failed = 0;
     for (const Test& test : tests) {
