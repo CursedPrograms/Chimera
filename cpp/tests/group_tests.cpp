@@ -313,6 +313,15 @@ static bool richTextRunsSurviveProjectRoundTrip() {
         layer->text.paragraphs.size()==1 && layer->text.paragraphs[0].style.align==2 && layer->text.paragraphs[0].style.spaceAfter==5;
 }
 
+// after PhotoCraft (crates/doc/src/lib.rs TextLayer::paragraph_runs trailing empty paragraph).
+static bool trailingEmptyParagraphKeepsItsStyle() {
+    Text t; t.str="line\n"; ParagraphStyle first; first.align=1; ParagraphStyle last; last.align=2;
+    t.paragraphs={{t.str.size(),first},{0,last}};
+    const auto runs=t.normalizedParagraphs();
+    return runs.size()==2 && runs[0].bytes==t.str.size() && runs[0].style.align==1 &&
+        runs[1].bytes==0 && runs[1].style.align==2;
+}
+
 int runSelfTests() {
     struct Test { const char* name; bool (*run)(); };
     static const Test tests[] = {
@@ -336,6 +345,7 @@ int runSelfTests() {
         {"type unit conversion follows document resolution", typeUnitsFollowResolution},
         {"text summary follows first character run", textSummaryFollowsFirstStyleRun},
         {"rich text runs survive project round trip", richTextRunsSurviveProjectRoundTrip},
+        {"trailing empty paragraph keeps its character style", trailingEmptyParagraphKeepsItsStyle},
     };
     int failed = 0;
     for (const Test& test : tests) {

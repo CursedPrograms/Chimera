@@ -149,6 +149,16 @@ std::vector<ParagraphRun> Text::normalizedParagraphs() const {
     if(str.empty()) return {{0,paragraphs.empty()?ParagraphStyle{}:paragraphs.front().style}};
     for(const ParagraphRun& run:paragraphs) { const size_t limit=run.bytes>str.size()-std::min(raw,str.size())?str.size():raw+run.bytes; size_t end=limit; while(end<str.size()&&end&&(static_cast<unsigned char>(str[end])&0xc0)==0x80)++end; if(end>at)out.push_back({end-at,run.style}); at=end; raw=limit; if(raw>=str.size())break; }
     if(at<str.size()) { const ParagraphStyle tail=out.empty()?(paragraphs.empty()?ParagraphStyle{}:paragraphs.back().style):out.back().style; if(!out.empty()&&out.back().style.align==tail.align&&out.back().style.autoLeading==tail.autoLeading&&out.back().style.firstIndent==tail.firstIndent&&out.back().style.startIndent==tail.startIndent&&out.back().style.endIndent==tail.endIndent&&out.back().style.spaceBefore==tail.spaceBefore&&out.back().style.spaceAfter==tail.spaceAfter)out.back().bytes+=str.size()-at; else out.push_back({str.size()-at,tail}); }
+    // after PhotoCraft (crates/doc/src/lib.rs TextLayer::paragraph_runs): a trailing newline
+    // has a final empty paragraph marker whose style may be stored in a zero-byte final run.
+    if(!paragraphs.empty() && !str.empty() && (str.back()=='\n'||str.back()=='\r') && paragraphs.back().bytes<=1) {
+        size_t preceding=0;
+        for(size_t i=0;i+1<paragraphs.size();++i) {
+            if(paragraphs[i].bytes>str.size()-std::min(preceding,str.size())) { preceding=str.size()+1; break; }
+            preceding+=paragraphs[i].bytes;
+        }
+        if(preceding==str.size()) out.push_back({0,paragraphs.back().style});
+    }
     return out;
 }
 
