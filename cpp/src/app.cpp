@@ -108,7 +108,7 @@ static std::string toast; static double toastUntil = 0;
 static void magneticClear();
 
 enum Tool { T_MOVE, T_RECT, T_ELLIPSE, T_LASSO, T_POLY, T_MAGNETIC, T_WAND, T_BRUSH, T_ERASER, T_BUCKET, T_DROPPER, T_HAND, T_ROTATE,
-            T_PENCIL, T_ZOOM, T_ROW, T_COL, T_CROP, T_GRADIENT, T_MAGIC_ERASER, T_RETOUCH, T_QUICK, T_OBJECT, T_REDEYE, T_HEAL, T_SHAPE, T_MARK, T_TYPE, T_PEN, T_COUNT,
+            T_PENCIL, T_ZOOM, T_ROW, T_COL, T_CROP, T_PCROP, T_GRADIENT, T_MAGIC_ERASER, T_RETOUCH, T_QUICK, T_OBJECT, T_REDEYE, T_HEAL, T_SHAPE, T_MARK, T_TYPE, T_PEN, T_COUNT,
             T_NONE = T_COUNT };   // T_NONE: a tool on the strip Chimera doesn't have yet
 static int tool = T_BRUSH;
 static uint8_t fg[4] = {0, 0, 0, 255}, bgc[4] = {255, 255, 255, 255};   // black on white, as PhotoCraft (D)
@@ -129,6 +129,9 @@ static int rtRange = 1; static bool spongeDesat = false, cloneSet = false, clone
 static float cloneSrcX = 0, cloneSrcY = 0, cloneDX = 0, cloneDY = 0;
 static int gradToolStyle = 0; static bool gradToolReverse = false; static float gradToolOpacity = 1.0f;
 static bool cropPending = false, cropDelete = true; static float cropR[4] = {0, 0, 0, 0};
+static bool pcropPending = false, pcropCustomSize = false; static float pcropQ[8] = {0};
+static std::vector<ImVec2> pcropClicks; static int pcropDragPart = -1, pcropOutW = 0, pcropOutH = 0;
+static ImVec2 pcropMoveStart; static float pcropMoveQ[8] = {0};
 static float quickSize = 30; static std::vector<float> quickPts;     // the Quick Selection brush and its stroke
 static float magneticWidth = 10, magneticContrast = 10, magneticFrequency = 57;
 static std::vector<Magnetic::Point> magneticPts, magneticTrail, magneticLive;
@@ -1660,6 +1663,79 @@ static void applyCrop() {
     if (r.clip(doc.w, doc.h).empty()) return;
     remember("Crop"); cropCanvas(doc, r, cropDelete); changed(); selChanged(); fitNext = true;
 }
+static bool pcropValid(const float q[8]) {
+    double area = 0;
+    for (int i = 0; i < 4; ++i) {
+        const int j = (i + 1) % 4, k = (i + 2) % 4;
+        const double ax = q[j * 2] - q[i * 2], ay = q[j * 2 + 1] - q[i * 2 + 1];
+        const double bx = q[k * 2] - q[j * 2], by = q[k * 2 + 1] - q[j * 2 + 1];
+        if (ax * by - ay * bx <= 1e-3 * std::hypot(ax, ay) * std::hypot(bx, by)) return false;
+        area += q[i * 2] * q[j * 2 + 1] - q[j * 2] * q[i * 2 + 1];
+    }
+    return std::isfinite(area) && area >= 2.0;
+}
+static bool perspectiveHomography(const float q[8], double out[8]) {
+    double a[8][9] = {};
+    for (int i = 0; i < 4; ++i) {
+        const double u = i == 1 || i == 2 ? 1.0 : 0.0, v = i >= 2 ? 1.0 : 0.0;
+        const double x = q[i * 2], y = q[i * 2 + 1];
+        a[i * 2][0] = u; a[i * 2][1] = v; a[i * 2][2] = 1; a[i * 2][6] = -u * x; a[i * 2][7] = -v * x; a[i * 2][8] = x;
+        a[i * 2 + 1][3] = u; a[i * 2 + 1][4] = v; a[i * 2 + 1][5] = 1; a[i * 2 + 1][6] = -u * y; a[i * 2 + 1][7] = -v * y; a[i * 2 + 1][8] = y;
+    }
+    for (int c = 0; c < 8; ++c) {
+        int pivot = c;
+        for (int r = c + 1; r < 8; ++r) if (std::fabs(a[r][c]) > std::fabs(a[pivot][c])) pivot = r;
+        if (std::fabs(a[pivot][c]) < 1e-10) return false;
+        if (pivot != c) for (int j = c; j < 9; ++j) std::swap(a[c][j], a[pivot][j]);
+        const double div = a[c][c]; for (int j = c; j < 9; ++j) a[c][j] /= div;
+        for (int r = 0; r < 8; ++r) if (r != c) { const double f = a[r][c]; for (int j = c; j < 9; ++j) a[r][j] -= f * a[c][j]; }
+    }
+    for (int i = 0; i < 8; ++i) out[i] = a[i][8];
+    return true;
+}
+static void pcropSet(const float q[8]) {
+    memcpy(pcropQ, q, sizeof pcropQ); pcropPending = true; pcropCustomSize = false;
+    auto len = [&](int a, int b) { return std::hypot(q[a] - q[b], q[a + 1] - q[b + 1]); };
+    pcropOutW = std::clamp((int)std::lround((len(0, 2) + len(6, 4)) * 0.5), 1, 16384);
+    pcropOutH = std::clamp((int)std::lround((len(0, 6) + len(2, 4)) * 0.5), 1, 16384);
+}
+static bool pcropInside(ImVec2 p) {
+    for (int i = 0; i < 4; ++i) { const int j = (i + 1) % 4; if ((pcropQ[j*2]-pcropQ[i*2])*(p.y-pcropQ[i*2+1])-(pcropQ[j*2+1]-pcropQ[i*2+1])*(p.x-pcropQ[i*2]) < 0) return false; }
+    return true;
+}
+static void pcropOrder(std::vector<ImVec2> points) {
+    ImVec2 centre(0,0); for (auto p : points) { centre.x += p.x / 4; centre.y += p.y / 4; }
+    std::sort(points.begin(), points.end(), [&](ImVec2 a, ImVec2 b) { return std::atan2(a.y-centre.y,a.x-centre.x) < std::atan2(b.y-centre.y,b.x-centre.x); });
+    auto first = std::min_element(points.begin(), points.end(), [](ImVec2 a, ImVec2 b) { return a.x+a.y < b.x+b.y; });
+    std::rotate(points.begin(), first, points.end()); const float q[8] = {points[0].x,points[0].y,points[1].x,points[1].y,points[2].x,points[2].y,points[3].x,points[3].y};
+    pcropSet(q); pcropClicks.clear();
+}
+static void pcropCancel() { pcropPending = false; pcropClicks.clear(); pcropDragPart = -1; pcropCustomSize = false; }
+static void applyPerspectiveCrop() {
+    if (!pcropPending) return;
+    if (!pcropValid(pcropQ)) { say("The four corners must make a convex quadrilateral"); return; }
+    double h[8]; if (!perspectiveHomography(pcropQ, h)) { say("Those corners do not make a usable perspective"); return; }
+    const int w = std::clamp(pcropOutW, 1, 16384), ht = std::clamp(pcropOutH, 1, 16384);
+    if ((int64_t)w * ht > 100'000'000) { say("Perspective Crop output is too large"); return; }
+    Image src; composite(doc, src, {0, 0, doc.w, doc.h}, false); Image out(w, ht);
+    for (int y = 0; y < ht; ++y) for (int x = 0; x < w; ++x) {
+        const double u = (x + 0.5) / w, v = (y + 0.5) / ht, z = h[6] * u + h[7] * v + 1.0;
+        if (std::fabs(z) < 1e-10) continue;
+        const float sx = (float)((h[0] * u + h[1] * v + h[2]) / z), sy = (float)((h[3] * u + h[4] * v + h[5]) / z);
+        if (sx < 0 || sy < 0 || sx >= src.w || sy >= src.h) continue;
+        const int x0 = (int)sx, y0 = (int)sy, x1 = std::min(x0 + 1, src.w - 1), y1 = std::min(y0 + 1, src.h - 1);
+        const float fx = sx - x0, fy = sy - y0; uint8_t* d = out.at(x, y);
+        for (int c = 0; c < 4; ++c) {
+            const float a = src.at(x0, y0)[c] * (1 - fx) + src.at(x1, y0)[c] * fx;
+            const float b = src.at(x0, y1)[c] * (1 - fx) + src.at(x1, y1)[c] * fx;
+            d[c] = (uint8_t)std::lround(a * (1 - fy) + b * fy);
+        }
+    }
+    remember("Perspective Crop"); doc.w = w; doc.h = ht; doc.layers.clear(); doc.active = 0; doc.sel.clear();
+    Layer result = emptyLayer(doc, "Perspective Crop"); result.img = std::move(out); result.x = result.y = 0; doc.layers.push_back(std::move(result));
+    doc.samplers.clear(); doc.counts.clear(); doc.notes.clear(); doc.hasRuler = false; doc.workPath.clear(); doc.historyState.reset();
+    pcropCancel(); changed(); selChanged(); fitNext = true; say("Perspective Crop flattened the visible image");
+}
 // ---------- the Pen tools (PhotoCraft's paths): Pen, Freeform Pen, Curvature Pen, Add / Delete Anchor, Convert
 // Point, Path Selection and Direct Selection, on the document's work path ----------
 enum { PN_PEN, PN_FREE, PN_CURVE, PN_ADD, PN_DEL, PN_CONVERT, PN_PATHSEL, PN_DIRECT };
@@ -1983,6 +2059,21 @@ static void canvasInput() {
             if (cropPending && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) { applyCrop(); dragging = false; }
             else { cropPending = true; cropR[0] = cropR[2] = c.x; cropR[1] = cropR[3] = c.y; }
             break;
+        case T_PCROP:
+            pcropDragPart = -1;
+            if (pcropPending) {
+                int hit = -1;
+                for (int i = 0; i < 4; ++i) {
+                    ImVec2 corner = toScreen(pcropQ[i * 2], pcropQ[i * 2 + 1]);
+                    if (std::hypot(m.x - corner.x, m.y - corner.y) < 12) { hit = i; break; }
+                }
+                if (hit >= 0) pcropDragPart = hit;
+                else if (pcropInside(c)) pcropDragPart = -2;
+                else { pcropCancel(); pcropDragPart = -1; }
+            }
+            memcpy(pcropMoveQ, pcropQ, sizeof pcropQ);
+            pcropMoveStart = c;
+            break;
         case T_GRADIENT: case T_OBJECT: break;   // done when the drag ends
         case T_QUICK: quickPts = {c.x, c.y}; break;
         case T_REDEYE:
@@ -2119,6 +2210,12 @@ static void canvasInput() {
         case T_LASSO: if (std::hypot(c.x - lasso[lasso.size() - 2], c.y - lasso.back()) * zoom > 2) { lasso.push_back(c.x); lasso.push_back(c.y); } break;
         case T_DROPPER: pickColour(c, io.KeyAlt); break;
         case T_CROP: cropR[2] = c.x; cropR[3] = c.y; break;
+        case T_PCROP:
+            if (pcropDragPart >= 0) { pcropQ[pcropDragPart * 2] = c.x; pcropQ[pcropDragPart * 2 + 1] = c.y; }
+            else if (pcropDragPart == -2) {
+                for (int i = 0; i < 4; ++i) { pcropQ[i * 2] = pcropMoveQ[i * 2] + c.x - pcropMoveStart.x; pcropQ[i * 2 + 1] = pcropMoveQ[i * 2 + 1] + c.y - pcropMoveStart.y; }
+            }
+            break;
         case T_QUICK: if (std::hypot(c.x - quickPts[quickPts.size() - 2], c.y - quickPts.back()) * zoom > 3) { quickPts.push_back(c.x); quickPts.push_back(c.y); } break;
         case T_PENCIL: if (stroke.on) changed(pencilTo(doc, stroke, c.x, c.y, pencilSize, pencilOpacity, brushColour(), false, false)); break;
         case T_RETOUCH: if (stroke.on) changed(retouchTo(doc, stroke, c.x, c.y, rtSize, rtHard, retouchOpts(), false)); break;
@@ -2179,6 +2276,22 @@ static void canvasInput() {
         case T_LASSO: if (lasso.size() >= 6) finishShape(shapePolygon(doc, lasso), modeFromKeys(), "Lasso"); lasso.clear(); break;
         case T_BRUSH: case T_ERASER: case T_PENCIL: case T_RETOUCH: strokeEnd(stroke); break;
         case T_CROP: if (std::fabs(cropR[2] - cropR[0]) < 2 || std::fabs(cropR[3] - cropR[1]) < 2) cropPending = false; break;
+        case T_PCROP:
+            if (pcropDragPart == -1) {
+                if (std::hypot(c.x - dragStart.x, c.y - dragStart.y) * zoom >= 3) {
+                    const float q[8] = {dragStart.x, dragStart.y, c.x, dragStart.y, c.x, c.y, dragStart.x, c.y};
+                    pcropSet(q); pcropClicks.clear();
+                } else {
+                    pcropClicks.push_back(c);
+                    if (pcropClicks.size() == 4) pcropOrder(pcropClicks);
+                }
+            } else if (pcropPending) {
+                const float q[8] = {pcropQ[0], pcropQ[1], pcropQ[2], pcropQ[3], pcropQ[4], pcropQ[5], pcropQ[6], pcropQ[7]};
+                if (pcropValid(q)) pcropSet(q);
+                else pcropPending = false;
+            }
+            pcropDragPart = -1;
+            break;
         case T_QUICK: quickSelectStroke(); break;
         case T_PEN:
             if (penMode() == PN_FREE && penFree.size() >= 6) {   // the dragged line as a smooth path (a point every few pixels)
@@ -2239,6 +2352,10 @@ static void canvasInput() {
     if (t == T_CROP && cropPending && !dragging && dlg == D_NONE) {   // Enter crops, Escape lets it go
         if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) applyCrop();
         else if (ImGui::IsKeyPressed(ImGuiKey_Escape)) cropPending = false;
+    }
+    if (t == T_PCROP && !dragging && dlg == D_NONE) {
+        if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) applyPerspectiveCrop();
+        else if (ImGui::IsKeyPressed(ImGuiKey_Escape)) pcropCancel();
     }
     if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) && t != T_HAND && !ImGui::IsMouseDown(ImGuiMouseButton_Middle)) panning = false;
 }
@@ -2416,13 +2533,26 @@ static void drawCanvas() {
             dl->AddLine(ImVec2(q0.x + (q3.x-q0.x)*t, q0.y + (q3.y-q0.y)*t), ImVec2(q1.x + (q2.x-q1.x)*t, q1.y + (q2.y-q1.y)*t), IM_COL32(255, 255, 255, 90));
         }
     }
+    if (tool == T_PCROP && pcropPending) {
+        ImVec2 q[4];
+        for (int i = 0; i < 4; ++i) q[i] = toScreen(pcropQ[i * 2], pcropQ[i * 2 + 1]);
+        const ImU32 edge = pcropValid(pcropQ) ? IM_COL32(255, 255, 255, 235) : IM_COL32(255, 70, 70, 245);
+        dl->AddPolyline(q, 4, edge, ImDrawFlags_Closed, 1.7f);
+        for (int k = 1; k < 4; ++k) {
+            const float t = k / 4.0f;
+            dl->AddLine(ImVec2(q[0].x + (q[1].x - q[0].x) * t, q[0].y + (q[1].y - q[0].y) * t), ImVec2(q[3].x + (q[2].x - q[3].x) * t, q[3].y + (q[2].y - q[3].y) * t), IM_COL32(255, 255, 255, 100));
+            dl->AddLine(ImVec2(q[0].x + (q[3].x - q[0].x) * t, q[0].y + (q[3].y - q[0].y) * t), ImVec2(q[1].x + (q[2].x - q[1].x) * t, q[1].y + (q[2].y - q[1].y) * t), IM_COL32(255, 255, 255, 100));
+        }
+        for (const ImVec2 p : q) { dl->AddCircleFilled(p, 5, C_PINK, 16); dl->AddCircle(p, 6, IM_COL32(255, 255, 255, 240), 16); }
+    } else if (tool == T_PCROP && dragging) {
+        const ImVec2 q[4] = {toScreen(dragStart.x, dragStart.y), toScreen(dragNow.x, dragStart.y), toScreen(dragNow.x, dragNow.y), toScreen(dragStart.x, dragNow.y)};
+        dl->AddPolyline(q, 4, IM_COL32(255, 255, 255, 235), ImDrawFlags_Closed, 1.5f);
+    } else if (tool == T_PCROP && !pcropClicks.empty()) {
+        for (size_t i = 1; i < pcropClicks.size(); ++i) dl->AddLine(toScreen(pcropClicks[i - 1].x, pcropClicks[i - 1].y), toScreen(pcropClicks[i].x, pcropClicks[i].y), C_PINK, 1.5f);
+        for (ImVec2 p : pcropClicks) dl->AddCircleFilled(toScreen(p.x, p.y), 4, C_PINK, 12);
+    }
     if (tool == T_OBJECT && dragging) {
-        const ImVec2 q[4] = {
-            toScreen(dragStart.x, dragStart.y),
-            toScreen(dragNow.x, dragStart.y),
-            toScreen(dragNow.x, dragNow.y),
-            toScreen(dragStart.x, dragNow.y)
-        };
+        const ImVec2 q[4] = {toScreen(dragStart.x, dragStart.y), toScreen(dragNow.x, dragStart.y), toScreen(dragNow.x, dragNow.y), toScreen(dragStart.x, dragNow.y)};
         dl->AddPolyline(q, 4, C_PINK, ImDrawFlags_Closed, 1.5f);
     }
     if (tool == T_QUICK && ImGui::IsWindowHovered()) {
@@ -2489,7 +2619,7 @@ static int ltTool(int id) {
     case Toolbar::MAGNETIC_LASSO: return T_MAGNETIC;
     case Toolbar::PENCIL: return T_PENCIL; case Toolbar::ZOOM: return T_ZOOM;
     case Toolbar::SINGLE_ROW_MARQUEE: return T_ROW; case Toolbar::SINGLE_COLUMN_MARQUEE: return T_COL;
-    case Toolbar::CROP: return T_CROP; case Toolbar::GRADIENT: return T_GRADIENT; case Toolbar::MAGIC_ERASER: return T_MAGIC_ERASER;
+    case Toolbar::CROP: return T_CROP; case Toolbar::PERSPECTIVE_CROP: return T_PCROP; case Toolbar::GRADIENT: return T_GRADIENT; case Toolbar::MAGIC_ERASER: return T_MAGIC_ERASER;
     case Toolbar::BLUR: case Toolbar::SHARPEN: case Toolbar::SMUDGE: case Toolbar::DODGE: case Toolbar::BURN: case Toolbar::SPONGE:
     case Toolbar::CLONE_STAMP: case Toolbar::BACKGROUND_ERASER: return T_RETOUCH;
     case Toolbar::PATTERN_STAMP: case Toolbar::HISTORY_BRUSH: case Toolbar::ART_HISTORY_BRUSH: case Toolbar::COLOR_REPLACEMENT: case Toolbar::MIXER_BRUSH: return T_RETOUCH;
@@ -2666,6 +2796,18 @@ static void optionsBar() {
         if (ImGui::Button("Cancel", ImVec2(70, 0))) cropPending = false; ImGui::SameLine(0, 14);
         ImGui::TextDisabled("Drag what to keep; Enter or double-click crops, Escape cancels");
         break;
+    case T_PCROP: {
+        int width = pcropOutW, height = pcropOutH;
+        if (sliderI("Width", &width, 1, 16384)) { pcropOutW = width; pcropCustomSize = true; }
+        ImGui::SameLine(0, 10);
+        if (sliderI("Height", &height, 1, 16384)) { pcropOutH = height; pcropCustomSize = true; }
+        ImGui::SameLine(0, 10); ImGui::BeginDisabled(!pcropPending || !pcropValid(pcropQ));
+        if (ImGui::Button("Apply", ImVec2(70, 0))) applyPerspectiveCrop();
+        ImGui::EndDisabled(); ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(70, 0))) pcropCancel(); ImGui::SameLine(0, 10);
+        ImGui::TextDisabled("Drag a box or click four corners; drag corners to adjust, Enter applies, Escape cancels");
+        break;
+    }
     case T_ZOOM: ImGui::TextDisabled("Click zooms in, Alt+click zooms out; the wheel zooms too"); break;
     case T_ROTATE:
         ImGui::TextDisabled("Drag around the canvas centre to rotate the view; Shift snaps to 15 degrees; double-click or Escape resets");
@@ -3714,6 +3856,19 @@ void script(const std::string& what) {
         const size_t points = magneticPts.size();
         magneticFinish();
         fprintf(stderr, "magnetic-lasso: 16 live-wire anchors traced in %zu path points\n", points);
+        return;
+    }
+    if (what == "perspective-crop-preview" || what == "perspective-crop") {
+        Toolbar::select(Toolbar::PERSPECTIVE_CROP); syncTool();
+        const float q[8] = {doc.w * 0.22f, doc.h * 0.18f, doc.w * 0.78f, doc.h * 0.12f,
+                            doc.w * 0.84f, doc.h * 0.82f, doc.w * 0.16f, doc.h * 0.76f};
+        pcropSet(q);
+        if (what == "perspective-crop") {
+            applyPerspectiveCrop();
+            fprintf(stderr, "perspective-crop: warped the visible image to %d x %d pixels\n", doc.w, doc.h);
+        } else {
+            fprintf(stderr, "perspective-crop-preview: four-corner homography preview\n");
+        }
         return;
     }
     if (what == "about") { scriptDlg = D_ABOUT; return; }   // Help > About: the splash art
