@@ -66,10 +66,10 @@ void draw(ImDrawList* dl, float x, float y, const char* status, float progress) 
     layerPoints(ImVec2(cx + 18, y + 105 - 24), lw, lh, lean, pts);
     for (int i = 0; i < 4; ++i) dashed(dl, pts[i], pts[(i + 1) % 4], GHOST);
 
-    // the name: "Layer" in the text colour, "Tack" in pink
+    // the name: "Chim" in the text colour, "era" in pink
     const float ts = 50, tx = x + 40, ty = y + 92;
-    text(dl, titleFont, ts, ImVec2(tx, ty), TEXT, "Layer");
-    text(dl, titleFont, ts, ImVec2(tx + textWidth(titleFont, ts, "Layer"), ty), PINK, "Tack");
+    text(dl, titleFont, ts, ImVec2(tx, ty), TEXT, "Chim");
+    text(dl, titleFont, ts, ImVec2(tx + textWidth(titleFont, ts, "Chim"), ty), PINK, "era");
     text(dl, nullptr, 16, ImVec2(tx + 2, ty + 62), DIM, "Version " LT_VERSION);
     text(dl, nullptr, 16, ImVec2(tx + 2, ty + 84), DIM, "An image editor by Cursed Entertainment");
 
