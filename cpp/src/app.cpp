@@ -1663,78 +1663,166 @@ static void applyCrop() {
     if (r.clip(doc.w, doc.h).empty()) return;
     remember("Crop"); cropCanvas(doc, r, cropDelete); changed(); selChanged(); fitNext = true;
 }
+// Check that the four corners make a nondegenerate convex quadrilateral.
 static bool pcropValid(const float q[8]) {
     double area = 0;
     for (int i = 0; i < 4; ++i) {
         const int j = (i + 1) % 4, k = (i + 2) % 4;
         const double ax = q[j * 2] - q[i * 2], ay = q[j * 2 + 1] - q[i * 2 + 1];
         const double bx = q[k * 2] - q[j * 2], by = q[k * 2 + 1] - q[j * 2 + 1];
-        if (ax * by - ay * bx <= 1e-3 * std::hypot(ax, ay) * std::hypot(bx, by)) return false;
+        if (ax * by - ay * bx <= 1e-3 * std::hypot(ax, ay) * std::hypot(bx, by))
+            return false;
         area += q[i * 2] * q[j * 2 + 1] - q[j * 2] * q[i * 2 + 1];
     }
     return std::isfinite(area) && area >= 2.0;
 }
+// Solve the projective map from a unit rectangle to the selected corners.
 static bool perspectiveHomography(const float q[8], double out[8]) {
     double a[8][9] = {};
     for (int i = 0; i < 4; ++i) {
         const double u = i == 1 || i == 2 ? 1.0 : 0.0, v = i >= 2 ? 1.0 : 0.0;
         const double x = q[i * 2], y = q[i * 2 + 1];
-        a[i * 2][0] = u; a[i * 2][1] = v; a[i * 2][2] = 1; a[i * 2][6] = -u * x; a[i * 2][7] = -v * x; a[i * 2][8] = x;
-        a[i * 2 + 1][3] = u; a[i * 2 + 1][4] = v; a[i * 2 + 1][5] = 1; a[i * 2 + 1][6] = -u * y; a[i * 2 + 1][7] = -v * y; a[i * 2 + 1][8] = y;
+        a[i * 2][0] = u;
+        a[i * 2][1] = v;
+        a[i * 2][2] = 1;
+        a[i * 2][6] = -u * x;
+        a[i * 2][7] = -v * x;
+        a[i * 2][8] = x;
+        a[i * 2 + 1][3] = u;
+        a[i * 2 + 1][4] = v;
+        a[i * 2 + 1][5] = 1;
+        a[i * 2 + 1][6] = -u * y;
+        a[i * 2 + 1][7] = -v * y;
+        a[i * 2 + 1][8] = y;
     }
     for (int c = 0; c < 8; ++c) {
         int pivot = c;
-        for (int r = c + 1; r < 8; ++r) if (std::fabs(a[r][c]) > std::fabs(a[pivot][c])) pivot = r;
-        if (std::fabs(a[pivot][c]) < 1e-10) return false;
-        if (pivot != c) for (int j = c; j < 9; ++j) std::swap(a[c][j], a[pivot][j]);
-        const double div = a[c][c]; for (int j = c; j < 9; ++j) a[c][j] /= div;
-        for (int r = 0; r < 8; ++r) if (r != c) { const double f = a[r][c]; for (int j = c; j < 9; ++j) a[r][j] -= f * a[c][j]; }
+        for (int r = c + 1; r < 8; ++r)
+            if (std::fabs(a[r][c]) > std::fabs(a[pivot][c]))
+                pivot = r;
+        if (std::fabs(a[pivot][c]) < 1e-10)
+            return false;
+        if (pivot != c)
+            for (int j = c; j < 9; ++j)
+                std::swap(a[c][j], a[pivot][j]);
+        const double div = a[c][c];
+        for (int j = c; j < 9; ++j)
+            a[c][j] /= div;
+        for (int r = 0; r < 8; ++r)
+            if (r != c) {
+                const double f = a[r][c];
+                for (int j = c; j < 9; ++j)
+                    a[r][j] -= f * a[c][j];
+            }
     }
-    for (int i = 0; i < 8; ++i) out[i] = a[i][8];
+    for (int i = 0; i < 8; ++i)
+        out[i] = a[i][8];
     return true;
 }
+// Store a crop quadrilateral and choose output dimensions from its edge lengths.
 static void pcropSet(const float q[8]) {
-    memcpy(pcropQ, q, sizeof pcropQ); pcropPending = true; pcropCustomSize = false;
+    memcpy(pcropQ, q, sizeof pcropQ);
+    pcropPending = true;
+    pcropCustomSize = false;
     auto len = [&](int a, int b) { return std::hypot(q[a] - q[b], q[a + 1] - q[b + 1]); };
     pcropOutW = std::clamp((int)std::lround((len(0, 2) + len(6, 4)) * 0.5), 1, 16384);
     pcropOutH = std::clamp((int)std::lround((len(0, 6) + len(2, 4)) * 0.5), 1, 16384);
 }
+// Test whether a canvas point falls inside the current crop quadrilateral.
 static bool pcropInside(ImVec2 p) {
-    for (int i = 0; i < 4; ++i) { const int j = (i + 1) % 4; if ((pcropQ[j*2]-pcropQ[i*2])*(p.y-pcropQ[i*2+1])-(pcropQ[j*2+1]-pcropQ[i*2+1])*(p.x-pcropQ[i*2]) < 0) return false; }
+    for (int i = 0; i < 4; ++i) {
+        const int j = (i + 1) % 4;
+        if ((pcropQ[j * 2] - pcropQ[i * 2]) * (p.y - pcropQ[i * 2 + 1]) -
+                (pcropQ[j * 2 + 1] - pcropQ[i * 2 + 1]) * (p.x - pcropQ[i * 2]) <
+            0)
+            return false;
+    }
     return true;
 }
+// Put four clicked corners into clockwise order and start the preview.
 static void pcropOrder(std::vector<ImVec2> points) {
-    ImVec2 centre(0,0); for (auto p : points) { centre.x += p.x / 4; centre.y += p.y / 4; }
-    std::sort(points.begin(), points.end(), [&](ImVec2 a, ImVec2 b) { return std::atan2(a.y-centre.y,a.x-centre.x) < std::atan2(b.y-centre.y,b.x-centre.x); });
-    auto first = std::min_element(points.begin(), points.end(), [](ImVec2 a, ImVec2 b) { return a.x+a.y < b.x+b.y; });
-    std::rotate(points.begin(), first, points.end()); const float q[8] = {points[0].x,points[0].y,points[1].x,points[1].y,points[2].x,points[2].y,points[3].x,points[3].y};
-    pcropSet(q); pcropClicks.clear();
-}
-static void pcropCancel() { pcropPending = false; pcropClicks.clear(); pcropDragPart = -1; pcropCustomSize = false; }
-static void applyPerspectiveCrop() {
-    if (!pcropPending) return;
-    if (!pcropValid(pcropQ)) { say("The four corners must make a convex quadrilateral"); return; }
-    double h[8]; if (!perspectiveHomography(pcropQ, h)) { say("Those corners do not make a usable perspective"); return; }
-    const int w = std::clamp(pcropOutW, 1, 16384), ht = std::clamp(pcropOutH, 1, 16384);
-    if ((int64_t)w * ht > 100'000'000) { say("Perspective Crop output is too large"); return; }
-    Image src; composite(doc, src, {0, 0, doc.w, doc.h}, false); Image out(w, ht);
-    for (int y = 0; y < ht; ++y) for (int x = 0; x < w; ++x) {
-        const double u = (x + 0.5) / w, v = (y + 0.5) / ht, z = h[6] * u + h[7] * v + 1.0;
-        if (std::fabs(z) < 1e-10) continue;
-        const float sx = (float)((h[0] * u + h[1] * v + h[2]) / z), sy = (float)((h[3] * u + h[4] * v + h[5]) / z);
-        if (sx < 0 || sy < 0 || sx >= src.w || sy >= src.h) continue;
-        const int x0 = (int)sx, y0 = (int)sy, x1 = std::min(x0 + 1, src.w - 1), y1 = std::min(y0 + 1, src.h - 1);
-        const float fx = sx - x0, fy = sy - y0; uint8_t* d = out.at(x, y);
-        for (int c = 0; c < 4; ++c) {
-            const float a = src.at(x0, y0)[c] * (1 - fx) + src.at(x1, y0)[c] * fx;
-            const float b = src.at(x0, y1)[c] * (1 - fx) + src.at(x1, y1)[c] * fx;
-            d[c] = (uint8_t)std::lround(a * (1 - fy) + b * fy);
-        }
+    ImVec2 centre(0, 0);
+    for (auto p : points) {
+        centre.x += p.x / 4;
+        centre.y += p.y / 4;
     }
-    remember("Perspective Crop"); doc.w = w; doc.h = ht; doc.layers.clear(); doc.active = 0; doc.sel.clear();
-    Layer result = emptyLayer(doc, "Perspective Crop"); result.img = std::move(out); result.x = result.y = 0; doc.layers.push_back(std::move(result));
-    doc.samplers.clear(); doc.counts.clear(); doc.notes.clear(); doc.hasRuler = false; doc.workPath.clear(); doc.historyState.reset();
-    pcropCancel(); changed(); selChanged(); fitNext = true; say("Perspective Crop flattened the visible image");
+    std::sort(points.begin(), points.end(), [&](ImVec2 a, ImVec2 b) {
+        return std::atan2(a.y - centre.y, a.x - centre.x) < std::atan2(b.y - centre.y, b.x - centre.x);
+    });
+    auto first =
+        std::min_element(points.begin(), points.end(), [](ImVec2 a, ImVec2 b) { return a.x + a.y < b.x + b.y; });
+    std::rotate(points.begin(), first, points.end());
+    const float q[8] = {points[0].x, points[0].y, points[1].x, points[1].y,
+                        points[2].x, points[2].y, points[3].x, points[3].y};
+    pcropSet(q);
+    pcropClicks.clear();
+}
+// Clear the current crop preview and any incomplete corner set.
+static void pcropCancel() {
+    pcropPending = false;
+    pcropClicks.clear();
+    pcropDragPart = -1;
+    pcropCustomSize = false;
+}
+// Warp the visible composite into a new flattened image using the chosen homography.
+static void applyPerspectiveCrop() {
+    if (!pcropPending)
+        return;
+    if (!pcropValid(pcropQ)) {
+        say("The four corners must make a convex quadrilateral");
+        return;
+    }
+    double h[8];
+    if (!perspectiveHomography(pcropQ, h)) {
+        say("Those corners do not make a usable perspective");
+        return;
+    }
+    const int w = std::clamp(pcropOutW, 1, 16384), ht = std::clamp(pcropOutH, 1, 16384);
+    if ((int64_t)w * ht > 100'000'000) {
+        say("Perspective Crop output is too large");
+        return;
+    }
+    Image src;
+    composite(doc, src, {0, 0, doc.w, doc.h}, false);
+    Image out(w, ht);
+    for (int y = 0; y < ht; ++y)
+        for (int x = 0; x < w; ++x) {
+            const double u = (x + 0.5) / w, v = (y + 0.5) / ht, z = h[6] * u + h[7] * v + 1.0;
+            if (std::fabs(z) < 1e-10)
+                continue;
+            const float sx = (float)((h[0] * u + h[1] * v + h[2]) / z), sy = (float)((h[3] * u + h[4] * v + h[5]) / z);
+            if (sx < 0 || sy < 0 || sx >= src.w || sy >= src.h)
+                continue;
+            const int x0 = (int)sx, y0 = (int)sy, x1 = std::min(x0 + 1, src.w - 1), y1 = std::min(y0 + 1, src.h - 1);
+            const float fx = sx - x0, fy = sy - y0;
+            uint8_t *d = out.at(x, y);
+            for (int c = 0; c < 4; ++c) {
+                const float a = src.at(x0, y0)[c] * (1 - fx) + src.at(x1, y0)[c] * fx;
+                const float b = src.at(x0, y1)[c] * (1 - fx) + src.at(x1, y1)[c] * fx;
+                d[c] = (uint8_t)std::lround(a * (1 - fy) + b * fy);
+            }
+        }
+    remember("Perspective Crop");
+    doc.w = w;
+    doc.h = ht;
+    doc.layers.clear();
+    doc.active = 0;
+    doc.sel.clear();
+    Layer result = emptyLayer(doc, "Perspective Crop");
+    result.img = std::move(out);
+    result.x = result.y = 0;
+    doc.layers.push_back(std::move(result));
+    doc.samplers.clear();
+    doc.counts.clear();
+    doc.notes.clear();
+    doc.hasRuler = false;
+    doc.workPath.clear();
+    doc.historyState.reset();
+    pcropCancel();
+    changed();
+    selChanged();
+    fitNext = true;
+    say("Perspective Crop flattened the visible image");
 }
 // ---------- the Pen tools (PhotoCraft's paths): Pen, Freeform Pen, Curvature Pen, Add / Delete Anchor, Convert
 // Point, Path Selection and Direct Selection, on the document's work path ----------
