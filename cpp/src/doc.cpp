@@ -302,7 +302,12 @@ void renderFill(const Doc& d, Layer& l) {
     }
 }
 void addTextLayer(Doc& d, const Text& t, const Fill& f) {
-    std::string name = t.str.substr(0, t.str.find('\n'));
+    size_t first = t.str.find_first_not_of(" \t\r\n");
+    std::string name;
+    if (first != std::string::npos) {
+        const size_t end = t.str.find_first_of("\r\n", first);
+        name = t.str.substr(first, end == std::string::npos ? std::string::npos : end - first);
+    }
     if (name.size() > 30) name = name.substr(0, 30);
     Layer l = emptyLayer(d, name.empty() ? "Text" : name);
     l.fill = f; l.text = t; l.hasText = true;

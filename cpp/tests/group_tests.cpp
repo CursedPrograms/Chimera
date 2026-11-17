@@ -263,6 +263,15 @@ static bool typeWordBoundariesMatchPhotoCraft() {
         textWordBoundary("hello",0,false)==0;
 }
 
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/tests.rs a_name_from_text_after_blank_lines_keeps_following_the_text).
+static bool textLayerNameSkipsLeadingBlankLines() {
+    Doc d=newDoc(20,20,false); Text t; t.str="\n\nTitle"; Fill f; f.kind=FILL_SOLID;
+    addTextLayer(d,t,f);
+    if(d.cur().name!="Title") return false;
+    t.str="\nSubtitle"; addTextLayer(d,t,f);
+    return d.cur().name=="Subtitle";
+}
+
 int runSelfTests() {
     struct Test { const char* name; bool (*run)(); };
     static const Test tests[] = {
@@ -281,6 +290,7 @@ int runSelfTests() {
         {"text path placement respects open ends and closed seams", textPathPlacementRangeBehaves},
         {"rich text runs normalize UTF-8 and persist", richTextRunsNormalizeAndPersist},
         {"type tool word boundaries", typeWordBoundariesMatchPhotoCraft},
+        {"text layer name skips leading blank lines", textLayerNameSkipsLeadingBlankLines},
     };
     int failed = 0;
     for (const Test& test : tests) {
