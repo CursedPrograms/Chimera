@@ -499,6 +499,7 @@ bool openDoc(const std::string& path, Doc& d, std::string& err) {
                 if (!l.adj.load(std::string(ab.begin(), ab.end()))) { err = "An adjustment layer in the project is damaged"; return false; }
             }
             l.clip = (flags & (1u << 13)) != 0;
+            l.frame = (flags & (1u << 17)) != 0;
             if (flags & (1u << 14)) {   // a fill layer's settings
                 auto fb = r.bytes();
                 if (!l.fill.load(std::string(fb.begin(), fb.end()))) { err = "A fill layer in the project is damaged"; return false; }
@@ -626,7 +627,7 @@ bool saveProject(const Doc& d, const std::string& path, std::string& err) {
         putBytes(o, (const uint8_t*)l.name.data(), l.name.size());
         putU32(o, (uint32_t)l.x); putU32(o, (uint32_t)l.y);
         putF(o, l.opacity); putU32(o, l.blend);
-        putU32(o, (l.visible ? 1 : 0) | (l.hasMask ? 2 : 0) | (l.maskOn ? 4 : 0) | ((uint32_t)(l.label & 15) << 8) | (l.isAdjust() ? 1u << 12 : 0) | (l.clip ? 1u << 13 : 0) | (l.isFill() ? 1u << 14 : 0) | (l.isShape() ? 1u << 15 : 0) | (l.isText() ? 1u << 16 : 0));
+        putU32(o, (l.visible ? 1 : 0) | (l.hasMask ? 2 : 0) | (l.maskOn ? 4 : 0) | ((uint32_t)(l.label & 15) << 8) | (l.isAdjust() ? 1u << 12 : 0) | (l.clip ? 1u << 13 : 0) | (l.isFill() ? 1u << 14 : 0) | (l.isShape() ? 1u << 15 : 0) | (l.isText() ? 1u << 16 : 0) | (l.frame ? 1u << 17 : 0));
         std::vector<uint8_t> png;
         stbi_write_png_to_func(toVec, &png, l.img.w, l.img.h, 4, l.img.px.data(), l.img.w * 4);
         putBytes(o, png.data(), png.size());

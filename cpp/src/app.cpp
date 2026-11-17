@@ -109,7 +109,7 @@ static std::string toast; static double toastUntil = 0;
 static void magneticClear();
 
 enum Tool { T_MOVE, T_RECT, T_ELLIPSE, T_LASSO, T_POLY, T_MAGNETIC, T_WAND, T_BRUSH, T_ERASER, T_BUCKET, T_DROPPER, T_HAND, T_ROTATE,
-            T_PENCIL, T_ZOOM, T_ROW, T_COL, T_CROP, T_PCROP, T_SLICE, T_SLICE_SELECT, T_GRADIENT, T_MAGIC_ERASER, T_RETOUCH, T_QUICK, T_OBJECT, T_REDEYE, T_HEAL, T_SHAPE, T_MARK, T_TYPE, T_PEN, T_COUNT,
+            T_PENCIL, T_ZOOM, T_ROW, T_COL, T_CROP, T_PCROP, T_SLICE, T_SLICE_SELECT, T_FRAME, T_GRADIENT, T_MAGIC_ERASER, T_RETOUCH, T_QUICK, T_OBJECT, T_REDEYE, T_HEAL, T_SHAPE, T_MARK, T_TYPE, T_PEN, T_COUNT,
             T_NONE = T_COUNT };   // T_NONE: a tool on the strip Chimera doesn't have yet
 static int tool = T_BRUSH;
 static uint8_t fg[4] = {0, 0, 0, 255}, bgc[4] = {255, 255, 255, 255};   // black on white, as PhotoCraft (D)
@@ -136,6 +136,7 @@ static ImVec2 pcropMoveStart; static float pcropMoveQ[8] = {0};
 static int sliceActive = -1;
 static Rect sliceStartRect;
 static bool sliceDidMove = false;
+static bool frameEllipse = false;
 static float quickSize = 30; static std::vector<float> quickPts;     // the Quick Selection brush and its stroke
 static float magneticWidth = 10, magneticContrast = 10, magneticFrequency = 57;
 static std::vector<Magnetic::Point> magneticPts, magneticTrail, magneticLive;
@@ -409,16 +410,12 @@ bool open(const std::string& path) {
     return true;
 }
 
+static void addPlacedImage(Image image, const std::string& name);
+// Load an image and route it through the same placement path used by Frame Tool.
 static void placeAsLayer(const std::string& path) {
-    Image img; std::string err;
-    if (!loadImage(path, img, err)) { say(err); return; }
-    remember("Place");
-    Layer l;
-    l.name = u8path(path).stem().u8string();
-    l.x = (doc.w - img.w) / 2; l.y = (doc.h - img.h) / 2;
-    l.img = std::move(img);
-    addLayer(doc, std::move(l));
-    changed();
+    Image image; std::string err;
+    if (!loadImage(path, image, err)) { say(err); return; }
+    addPlacedImage(std::move(image), u8path(path).stem().u8string());
 }
 
 void dropFile(const std::string& path) {
@@ -1881,6 +1878,7 @@ static Layer warpPerspectiveLayer(const Doc &sourceDoc, Layer source, const doub
         }
     out.mask = warpLayerMask(source, h, w, ht);
     if (rasterize) {
+        out.frame = false;
         out.fill = Fill{};
         out.shape = Shape{};
         out.hasText = false;
@@ -2044,14 +2042,81 @@ static std::vector<Rect> autoSliceRects() {
 // Add one clipped user slice and select it for editing.
 static bool createSlice(Rect r) {
     r = r.clip(doc.w, doc.h);
-    if (r.empty()) return false;
+    if (r.empty())
+        return false;
     int id = 1;
-    for (const Slice& s : doc.slices) id = std::max(id, s.id + 1);
+    for (const Slice &s : doc.slices)
+        id = std::max(id, s.id + 1);
     remember("Create Slice");
     doc.slices.push_back({id, r, "Slice " + std::to_string(id)});
     sliceActive = (int)doc.slices.size() - 1;
     changed();
     return true;
+}
+// Create a vector placeholder whose alpha also clips the image placed above it.
+static bool createFrame(Rect rect) {
+    rect = rect.clip(doc.w, doc.h);
+    if (rect.x1 - rect.x0 < 8 || rect.y1 - rect.y0 < 8)
+        return false;
+    Shape shape;
+    shape.kind = frameEllipse ? SHAPE_ELLIPSE : SHAPE_RECT;
+    shape.x0 = (float)rect.x0;
+    shape.y0 = (float)rect.y0;
+    shape.x1 = (float)rect.x1;
+    shape.y1 = (float)rect.y1;
+    shape.strokeOn = true;
+    shape.strokeWidth = 3;
+    shape.stroke[0] = 0.0f;
+    shape.stroke[1] = 0.482f;
+    shape.stroke[2] = 0.718f;
+    Fill placeholder;
+    placeholder.kind = FILL_SOLID;
+    placeholder.colour[0] = placeholder.colour[1] = placeholder.colour[2] = 0.16f;
+    int number = 1;
+    for (const Layer &layer : doc.layers)
+        if (layer.frame)
+            ++number;
+    remember("Create Frame");
+    addShapeLayer(doc, shape, placeholder);
+    doc.cur().frame = true;
+    doc.cur().name = "Frame " + std::string(shapeName(shape.kind)) + " " + std::to_string(number);
+    changed();
+    return true;
+}
+// Place an image into the active frame without tying later frame edits to image resampling.
+static void addPlacedImage(Image image, const std::string &name) {
+    const bool intoFrame = !doc.layers.empty() && doc.cur().frame && doc.cur().isShape();
+    Layer layer;
+    layer.name = name;
+    if (intoFrame) {
+        const Shape &frame = doc.cur().shape;
+        const int x0 = (int)std::floor(std::min(frame.x0, frame.x1)),
+                  y0 = (int)std::floor(std::min(frame.y0, frame.y1));
+        const int fw = std::max(1, (int)std::ceil(std::fabs(frame.x1 - frame.x0)));
+        const int fh = std::max(1, (int)std::ceil(std::fabs(frame.y1 - frame.y0)));
+        const double scale = std::max((double)fw / image.w, (double)fh / image.h);
+        const int sw = std::clamp((int)std::lround(image.w * scale), 1, 16384);
+        const int sh = std::clamp((int)std::lround(image.h * scale), 1, 16384);
+        if ((int64_t)sw * sh > 100'000'000) {
+            say("That image is too large to place in this frame");
+            return;
+        }
+        Doc resized = newDoc(image.w, image.h, false);
+        resized.layers[0].img = std::move(image);
+        resizeImage(resized, sw, sh);
+        layer.img = std::move(resized.layers[0].img);
+        layer.x = x0 + (fw - sw) / 2;
+        layer.y = y0 + (fh - sh) / 2;
+        layer.clip = true;
+    } else {
+        layer.x = (doc.w - image.w) / 2;
+        layer.y = (doc.h - image.h) / 2;
+        layer.img = std::move(image);
+    }
+    remember("Place");
+    addLayer(doc, std::move(layer));
+    changed();
+    say(intoFrame ? "Image placed and clipped to the frame" : "Image placed as a layer");
 }
 // Replace Windows-forbidden filename characters and remove trailing dots or spaces.
 static std::string safeSliceFilename(const std::string& input) {
@@ -2462,6 +2527,8 @@ static void canvasInput() {
             if (sliceActive >= 0) { remember("Move Slice"); sliceStartRect = doc.slices[sliceActive].rect; }
             break;
         }
+        case T_FRAME:
+            break;
         case T_GRADIENT: case T_OBJECT: break;   // done when the drag ends
         case T_QUICK: quickPts = {c.x, c.y}; break;
         case T_REDEYE:
@@ -2613,6 +2680,8 @@ static void canvasInput() {
                 sliceDidMove = dx != 0 || dy != 0;
             }
             break;
+        case T_FRAME:
+            break;
         case T_QUICK: if (std::hypot(c.x - quickPts[quickPts.size() - 2], c.y - quickPts.back()) * zoom > 3) { quickPts.push_back(c.x); quickPts.push_back(c.y); } break;
         case T_PENCIL: if (stroke.on) changed(pencilTo(doc, stroke, c.x, c.y, pencilSize, pencilOpacity, brushColour(), false, false)); break;
         case T_RETOUCH: if (stroke.on) changed(retouchTo(doc, stroke, c.x, c.y, rtSize, rtHard, retouchOpts(), false)); break;
@@ -2698,6 +2767,13 @@ static void canvasInput() {
             break;
         case T_SLICE_SELECT:
             if (sliceActive >= 0 && sliceDidMove) changed();
+            break;
+        case T_FRAME:
+            if (std::fabs(c.x - dragStart.x) >= 8 && std::fabs(c.y - dragStart.y) >= 8) {
+                const Rect r{(int)std::floor(std::min(c.x, dragStart.x)), (int)std::floor(std::min(c.y, dragStart.y)),
+                             (int)std::ceil(std::max(c.x, dragStart.x)), (int)std::ceil(std::max(c.y, dragStart.y))};
+                createFrame(r);
+            }
             break;
         case T_QUICK: quickSelectStroke(); break;
         case T_PEN:
@@ -2980,6 +3056,36 @@ static void drawCanvas() {
             dl->AddPolyline(q, 4, C_PINK, ImDrawFlags_Closed, 1.5f);
         }
     }
+    for (size_t i = 0; i < doc.layers.size(); ++i) {
+        const Layer& layer = doc.layers[i];
+        if (!layer.frame || !layer.isShape()) continue;
+        const std::vector<float> outline = shapeOutline(layer.shape);
+        std::vector<ImVec2> points;
+        for (size_t k = 0; k + 1 < outline.size(); k += 2) points.push_back(toScreen(outline[k], outline[k + 1]));
+        if (points.size() >= 3) dl->AddPolyline(points.data(), (int)points.size(), C_PINK, ImDrawFlags_Closed, 2.0f);
+        bool hasImage = i + 1 < doc.layers.size() && doc.layers[i + 1].clip;
+        if (hasImage || points.empty()) continue;
+        const ImVec2 centre = toScreen((layer.shape.x0 + layer.shape.x1) * 0.5f, (layer.shape.y0 + layer.shape.y1) * 0.5f);
+        const ImVec2 a(centre.x - 18, centre.y - 14), b(centre.x + 18, centre.y + 14);
+        dl->AddRectFilled(a, b, IM_COL32(28, 28, 28, 210), 2);
+        dl->AddRect(a, b, IM_COL32(255, 255, 255, 180), 2);
+        dl->AddLine(ImVec2(a.x + 5, b.y - 5), ImVec2(a.x + 13, a.y + 5), C_PINK, 1.5f);
+        dl->AddLine(ImVec2(a.x + 13, a.y + 5), ImVec2(a.x + 20, b.y - 5), C_PINK, 1.5f);
+        dl->AddText(ImVec2(centre.x + 23, centre.y - 7), IM_COL32(255, 255, 255, 220), "Place image");
+    }
+    if (tool == T_FRAME && dragging) {
+        const ImVec2 q[4] = {toScreen(dragStart.x, dragStart.y), toScreen(dragNow.x, dragStart.y),
+                             toScreen(dragNow.x, dragNow.y), toScreen(dragStart.x, dragNow.y)};
+        if (frameEllipse) {
+            std::vector<ImVec2> ellipse;
+            for (int i = 0; i < 64; ++i) {
+                const float a = i * 6.28318530718f / 64;
+                ellipse.push_back(toScreen((dragStart.x + dragNow.x) * 0.5f + (dragNow.x - dragStart.x) * 0.5f * std::cos(a),
+                                           (dragStart.y + dragNow.y) * 0.5f + (dragNow.y - dragStart.y) * 0.5f * std::sin(a)));
+            }
+            dl->AddPolyline(ellipse.data(), (int)ellipse.size(), C_PINK, ImDrawFlags_Closed, 1.5f);
+        } else dl->AddPolyline(q, 4, C_PINK, ImDrawFlags_Closed, 1.5f);
+    }
     if (tool == T_OBJECT && dragging) {
         const ImVec2 q[4] = {toScreen(dragStart.x, dragStart.y), toScreen(dragNow.x, dragStart.y), toScreen(dragNow.x, dragNow.y), toScreen(dragStart.x, dragNow.y)};
         dl->AddPolyline(q, 4, C_PINK, ImDrawFlags_Closed, 1.5f);
@@ -3049,7 +3155,7 @@ static int ltTool(int id) {
     case Toolbar::PENCIL: return T_PENCIL; case Toolbar::ZOOM: return T_ZOOM;
     case Toolbar::SINGLE_ROW_MARQUEE: return T_ROW; case Toolbar::SINGLE_COLUMN_MARQUEE: return T_COL;
     case Toolbar::CROP: return T_CROP; case Toolbar::PERSPECTIVE_CROP: return T_PCROP;
-    case Toolbar::SLICE: return T_SLICE; case Toolbar::SLICE_SELECT: return T_SLICE_SELECT;
+    case Toolbar::SLICE: return T_SLICE; case Toolbar::SLICE_SELECT: return T_SLICE_SELECT; case Toolbar::FRAME: return T_FRAME;
     case Toolbar::GRADIENT: return T_GRADIENT; case Toolbar::MAGIC_ERASER: return T_MAGIC_ERASER;
     case Toolbar::BLUR: case Toolbar::SHARPEN: case Toolbar::SMUDGE: case Toolbar::DODGE: case Toolbar::BURN: case Toolbar::SPONGE:
     case Toolbar::CLONE_STAMP: case Toolbar::BACKGROUND_ERASER: return T_RETOUCH;
@@ -3287,6 +3393,22 @@ static void optionsBar() {
             ImGui::SameLine(0, 10);
         }
         if (ImGui::Button("Export Slices...")) exportSlices();
+        break;
+    case T_FRAME:
+        if (ImGui::Button("Rectangle")) frameEllipse = false;
+        ImGui::SameLine(0, 5);
+        if (ImGui::Button("Ellipse")) frameEllipse = true;
+        ImGui::SameLine(0, 12);
+        ImGui::TextDisabled(frameEllipse ? "Ellipse mode" : "Rectangle mode");
+        ImGui::SameLine(0, 10);
+        if (ImGui::Button("Place Image...")) {
+            if (doc.cur().frame) {
+                const std::string p = fileDialog(false, OPEN_FILTER, nullptr, "");
+                if (!p.empty()) placeAsLayer(p);
+            } else say("Select or create a frame before placing an image");
+        }
+        ImGui::SameLine(0, 12);
+        ImGui::TextDisabled("Drag a rectangle or ellipse; place an image to clip it inside the frame");
         break;
     case T_ZOOM: ImGui::TextDisabled("Click zooms in, Alt+click zooms out; the wheel zooms too"); break;
     case T_ROTATE:
@@ -4437,6 +4559,33 @@ void script(const std::string& what) {
         } else {
             fprintf(stderr, "slices-preview: %zu user slices and generated auto slices\n", doc.slices.size());
         }
+        return;
+    }
+    if (what == "frame") {
+        Toolbar::select(Toolbar::FRAME);
+        syncTool();
+        frameEllipse = false;
+        createFrame({doc.w / 12, doc.h / 8, doc.w * 5 / 12, doc.h * 7 / 8});
+        Image sample(320, 180);
+        for (int y = 0; y < sample.h; ++y)
+            for (int x = 0; x < sample.w; ++x) {
+                uint8_t *p = sample.at(x, y);
+                p[0] = (uint8_t)(40 + 180 * x / sample.w);
+                p[1] = (uint8_t)(70 + 150 * y / sample.h);
+                p[2] = (uint8_t)(180 - 100 * x / sample.w);
+                p[3] = 255;
+            }
+        addPlacedImage(std::move(sample), "Frame Photo");
+        frameEllipse = true;
+        createFrame({doc.w * 7 / 12, doc.h / 5, doc.w * 11 / 12, doc.h * 4 / 5});
+        std::string err;
+        const std::string project = "cpp/build/frame-roundtrip.chimera";
+        Doc roundTrip;
+        const bool saved = saveProject(doc, project, err) && openDoc(project, roundTrip, err);
+        const bool ok = saved && roundTrip.layers.size() == 4 && roundTrip.layers[1].frame &&
+                        roundTrip.layers[2].clip && roundTrip.layers[3].frame;
+        fprintf(stderr, "frame: %s; two editable frames, clipped image, project round trip=%d\n",
+                ok ? "passed" : err.c_str(), saved);
         return;
     }
     if (what == "about") { scriptDlg = D_ABOUT; return; }   // Help > About: the splash art

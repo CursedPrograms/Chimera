@@ -67,6 +67,7 @@ struct Layer {
     Adjustment adj;                              // an adjustment layer: no pixels of its own, it changes what's below
     bool isAdjust() const { return adj.kind != ADJ_NONE; }
     bool clip = false;                           // a clipping mask: it only shows where the layer below it (its base) does
+    bool frame = false;                           // a shape layer used as an image placeholder and clip base
     Fill fill;                                   // a fill layer (Solid Colour, Gradient): its pixels come from these
     bool isFill() const { return fill.kind != FILL_NONE; }
     Shape shape;                                 // a shape layer (a fill layer only inside its shape, and its stroke)
