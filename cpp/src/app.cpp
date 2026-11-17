@@ -1833,6 +1833,40 @@ static void propertiesPanel() {
     ImGui::Separator();
 }
 
+// a fill layer's settings (Properties): its colour, or its gradient's colours, style, angle and scale
+static void fillPanel() {
+    Layer& l = doc.cur();
+    Fill& f = l.fill;
+    ImGui::TextColored(col4(C_PINK), "PROPERTIES");
+    ImGui::SameLine(); ImGui::TextDisabled("%s", f.kind == FILL_SOLID ? "Color Fill" : "Gradient Fill");
+    ImGui::PushItemWidth(-1);
+    bool ch = false;
+    if (f.kind == FILL_SOLID) ch |= adjColor("##fc", f.colour);
+    else {
+        ImGui::TextUnformatted("From"); ImGui::SameLine(60); ch |= adjColor("##g1", f.colour);
+        ImGui::SameLine(); ImGui::TextUnformatted("to"); ImGui::SameLine(); ch |= adjColor("##g2", f.colour2);
+        int st = f.style;
+        const char* names[GRAD_COUNT]; for (int k = 0; k < GRAD_COUNT; ++k) names[k] = gradStyleName(k);
+        if (ImGui::Combo("##gs", &st, names, GRAD_COUNT)) { remember("Gradient Style"); f.style = st; ch = true; changed(); }
+        ch |= adjSlider("##ga", &f.angle, -180, 180, "Angle %.0f\xc2\xb0");
+        float sc = f.scale * 100;
+        if (adjSlider("##gsc", &sc, 10, 1000, "Scale %.0f%%")) { f.scale = sc / 100; ch = true; }
+        ch |= adjCheck("Reverse", &f.reverse);
+    }
+    ImGui::PopItemWidth();
+    if (ch) { renderFill(doc, l); changed(); }
+    ImGui::Spacing(); ImGui::Separator();
+}
+static void newFillMenu() {
+    if (ImGui::MenuItem("Solid Color...")) { remember("New Fill Layer"); Fill f; f.kind = FILL_SOLID; addFillLayer(doc, f); changed(); }
+    if (ImGui::MenuItem("Gradient...")) { remember("New Fill Layer"); Fill f; f.kind = FILL_GRADIENT; f.colour[0] = f.colour[1] = f.colour[2] = 0; addFillLayer(doc, f); changed(); }
+}
+static void toggleClip() {
+    if (doc.active == 0) return;
+    remember(doc.cur().clip ? "Release Clipping Mask" : "Create Clipping Mask");
+    doc.cur().clip = !doc.cur().clip;
+    changed();
+}
 static void newAdjustmentMenu() {
     for (int k = ADJ_BRIGHTNESS_CONTRAST; k < ADJ_COUNT; ++k) {
         if (k == ADJ_VIBRANCE || k == ADJ_BLACK_WHITE || k == ADJ_INVERT) ImGui::Separator();
@@ -1877,7 +1911,13 @@ static void layersPanel(float height) {
         if (l.visible) { dl->AddEllipse(ImVec2(a.x + 14, a.y + 24), 8, 5, C_TEXT, 0, 16, 1.5f); dl->AddCircleFilled(ImVec2(a.x + 14, a.y + 24), 2.5f, C_TEXT); }
         else dl->AddRect(ImVec2(a.x + 7, a.y + 17), ImVec2(a.x + 21, a.y + 31), C_LINE);
         // the layer's picture; click edits the pixels
-        const ImVec2 tp(a.x + 28, a.y + 4);
+        const float indent = l.clip && i > 0 ? 16.0f : 0.0f;
+        const ImVec2 tp(a.x + 28 + indent, a.y + 4);
+        if (indent > 0) {   // clipped to the layer below: Photoshop's bent arrow
+            const float ax = a.x + 34, ay = a.y + 12;
+            dl->AddLine(ImVec2(ax, ay), ImVec2(ax, ay + 18), C_TEXT, 1.5f);
+            dl->AddTriangleFilled(ImVec2(ax - 4, ay + 14), ImVec2(ax + 4, ay + 14), ImVec2(ax, ay + 20), C_TEXT);
+        }
         if (l.isAdjust()) {   // Photoshop's adjustment sign: a circle, half dark, half light
             const ImVec2 c(tp.x + 20, tp.y + 20);
             dl->AddRectFilled(tp, ImVec2(tp.x + 40, tp.y + 40), C_WELL);
@@ -1888,6 +1928,7 @@ static void layersPanel(float height) {
         ImGui::SetCursorScreenPos(tp);
         if (ImGui::InvisibleButton("px", ImVec2(40, 40))) { doc.active = i; doc.editMask = l.isAdjust() && l.hasMask; if (showMask) { showMask = false; changed(); } }
         if (l.isAdjust() && ImGui::IsItemHovered()) ImGui::SetTooltip("%s adjustment: its settings are in Properties above", adjName(l.adj.kind));
+        if (l.isFill() && ImGui::IsItemHovered()) ImGui::SetTooltip("Fill layer: its colours are in Properties above; paint its mask");
         if (active && !doc.editMask) dl->AddRect(ImVec2(tp.x - 2, tp.y - 2), ImVec2(tp.x + 42, tp.y + 42), C_PINK, 0, 0, 2);
         float nameX = tp.x + 48;
         // the mask: click edits it, Shift+click turns it off, Alt+click shows it
@@ -1993,6 +2034,7 @@ static void menus() {
         if (item("Duplicate Layer", "Ctrl+J")) { remember("Duplicate"); duplicateLayer(doc); changed(); }
         if (item("Delete Layer", nullptr, doc.layers.size() > 1)) { remember("Delete Layer"); deleteLayer(doc); changed(); }
         if (item("Rename Layer...")) openDlg(D_RENAME);
+        if (ImGui::BeginMenu("New Fill Layer")) { newFillMenu(); ImGui::EndMenu(); }
         if (ImGui::BeginMenu("New Adjustment Layer")) { newAdjustmentMenu(); ImGui::EndMenu(); }
         if (ImGui::BeginMenu("Layer Colour")) { labelMenu(); ImGui::EndMenu(); }
         ImGui::Separator();
@@ -2016,6 +2058,7 @@ static void menus() {
             for (int m = 0; m < BM_Count; ++m) { if (blendGroupStart(m)) ImGui::Separator(); if (ImGui::MenuItem(blendName(m), nullptr, doc.cur().blend == m)) { remember("Blend Mode"); doc.cur().blend = m; changed(); } }
             ImGui::EndMenu();
         }
+        if (item(doc.cur().clip ? "Release Clipping Mask" : "Create Clipping Mask", "Alt+Ctrl+G", doc.active > 0)) toggleClip();
         ImGui::Separator();
         if (item("Merge Down", "Ctrl+E", doc.active > 0)) { remember("Merge Down"); mergeDown(doc); changed(); }
         if (item("Merge Visible", "Ctrl+Shift+E")) { remember("Merge Visible"); mergeVisible(doc); changed(); }
@@ -2134,6 +2177,7 @@ static void keys() {
         else if (k(ImGuiKey_T)) openDlg(D_TRANSFORM);
         else if (k(ImGuiKey_R) && alt) { if (doc.hasSel() || doc.cur().hasMask) openDlg(D_REFINE); }
         else if (k(ImGuiKey_J)) { remember("Duplicate"); duplicateLayer(doc); changed(); }
+        else if (k(ImGuiKey_G) && alt) toggleClip();   // Alt+Ctrl+G: Create / Release Clipping Mask
         else if (k(ImGuiKey_E)) { if (shift) { remember("Merge Visible"); mergeVisible(doc); } else { remember("Merge Down"); mergeDown(doc); } changed(); }
         else if (k(ImGuiKey_M)) openDlg(D_CURVES);
         else if (k(ImGuiKey_L)) openDlg(D_LEVELS);
@@ -2197,9 +2241,9 @@ void frame() {
     if (noDoc) { ImGui::SeparatorText("LAYERS"); ImGui::TextDisabled("No picture open yet."); }
     else {
         float props = 0;
-        if (doc.cur().isAdjust()) {
+        if (doc.cur().isAdjust() || doc.cur().isFill()) {
             const float before = ImGui::GetCursorPosY();
-            propertiesPanel();
+            if (doc.cur().isFill()) fillPanel(); else propertiesPanel();
             props = ImGui::GetCursorPosY() - before;
         }
         layersPanel(std::max(120.0f, H - top - optH - statusH - 130 - props));
@@ -2422,6 +2466,22 @@ void script(const std::string& what) {
         combineSel(doc, shapeEllipse(doc, doc.w / 8, doc.h / 8, doc.w / 3, doc.h / 2), SEL_NEW);
         changed(); selChanged();
         Toolbar::select(Toolbar::BRUSH); syncTool();
+    }
+    if (what == "clipfill") {   // tests: a gradient fill clipped to an ellipse, saved as a project and opened again
+        addLayer(doc, emptyLayer(doc, "Shape"));
+        combineSel(doc, shapeEllipse(doc, doc.w / 4, doc.h / 6, doc.w / 2, doc.h * 2 / 3), SEL_NEW);
+        const uint8_t white[4] = {255, 255, 255, 255};
+        fillSelection(doc, white, 1.0f, BM_Normal);
+        deselect();
+        Fill f; f.kind = FILL_GRADIENT; f.style = GRAD_RADIAL; f.colour[0] = 0; f.colour[1] = 0.482f; f.colour[2] = 0.718f; f.colour2[0] = 0.95f; f.colour2[1] = 0.85f; f.colour2[2] = 0.3f;
+        addFillLayer(doc, f);
+        doc.cur().clip = true;
+        std::string err;
+        const std::string tmp = (std::filesystem::temp_directory_path() / "chimera_clipfill.chimera").string();
+        Doc back;
+        if (!saveProject(doc, tmp, err) || !openDoc(tmp, back, err)) { fprintf(stderr, "clipfill: %s\n", err.c_str()); return; }
+        fprintf(stderr, "clipfill: %d layers back, top clip=%d fill=%d style=%d\n", (int)back.layers.size(), back.layers.back().clip ? 1 : 0, back.layers.back().fill.kind, back.layers.back().fill.style);
+        changed();
     }
     if (what == "ops") {
         FILE* tl = fopen("chimera_timing.txt", "w");

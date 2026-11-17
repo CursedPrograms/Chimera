@@ -78,6 +78,73 @@ void moveLayer(Doc& d, int dir) {
     d.dirty = true;
 }
 
+// ---- fill layers
+const char* gradStyleName(int s) {
+    static const char* N[GRAD_COUNT] = {"Linear", "Radial", "Angle", "Reflected", "Diamond"};
+    return s >= 0 && s < GRAD_COUNT ? N[s] : "?";
+}
+std::string Fill::save() const {
+    char b[256];
+    snprintf(b, sizeof b, "fill1 %d %g %g %g %g %g %g %d %g %g %d", kind, colour[0], colour[1], colour[2], colour2[0], colour2[1], colour2[2],
+             style, angle, scale, reverse ? 1 : 0);
+    return b;
+}
+bool Fill::load(const std::string& blob) {
+    int k = 0, st = 0, rv = 0;
+    if (sscanf(blob.c_str(), "fill1 %d %f %f %f %f %f %f %d %f %f %d", &k, &colour[0], &colour[1], &colour[2], &colour2[0], &colour2[1], &colour2[2],
+               &st, &angle, &scale, &rv) != 11) return false;
+    kind = k; style = std::clamp(st, 0, GRAD_COUNT - 1); reverse = rv != 0;
+    return true;
+}
+// where along the gradient a canvas point is (0..1), PhotoCraft's gradient geometry: linear along the angle, radial
+// from the centre, angle round it, reflected (linear mirrored about the centre), diamond (the L1 distance)
+static float gradT(const Fill& f, float x, float y, float w, float h) {
+    const float cx = w / 2, cy = h / 2, a = f.angle * 3.14159265f / 180;
+    const float dx = std::cos(a), dy = -std::sin(a);                       // y down on the canvas
+    const float half = 0.5f * (std::fabs(dx) * w + std::fabs(dy) * h) * std::max(0.1f, f.scale);   // the canvas's extent along the angle
+    const float px = x - cx, py = y - cy;
+    float t = 0;
+    switch (f.style) {
+    case GRAD_RADIAL: t = std::sqrt(px * px + py * py) / half; break;
+    case GRAD_ANGLE: { float ang = std::atan2(-py, px) - a; while (ang < 0) ang += 6.2831853f; while (ang >= 6.2831853f) ang -= 6.2831853f; t = ang / 6.2831853f; break; }
+    case GRAD_REFLECTED: t = std::fabs(px * dx + py * dy) / half; break;
+    case GRAD_DIAMOND: { const float u = px * dx + py * dy, v = -px * dy + py * dx; t = (std::fabs(u) + std::fabs(v)) / half; break; }
+    default: t = ((px * dx + py * dy) / half + 1) / 2; break;
+    }
+    t = std::clamp(t, 0.0f, 1.0f);
+    return f.reverse ? 1 - t : t;
+}
+void renderFill(const Doc& d, Layer& l) {
+    if (!l.isFill()) return;
+    if (l.img.w != d.w || l.img.h != d.h || l.x || l.y) {   // a fill covers the canvas (its mask moves with it)
+        l.img = Image(d.w, d.h);
+        if (l.hasMask && l.mask.size() != (size_t)d.w * d.h) l.mask.assign((size_t)d.w * d.h, 255);
+        l.x = l.y = 0;
+    }
+    const Fill& f = l.fill;
+    for (int y = 0; y < d.h; ++y) {
+        uint8_t* p = l.img.at(0, y);
+        for (int x = 0; x < d.w; ++x, p += 4) {
+            float c[3];
+            if (f.kind == FILL_SOLID) for (int k = 0; k < 3; ++k) c[k] = f.colour[k];
+            else { const float t = gradT(f, x + 0.5f, y + 0.5f, (float)d.w, (float)d.h); for (int k = 0; k < 3; ++k) c[k] = f.colour[k] + (f.colour2[k] - f.colour[k]) * t; }
+            p[0] = to8(c[0]); p[1] = to8(c[1]); p[2] = to8(c[2]); p[3] = 255;
+        }
+    }
+}
+void addFillLayer(Doc& d, const Fill& f) {
+    Layer l = emptyLayer(d, f.kind == FILL_SOLID ? "Color Fill" : "Gradient Fill");
+    l.fill = f;
+    renderFill(d, l);
+    addLayer(d, std::move(l));
+    addMask(d, d.hasSel() ? 2 : 0);
+    d.editMask = false;
+}
+int clipBase(const Doc& d, int i) {
+    while (i > 0 && d.layers[i].clip) --i;
+    return i;
+}
+
 void addAdjustmentLayer(Doc& d, int kind) {
     Layer l = emptyLayer(d, adjName(kind));
     l.adj = Adjustment::make(kind);
@@ -103,7 +170,7 @@ void expandToCanvas(Doc& d, Layer& l) {
 }
 
 // one layer onto a float RGBA buffer covering the rect r (row length r.x1 - r.x0)
-static void drawLayer(const Layer& l, std::vector<float>& buf, Rect r, int mode, float opacity) {
+static void drawLayer(const Layer& l, std::vector<float>& buf, Rect r, int mode, float opacity, const float* cov = nullptr) {
     const int lx0 = std::max(r.x0, l.x), ly0 = std::max(r.y0, l.y);
     const int lx1 = std::min(r.x1, l.x + l.img.w), ly1 = std::min(r.y1, l.y + l.img.h);
     const int rw = r.x1 - r.x0;
@@ -113,7 +180,8 @@ static void drawLayer(const Layer& l, std::vector<float>& buf, Rect r, int mode,
         const uint8_t* p = l.img.at(lx0 - l.x, y - l.y);
         const uint8_t* m = masked ? &l.mask[(size_t)(y - l.y) * l.img.w + (lx0 - l.x)] : nullptr;
         for (int x = lx0; x < lx1; ++x, b += 4, p += 4) {
-            const float mk = m ? *m++ / 255.0f : 1.0f;
+            float mk = m ? *m++ / 255.0f : 1.0f;
+            if (cov) mk *= cov[(size_t)(y - r.y0) * rw + (x - r.x0)];   // clipped: only where its base shows
             if (!p[3] || mk <= 0.0f) continue;
             const float s[4] = {p[0] / 255.0f, p[1] / 255.0f, p[2] / 255.0f, p[3] / 255.0f * mk * opacity};
             compositePixel(mode, b, s, x, y);
@@ -123,7 +191,7 @@ static void drawLayer(const Layer& l, std::vector<float>& buf, Rect r, int mode,
 
 // an adjustment layer over the float buffer: what's below, adjusted, then blended back through the layer's mask and
 // opacity with its blend mode; transparency is left as it was
-static void drawAdjust(const Layer& l, std::vector<float>& buf, Rect r, int mode, float opacity) {
+static void drawAdjust(const Layer& l, std::vector<float>& buf, Rect r, int mode, float opacity, const float* cov = nullptr) {
     const int lx0 = std::max(r.x0, l.x), ly0 = std::max(r.y0, l.y);
     const int lx1 = std::min(r.x1, l.x + l.img.w), ly1 = std::min(r.y1, l.y + l.img.h);
     if (lx1 <= lx0 || ly1 <= ly0) return;
@@ -134,7 +202,8 @@ static void drawAdjust(const Layer& l, std::vector<float>& buf, Rect r, int mode
         float* b = &buf[((size_t)(y - r.y0) * rw + (lx0 - r.x0)) * 4];
         const uint8_t* m = masked ? &l.mask[(size_t)(y - l.y) * l.img.w + (lx0 - l.x)] : nullptr;
         for (int x = lx0; x < lx1; ++x, b += 4) {
-            const float mk = (m ? *m++ / 255.0f : 1.0f) * opacity;
+            float mk = (m ? *m++ / 255.0f : 1.0f) * opacity;
+            if (cov) mk *= cov[(size_t)(y - r.y0) * rw + (x - r.x0)];
             if (b[3] <= 0.0f || mk <= 0.0f) continue;
             float c[3] = {b[0], b[1], b[2]};
             adjApply(l.adj, prep, c, x, y);
@@ -165,11 +234,27 @@ void composite(const Doc& d, Image& out, Rect r, bool showMask) {
     }
     const int rw = r.x1 - r.x0;
     std::vector<float> buf((size_t)rw * (r.y1 - r.y0) * 4, 0.0f);
-    for (const Layer& l : d.layers)
-        if (l.visible && l.opacity > 0.0f) {
-            if (l.isAdjust()) drawAdjust(l, buf, r, l.blend, l.opacity);
-            else drawLayer(l, buf, r, l.blend, l.opacity);
+    std::vector<float> cov;   // the current base's coverage (alpha x mask), for the layers clipped to it
+    bool baseShown = true;
+    for (size_t i = 0; i < d.layers.size(); ++i) {
+        const Layer& l = d.layers[i];
+        if (!l.clip) {
+            baseShown = l.visible && l.opacity > 0.0f;
+            const bool clippedAbove = i + 1 < d.layers.size() && d.layers[i + 1].clip;
+            if (clippedAbove && baseShown) {   // where the base shows: its pixels' alpha (an adjustment's: its mask)
+                cov.assign((size_t)rw * (r.y1 - r.y0), 0.0f);
+                const int lx0 = std::max(r.x0, l.x), ly0 = std::max(r.y0, l.y), lx1 = std::min(r.x1, l.x + l.img.w), ly1 = std::min(r.y1, l.y + l.img.h);
+                for (int y = ly0; y < ly1; ++y)
+                    for (int x = lx0; x < lx1; ++x)
+                        cov[(size_t)(y - r.y0) * rw + (x - r.x0)] = (l.isAdjust() ? 1.0f : l.img.at(x - l.x, y - l.y)[3] / 255.0f) * l.maskAt(x - l.x, y - l.y) / 255.0f;
+            }
         }
+        if (!l.visible || l.opacity <= 0.0f) continue;
+        if (l.clip && (!baseShown || i == 0)) continue;   // a hidden base hides what's clipped to it
+        const float* c = l.clip && i > 0 ? cov.data() : nullptr;
+        if (l.isAdjust()) drawAdjust(l, buf, r, l.blend, l.opacity, c);
+        else drawLayer(l, buf, r, l.blend, l.opacity, c);
+    }
     for (int y = r.y0; y < r.y1; ++y) {
         const float* b = &buf[(size_t)(y - r.y0) * rw * 4];
         uint8_t* o = out.at(r.x0, y);
@@ -216,7 +301,8 @@ static void mergeInto(Doc& d, Layer& bottom, const Layer& top) {
             float b[4] = {q[0] / 255.0f, q[1] / 255.0f, q[2] / 255.0f, q[3] / 255.0f * bottom.opacity};
             const float s[4] = {p[0] / 255.0f, p[1] / 255.0f, p[2] / 255.0f, p[3] / 255.0f * top.maskAt(tx, ty) / 255.0f * top.opacity};
             compositePixel(top.blend, b, s, cx, cy);
-            const float a = bottom.opacity > 0 ? std::min(1.0f, b[3] / bottom.opacity) : b[3];
+            float a = bottom.opacity > 0 ? std::min(1.0f, b[3] / bottom.opacity) : b[3];
+            if (top.clip) a = q[3] / 255.0f;   // clipped: it only ever showed where the base did
             for (int i = 0; i < 3; ++i) q[i] = to8(b[i]);
             q[3] = to8(a);
         }
@@ -234,7 +320,12 @@ void mergeDown(Doc& d) {
 
 void mergeVisible(Doc& d) {
     Layer m = emptyLayer(d, "Merged");
-    for (const Layer& l : d.layers) if (l.visible) mergeInto(d, m, l);
+    {   // what you see, composited (clipping masks, adjustments and all)
+        Doc vis = d;
+        vis.layers.clear();
+        for (const Layer& l : d.layers) if (l.visible) vis.layers.push_back(l);
+        if (!vis.layers.empty()) { vis.layers[0].clip = false; composite(vis, m.img, {0, 0, d.w, d.h}, false); }
+    }
     std::vector<Layer> keep;
     for (Layer& l : d.layers) if (!l.visible) keep.push_back(std::move(l));
     keep.push_back(std::move(m));
@@ -365,6 +456,11 @@ bool openDoc(const std::string& path, Doc& d, std::string& err) {
                 auto ab = r.bytes();
                 if (!l.adj.load(std::string(ab.begin(), ab.end()))) { err = "An adjustment layer in the project is damaged"; return false; }
             }
+            l.clip = (flags & (1u << 13)) != 0;
+            if (flags & (1u << 14)) {   // a fill layer's settings
+                auto fb = r.bytes();
+                if (!l.fill.load(std::string(fb.begin(), fb.end()))) { err = "A fill layer in the project is damaged"; return false; }
+            }
             n.layers.push_back(std::move(l));
         }
         if (!r.ok || n.layers.empty()) { err = "The project is damaged"; return false; }
@@ -411,7 +507,7 @@ bool saveProject(const Doc& d, const std::string& path, std::string& err) {
         putBytes(o, (const uint8_t*)l.name.data(), l.name.size());
         putU32(o, (uint32_t)l.x); putU32(o, (uint32_t)l.y);
         putF(o, l.opacity); putU32(o, l.blend);
-        putU32(o, (l.visible ? 1 : 0) | (l.hasMask ? 2 : 0) | (l.maskOn ? 4 : 0) | ((uint32_t)(l.label & 15) << 8) | (l.isAdjust() ? 1u << 12 : 0));
+        putU32(o, (l.visible ? 1 : 0) | (l.hasMask ? 2 : 0) | (l.maskOn ? 4 : 0) | ((uint32_t)(l.label & 15) << 8) | (l.isAdjust() ? 1u << 12 : 0) | (l.clip ? 1u << 13 : 0) | (l.isFill() ? 1u << 14 : 0));
         std::vector<uint8_t> png;
         stbi_write_png_to_func(toVec, &png, l.img.w, l.img.h, 4, l.img.px.data(), l.img.w * 4);
         putBytes(o, png.data(), png.size());
@@ -421,6 +517,7 @@ bool saveProject(const Doc& d, const std::string& path, std::string& err) {
             putBytes(o, mp.data(), mp.size());
         }
         if (l.isAdjust()) { const std::string a = l.adj.save(); putBytes(o, (const uint8_t*)a.data(), a.size()); }
+        if (l.isFill()) { const std::string f = l.fill.save(); putBytes(o, (const uint8_t*)f.data(), f.size()); }
     }
     if (!writeFile(path, o)) { err = "Can't write " + path; return false; }
     return true;

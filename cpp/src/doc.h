@@ -26,6 +26,24 @@ struct Image {
     const uint8_t* at(int x, int y) const { return &px[((size_t)y * w + x) * 4]; }
 };
 
+// a fill layer: Solid Colour or Gradient (PhotoCraft's fill layers, crates/doc/src/effects.rs's Gradient geometry).
+// It has no pixels of its own to paint: they're drawn from these settings (renderFill) over the whole canvas, and its
+// mask says where it shows
+enum FillKind { FILL_NONE, FILL_SOLID, FILL_GRADIENT };
+enum GradStyle { GRAD_LINEAR, GRAD_RADIAL, GRAD_ANGLE, GRAD_REFLECTED, GRAD_DIAMOND, GRAD_COUNT };
+struct Fill {
+    int kind = FILL_NONE;
+    float colour[3] = {0.0f, 0.482f, 0.718f};    // solid; the gradient's start
+    float colour2[3] = {1, 1, 1};                // the gradient's end
+    int style = GRAD_LINEAR;
+    float angle = 90;                            // degrees, counter-clockwise from 3 o'clock
+    float scale = 1;                             // 0.1..10 (1: the canvas)
+    bool reverse = false;
+    std::string save() const;
+    bool load(const std::string& blob);
+};
+const char* gradStyleName(int s);
+
 struct Layer {
     std::string name = "Layer";
     Image img;
@@ -38,6 +56,9 @@ struct Layer {
     int label = 0;                               // its colour tag, PhotoCraft's set (0 = none; see labelName)
     Adjustment adj;                              // an adjustment layer: no pixels of its own, it changes what's below
     bool isAdjust() const { return adj.kind != ADJ_NONE; }
+    bool clip = false;                           // a clipping mask: it only shows where the layer below it (its base) does
+    Fill fill;                                   // a fill layer (Solid Colour, Gradient): its pixels come from these
+    bool isFill() const { return fill.kind != FILL_NONE; }
     uint8_t maskAt(int lx, int ly) const { return hasMask && maskOn ? mask[(size_t)ly * img.w + lx] : 255; }
 };
 
@@ -60,6 +81,9 @@ struct Doc {
 Doc newDoc(int w, int h, bool white);
 Layer emptyLayer(const Doc& d, const std::string& name);
 void addLayer(Doc& d, Layer l);                  // above the active one, and makes it active
+void addFillLayer(Doc& d, const Fill& f);        // above the active one, masked to the selection when there is one
+void renderFill(const Doc& d, Layer& l);         // a fill layer's pixels from its settings (canvas-sized)
+int clipBase(const Doc& d, int i);               // the layer a clipped layer i is clipped to (i itself when it isn't)
 void deleteLayer(Doc& d);
 void duplicateLayer(Doc& d);
 void moveLayer(Doc& d, int dir);                 // +1 up, -1 down
