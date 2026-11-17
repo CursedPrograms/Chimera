@@ -14,6 +14,8 @@ struct Text {
     bool vertical = false;           // letters top to bottom, lines right to left (PhotoCraft's vertical type)
     float tracking = 0;              // extra space between letters, 1/1000 em (Photoshop's units)
     float leading = 1.2f;            // line spacing, times the size
+    float boxWidth = 0, boxHeight = 0; // paragraph frame in pixels; zero width means point text
+    float scaleX = 1, scaleY = 1, rotation = 0; // text transform, rotation in degrees
     float box[4] = {0, 0, 0, 0};     // where it was last drawn (canvas), for clicking on it (not saved)
     bool active() const { return !str.empty() || !font.empty(); }
     std::string save() const;

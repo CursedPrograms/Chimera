@@ -18,13 +18,19 @@ std::string Text::save() const {
     // the words and the font as hex (any bytes), the rest as numbers
     auto hex = [](const std::string& s) { std::string o; char b[3]; for (unsigned char c : s) { snprintf(b, sizeof b, "%02x", c); o += b; } return o.empty() ? std::string("-") : o; };
     char b[256];
-    snprintf(b, sizeof b, " %g %g %g %d %d %g %g", size, x, y, align, vertical ? 1 : 0, tracking, leading);
+    snprintf(b, sizeof b, " %g %g %g %d %d %g %g %g %g %g %g %g", size, x, y, align, vertical ? 1 : 0, tracking, leading, boxWidth, boxHeight, scaleX, scaleY, rotation);
     return "text1 " + hex(str) + " " + hex(font) + b;
 }
 bool Text::load(const std::string& blob) {
     char a[1], s1[65536], s2[4096]; int al = 0, v = 0;
     (void)a;
-    if (sscanf(blob.c_str(), "text1 %65535s %4095s %f %f %f %d %d %f %f", s1, s2, &size, &x, &y, &al, &v, &tracking, &leading) != 9) return false;
+    const int fields = sscanf(blob.c_str(), "text1 %65535s %4095s %f %f %f %d %d %f %f %f %f %f %f %f", s1, s2, &size, &x, &y, &al, &v, &tracking, &leading, &boxWidth, &boxHeight, &scaleX, &scaleY, &rotation);
+    if (fields != 9 && fields != 11 && fields != 14) return false;
+    if (fields == 9) boxWidth = boxHeight = 0;
+    if (fields != 14) scaleX = scaleY = 1, rotation = 0;
+    boxWidth = std::max(0.0f, boxWidth); boxHeight = std::max(0.0f, boxHeight);
+    scaleX = std::clamp(scaleX, 0.01f, 100.0f); scaleY = std::clamp(scaleY, 0.01f, 100.0f);
+    if (!std::isfinite(rotation)) rotation = 0;
     auto unhex = [](const char* h) { std::string o; if (h[0] == '-') return o; for (size_t i = 0; h[i] && h[i + 1]; i += 2) { char b[3] = {h[i], h[i + 1], 0}; o += (char)strtol(b, nullptr, 16); } return o; };
     str = unhex(s1); font = unhex(s2); align = std::clamp(al, 0, 2); vertical = v != 0;
     return true;
@@ -108,6 +114,38 @@ static std::vector<std::vector<int>> linesOf(const std::string& s) {   // UTF-8 
     return lines;
 }
 
+// after PhotoCraft (crates/text paragraph layout): wrap at whitespace without splitting a word.
+static void wrapLines(std::vector<std::vector<int>>& lines, const stbtt_fontinfo* fi, float scale, float track, float width) {
+    if (width <= 0) return;
+    auto advance = [&](int cp, int next) {
+        int adv = 0, lsb = 0; stbtt_GetCodepointHMetrics(fi, cp, &adv, &lsb);
+        return adv * scale + (next ? stbtt_GetCodepointKernAdvance(fi, cp, next) * scale : 0) + track;
+    };
+    std::vector<std::vector<int>> wrapped;
+    for (const auto& source : lines) {
+        std::vector<int> line;
+        size_t at = 0;
+        while (at < source.size()) {
+            while (at < source.size() && (source[at] == ' ' || source[at] == '\t')) ++at;
+            if (at == source.size()) break;
+            size_t end = at;
+            while (end < source.size() && source[end] != ' ' && source[end] != '\t') ++end;
+            std::vector<int> word(source.begin() + at, source.begin() + end);
+            float used = 0;
+            for (size_t i = 0; i < line.size(); ++i) used += advance(line[i], i + 1 < line.size() ? line[i + 1] : (word.empty() ? 0 : word[0]));
+            float wordWidth = 0;
+            for (size_t i = 0; i < word.size(); ++i) wordWidth += advance(word[i], i + 1 < word.size() ? word[i + 1] : 0);
+            const float space = line.empty() ? 0 : advance(' ', word.empty() ? 0 : word[0]);
+            if (!line.empty() && used + space + wordWidth > width) { wrapped.push_back(std::move(line)); line.clear(); }
+            else if (!line.empty()) line.push_back(' ');
+            line.insert(line.end(), word.begin(), word.end());
+            at = end;
+        }
+        wrapped.push_back(std::move(line));
+    }
+    lines = std::move(wrapped);
+}
+
 bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float box[4]) {
     cov.assign((size_t)w * h, 0.0f);
     box[0] = t.x; box[1] = t.y; box[2] = t.x; box[3] = t.y;
@@ -115,9 +153,13 @@ bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float bo
     if (!F) return false;
     const stbtt_fontinfo* fi = &F->info;
     const float scale = stbtt_ScaleForPixelHeight(fi, std::max(1.0f, t.size));
+    const float transformX = std::clamp(std::isfinite(t.scaleX) ? t.scaleX : 1.0f, 0.01f, 100.0f);
+    const float transformY = std::clamp(std::isfinite(t.scaleY) ? t.scaleY : 1.0f, 0.01f, 100.0f);
+    const float rotation = std::isfinite(t.rotation) ? t.rotation : 0.0f;
     int asc, desc, gap; stbtt_GetFontVMetrics(fi, &asc, &desc, &gap);
     const float lineH = t.size * std::max(0.5f, t.leading), track = t.tracking / 1000.0f * t.size;
-    const auto lines = linesOf(t.str);
+    auto lines = linesOf(t.str);
+    if (!t.vertical) wrapLines(lines, fi, scale, track, t.boxWidth);
     float minX = 1e9f, minY = 1e9f, maxX = -1e9f, maxY = -1e9f;
     auto blit = [&](int cp, float gx, float gy) {   // one glyph, its origin at (gx, gy) (the baseline)
         const float sx = gx - std::floor(gx);
@@ -128,13 +170,29 @@ bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float bo
         std::vector<unsigned char> bm((size_t)bw * bh);
         stbtt_MakeCodepointBitmapSubpixel(fi, bm.data(), bw, bh, bw, scale, scale, sx, 0, cp);
         const int ox = (int)std::floor(gx) + x0, oy = (int)std::round(gy) + y0;
-        minX = std::min(minX, (float)ox); minY = std::min(minY, (float)oy); maxX = std::max(maxX, (float)(ox + bw)); maxY = std::max(maxY, (float)(oy + bh));
-        for (int y = 0; y < bh; ++y) {
-            const int cy = oy + y; if (cy < 0 || cy >= h) continue;
-            for (int x = 0; x < bw; ++x) {
-                const int cx = ox + x; if (cx < 0 || cx >= w) continue;
+        const float angle = rotation * 0.017453292519943295f, cs = std::cos(angle), sn = std::sin(angle);
+        auto transform = [&](float x, float y) {
+            const float dx = (x - t.x) * transformX, dy = (y - t.y) * transformY;
+            return std::pair<float, float>(t.x + cs * dx - sn * dy, t.y + sn * dx + cs * dy);
+        };
+        const auto corners = {transform((float)ox, (float)oy), transform((float)(ox + bw), (float)oy),
+                              transform((float)(ox + bw), (float)(oy + bh)), transform((float)ox, (float)(oy + bh))};
+        float left = 1e9f, top = 1e9f, right = -1e9f, bottom = -1e9f;
+        for (const auto& p : corners) { left = std::min(left, p.first); top = std::min(top, p.second); right = std::max(right, p.first); bottom = std::max(bottom, p.second); }
+        minX = std::min(minX, left); minY = std::min(minY, top); maxX = std::max(maxX, right); maxY = std::max(maxY, bottom);
+        const int dx0 = std::max(0, (int)std::floor(left)), dy0 = std::max(0, (int)std::floor(top));
+        const int dx1 = std::min(w, (int)std::ceil(right)), dy1 = std::min(h, (int)std::ceil(bottom));
+        for (int cy = dy0; cy < dy1; ++cy) {
+            for (int cx = dx0; cx < dx1; ++cx) {
+                const float px = cx + 0.5f - t.x, py = cy + 0.5f - t.y;
+                const float sourceX = t.x + (cs * px + sn * py) / transformX;
+                const float sourceY = t.y + (-sn * px + cs * py) / transformY;
+                const int bx = (int)std::floor(sourceX - ox), by = (int)std::floor(sourceY - oy);
+                if (bx < 0 || bx >= bw || by < 0 || by >= bh) continue;
+                const unsigned char alpha = bm[(size_t)by * bw + bx];
+                if (!alpha) continue;
                 float& o = cov[(size_t)cy * w + cx];
-                o = std::min(1.0f, o + bm[(size_t)y * bw + x] / 255.0f);
+                o = std::min(1.0f, o + alpha / 255.0f);
             }
         }
     };

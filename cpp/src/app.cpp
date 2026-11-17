@@ -2345,9 +2345,20 @@ static bool typeMaskEditing = false;    // a Type Mask tool: typing into typeMas
 static Text typeMask;
 static char typeBuf[8192] = "";
 static bool typeFocus = false;
+static bool typeMoving = false;       // a Type-tool drag that moves the text without ending editing
+static float typeMoveX = 0, typeMoveY = 0;
+static bool typeRotating = false;
+static float typeRotatePivotX = 0, typeRotatePivotY = 0, typeRotateStartAngle = 0, typeRotation0 = 0;
+static bool typeBoxDrag = false;
+static int typeResizeHandle = -1;
+static float typeBoxX0 = 0, typeBoxY0 = 0, typeBoxW0 = 0, typeBoxH0 = 0;
 static bool typeIsMask() { return Toolbar::current() == Toolbar::TYPE_H_MASK || Toolbar::current() == Toolbar::TYPE_V_MASK; }
 static bool typeIsVertical() { return Toolbar::current() == Toolbar::TYPE_V || Toolbar::current() == Toolbar::TYPE_V_MASK; }
 static void typeCommit() {
+    typeMoving = false;
+    typeRotating = false;
+    typeBoxDrag = false;
+    typeResizeHandle = -1;
     if (typeMaskEditing) {   // the letters as a selection
         typeMaskEditing = false;
         typeMask.str = typeBuf;
@@ -2367,13 +2378,38 @@ static void typeCommit() {
     typeLayer = -1;
     changed();
 }
+// Map a canvas point into the text frame so paragraph handles follow rotation and scale.
+static ImVec2 typeToTextPoint(const Text& t, ImVec2 p) {
+    const float angle = t.rotation * 0.017453292519943295f, cs = std::cos(angle), sn = std::sin(angle);
+    const float dx = p.x - t.x, dy = p.y - t.y;
+    return ImVec2(t.x + (cs * dx + sn * dy) / std::max(0.01f, t.scaleX),
+                  t.y + (-sn * dx + cs * dy) / std::max(0.01f, t.scaleY));
+}
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/pointer.rs box_handle_at): the eight
+// paragraph frame handles stay a fixed size on screen as zoom changes.
+static int typeBoxHandleAt(const Text& t, ImVec2 c) {
+    if (t.boxWidth <= 0 || t.boxHeight <= 0) return -1;
+    const float mx = t.x + t.boxWidth * 0.5f, my = t.y + t.boxHeight * 0.5f;
+    const float p[16] = {t.x,t.y, t.x+t.boxWidth,t.y, t.x+t.boxWidth,t.y+t.boxHeight, t.x,t.y+t.boxHeight,
+                         mx,t.y, t.x+t.boxWidth,my, mx,t.y+t.boxHeight, t.x,my};
+    const float reach = 6.0f / std::max(zoom, 0.01f), angle = t.rotation * 0.017453292519943295f, cs = std::cos(angle), sn = std::sin(angle);
+    for (int i = 0; i < 8; ++i) {
+        const float dx = (p[i*2] - t.x) * t.scaleX, dy = (p[i*2+1] - t.y) * t.scaleY;
+        const float x = t.x + cs * dx - sn * dy, y = t.y + sn * dx + cs * dy;
+        if (std::fabs(c.x - x) <= reach && std::fabs(c.y - y) <= reach) return i;
+    }
+    return -1;
+}
 static void typeBegin(ImVec2 c) {
     // on a text layer's letters: edit it again; else new text where clicked (its first line's top a little above)
     for (int i = (int)doc.layers.size() - 1; i >= 0; --i) {
         const Layer& L = doc.layers[i];
         if (!L.isText() || !L.visible) continue;
         const float* b = L.text.box;
-        if (c.x >= b[0] - 4 && c.x <= b[2] + 4 && c.y >= b[1] - 4 && c.y <= b[3] + 4) {
+        const bool inGlyphs = c.x >= b[0] - 4 && c.x <= b[2] + 4 && c.y >= b[1] - 4 && c.y <= b[3] + 4;
+        const ImVec2 local = typeToTextPoint(L.text, c);
+        const bool inParagraph = L.text.boxWidth > 0 && local.x >= L.text.x && local.x <= L.text.x + L.text.boxWidth && local.y >= L.text.y && local.y <= L.text.y + L.text.boxHeight;
+        if (inGlyphs || inParagraph) {
             doc.active = i; typeLayer = i; snprintf(typeBuf, sizeof typeBuf, "%s", L.text.str.c_str()); typeFocus = true; return;
         }
     }
@@ -2394,6 +2430,39 @@ static void moveTextTo(float x, float y) {
     if (doc.active < 0 || doc.active >= (int)doc.layers.size() || !doc.cur().isText()) return;
     Layer& layer = doc.cur(); layer.text.x = x; layer.text.y = y; layer.x = layer.y = 0;
     renderFill(doc, layer); changed();
+}
+// The Type tool's temporary drag and Move tool both update text through this geometry path.
+static void typeMoveByPointer(ImVec2 start, ImVec2 now) {
+    if (!typeMoving || typeLayer < 0 || typeLayer >= (int)doc.layers.size() || !doc.layers[typeLayer].isText()) return;
+    moveTextTo(typeMoveX + now.x - start.x, typeMoveY + now.y - start.y);
+}
+// after PhotoCraft (crates/ui-egui/src/tools/type_transform.rs): rotate the text around its
+// press-time anchor; Shift snaps the angle to fifteen-degree increments.
+static void typeRotateByPointer(ImVec2 now, bool snap) {
+    if (!typeRotating || typeLayer < 0 || typeLayer >= (int)doc.layers.size() || !doc.layers[typeLayer].isText()) return;
+    const float angle = std::atan2(now.y - typeRotatePivotY, now.x - typeRotatePivotX) - typeRotateStartAngle;
+    float degrees = typeRotation0 + angle * 57.29577951308232f;
+    if (snap) degrees = std::round(degrees / 15.0f) * 15.0f;
+    Layer& L = doc.layers[typeLayer]; L.text.rotation = std::remainder(degrees, 360.0f);
+    renderFill(doc, L); changed();
+}
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/pointer.rs resize_box): recompute each
+// frame from the press-time box so handle direction and Alt-centred resizing remain stable.
+static void typeResizeByPointer(ImVec2 now, bool fromCentre) {
+    if (typeResizeHandle < 0 || typeLayer < 0 || typeLayer >= (int)doc.layers.size() || !doc.layers[typeLayer].isText()) return;
+    now = typeToTextPoint(doc.layers[typeLayer].text, now);
+    const int h = typeResizeHandle; const bool left = h == 0 || h == 3 || h == 7, right = h == 1 || h == 2 || h == 5;
+    const bool top = h == 0 || h == 1 || h == 4, bottom = h == 2 || h == 3 || h == 6;
+    float x0 = typeBoxX0, y0 = typeBoxY0, x1 = typeBoxX0 + typeBoxW0, y1 = typeBoxY0 + typeBoxH0;
+    if (left) x0 = std::min(now.x, x1 - 4.0f); if (right) x1 = std::max(now.x, x0 + 4.0f);
+    if (top) y0 = std::min(now.y, y1 - 4.0f); if (bottom) y1 = std::max(now.y, y0 + 4.0f);
+    if (fromCentre) {
+        const float cx = typeBoxX0 + typeBoxW0 * 0.5f, cy = typeBoxY0 + typeBoxH0 * 0.5f;
+        if (left || right) { const float half = std::max(2.0f, std::fabs((left ? x0 : x1) - cx)); x0 = cx - half; x1 = cx + half; }
+        if (top || bottom) { const float half = std::max(2.0f, std::fabs((top ? y0 : y1) - cy)); y0 = cy - half; y1 = cy + half; }
+    }
+    Layer& L = doc.layers[typeLayer]; L.text.x = x0; L.text.y = y0; L.text.boxWidth = x1 - x0; L.text.boxHeight = y1 - y0;
+    renderFill(doc, L); changed();
 }
 // the box typed into, over the picture where the text is (the layer shows the letters as they're typed)
 static void typeEditor() {
@@ -2818,9 +2887,43 @@ static void canvasInput() {
             break;
         }
         case T_TYPE:
-            if (typeLayer >= 0 || typeMaskEditing) typeCommit();   // a click away finishes what was being typed
-            else typeBegin(c);
-            dragging = false;
+            if (typeLayer >= 0 && typeLayer < (int)doc.layers.size() && doc.layers[typeLayer].isText()) {
+                Text& activeText = doc.layers[typeLayer].text;
+                const float* b = activeText.box;
+                const int handle = typeBoxHandleAt(activeText, c);
+                if (handle >= 0) {
+                    if (groupLocked(doc, doc.cur().groupId)) { say("This layer is locked by its group"); dragging = false; break; }
+                    remember("Resize Text Box"); typeResizeHandle = handle;
+                    typeBoxX0 = activeText.x; typeBoxY0 = activeText.y; typeBoxW0 = activeText.boxWidth; typeBoxH0 = activeText.boxHeight;
+                    typeBoxDrag = false; break;
+                }
+                const bool inside = c.x >= b[0] && c.x <= b[2] && c.y >= b[1] && c.y <= b[3];
+                const ImVec2 local = typeToTextPoint(activeText, c);
+                const bool insideParagraph = activeText.boxWidth > 0 && local.x >= activeText.x && local.x <= activeText.x + activeText.boxWidth && local.y >= activeText.y && local.y <= activeText.y + activeText.boxHeight;
+                const float dx = std::max({b[0] - c.x, 0.0f, c.x - b[2]});
+                const float dy = std::max({b[1] - c.y, 0.0f, c.y - b[3]});
+                // PhotoCraft's Type tool moves an active text layer from just outside its
+                // glyphs, or from anywhere with Ctrl held, while preserving the grab offset.
+                const float outsideDistance = std::hypot(dx, dy) * zoom;
+                if (io.KeyCtrl && !inside && !insideParagraph && outsideDistance <= 28.0f) {
+                    if (groupLocked(doc, doc.cur().groupId)) { say("This layer is locked by its group"); dragging = false; break; }
+                    remember("Rotate Text"); typeRotating = true;
+                    typeRotatePivotX = activeText.x; typeRotatePivotY = activeText.y;
+                    typeRotateStartAngle = std::atan2(c.y - typeRotatePivotY, c.x - typeRotatePivotX);
+                    typeRotation0 = activeText.rotation;
+                    break;
+                }
+                if (io.KeyCtrl || (!inside && !insideParagraph && outsideDistance <= 38.0f)) {
+                    if (groupLocked(doc, doc.cur().groupId)) { say("This layer is locked by its group"); dragging = false; break; }
+                    remember("Move Text"); typeMoving = true;
+                    typeMoveX = doc.cur().text.x; typeMoveY = doc.cur().text.y;
+                    break;
+                }
+                if (!inside && !insideParagraph) typeCommit();
+                dragging = false;
+            } else if (typeMaskEditing) {
+                typeCommit(); dragging = false;
+            } else { typeBegin(c); typeBoxDrag = typeLayer >= 0; }
             break;
         case T_MARK: {
             const int mm = markMode();
@@ -2874,6 +2977,18 @@ static void canvasInput() {
             } else if (nx != l.x || ny != l.y) { l.x = nx; l.y = ny; changed(); }
             break;
         }
+        case T_TYPE:
+            if (typeRotating) typeRotateByPointer(c, io.KeyShift);
+            else if (typeMoving) typeMoveByPointer(dragStart, c);
+            else if (typeBoxDrag && typeLayer >= 0 && typeLayer < (int)doc.layers.size() && doc.layers[typeLayer].isText()
+                     && std::hypot(c.x - dragStart.x, c.y - dragStart.y) * zoom >= 3) {
+                Layer& L = doc.layers[typeLayer];
+                L.text.x = std::min(dragStart.x, c.x); L.text.y = std::min(dragStart.y, c.y);
+                L.text.boxWidth = std::max(4.0f, std::fabs(c.x - dragStart.x)); L.text.boxHeight = std::max(4.0f, std::fabs(c.y - dragStart.y));
+                renderFill(doc, L); changed();
+            }
+            else if (typeResizeHandle >= 0) typeResizeByPointer(c, io.KeyAlt);
+            break;
         case T_ARTBOARD:
             if (artboardMoving && artboardActive >= 0 && artboardActive < (int)doc.artboards.size()) {
                 Artboard& board = doc.artboards[artboardActive];
@@ -2945,6 +3060,7 @@ static void canvasInput() {
     if (dragging && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
         dragging = false;
         switch (t) {
+        case T_TYPE: typeMoving = false; typeRotating = false; typeBoxDrag = false; typeResizeHandle = -1; break;
         case T_ROTATE: {
             const ImVec2 pivot(canvasPos.x + canvasSize.x * 0.5f, canvasPos.y + canvasSize.y * 0.5f);
             const float pointer = std::atan2(m.y - pivot.y, m.x - pivot.x);
@@ -3161,7 +3277,24 @@ static void drawCanvas() {
             const Layer& L = doc.layers[i];
             if (!L.isText() || !L.visible) continue;
             const float* b = L.text.box;
-            dl->AddRect(toScreen(b[0] - 2, b[1] - 2), toScreen(b[2] + 2, b[3] + 2), i == typeLayer ? C_PINK : IM_COL32(255, 255, 255, 70), 0, 0, i == typeLayer ? 1.5f : 1.0f);
+            const float x0 = L.text.boxWidth > 0 ? L.text.x : b[0], y0 = L.text.boxWidth > 0 ? L.text.y : b[1];
+            const float x1 = L.text.boxWidth > 0 ? L.text.x + L.text.boxWidth : b[2], y1 = L.text.boxWidth > 0 ? L.text.y + L.text.boxHeight : b[3];
+            const auto framePoint = [&](float x, float y) {
+                const float a = L.text.rotation * 0.017453292519943295f, cs = std::cos(a), sn = std::sin(a);
+                const float dx = (x - L.text.x) * L.text.scaleX, dy = (y - L.text.y) * L.text.scaleY;
+                return toScreen(L.text.x + cs * dx - sn * dy, L.text.y + sn * dx + cs * dy);
+            };
+            const ImVec2 frame[4] = {framePoint(x0, y0), framePoint(x1, y0), framePoint(x1, y1), framePoint(x0, y1)};
+            dl->AddPolyline(frame, 4, i == typeLayer ? C_PINK : IM_COL32(255, 255, 255, 70), ImDrawFlags_Closed, i == typeLayer ? 1.5f : 1.0f);
+            if (i == typeLayer && L.text.boxWidth > 0) {
+                const float mx = (x0 + x1) * 0.5f, my = (y0 + y1) * 0.5f;
+                const float handles[16] = {x0,y0, x1,y0, x1,y1, x0,y1, mx,y0, x1,my, mx,y1, x0,my};
+                for (int k = 0; k < 8; ++k) {
+                    const ImVec2 p = framePoint(handles[k * 2], handles[k * 2 + 1]);
+                    dl->AddRectFilled(ImVec2(p.x - 3.5f, p.y - 3.5f), ImVec2(p.x + 3.5f, p.y + 3.5f), IM_COL32(255,255,255,255));
+                    dl->AddRect(ImVec2(p.x - 3.5f, p.y - 3.5f), ImVec2(p.x + 3.5f, p.y + 3.5f), C_PINK);
+                }
+            }
         }
     }
     {   // the marks: samplers, counts, notes and the ruler
@@ -3755,6 +3888,9 @@ static void optionsBar() {
         }
         ImGui::SameLine(0, 14); edited(sliderF("Tracking", &t.tracking, -200, 1000, "%.0f"));
         ImGui::SameLine(0, 14); edited(sliderF("Leading", &t.leading, 0.5f, 3.0f, "%.2f"));
+        ImGui::SameLine(0, 14); edited(sliderF("Rotate", &t.rotation, -180, 180, "%.1f°"));
+        ImGui::SameLine(0, 14); edited(sliderF("Scale X", &t.scaleX, 0.1f, 10, "%.2f", ImGuiSliderFlags_Logarithmic));
+        ImGui::SameLine(0, 14); edited(sliderF("Scale Y", &t.scaleY, 0.1f, 10, "%.2f", ImGuiSliderFlags_Logarithmic));
         if (live) { ImGui::SameLine(0, 14); edited(ImGui::Checkbox("Vertical", &t.vertical)); }
         if (ch && live) { renderFill(doc, L); changed(); }
         break;
@@ -4969,13 +5105,19 @@ void script(const std::string& what) {
     }
     if (what == "text-move") {
         Toolbar::select(Toolbar::TYPE_H); syncTool();
-        Text t; t.str = "Grab offset stays put"; t.size = 64; t.x = doc.w * 0.2f; t.y = doc.h * 0.4f;
+        Text t; t.str = "Grab offset stays put while editing a paragraph box"; t.size = 64; t.x = doc.w * 0.2f; t.y = doc.h * 0.4f; t.boxWidth = 280; t.boxHeight = 180;
         Fill f; f.kind = FILL_SOLID; f.colour[0] = 1; f.colour[1] = 1; f.colour[2] = 1;
         addTextLayer(doc, t, f); typeLayer = doc.active; snprintf(typeBuf, sizeof typeBuf, "%s", t.str.c_str());
+        typeResizeHandle = 2; typeBoxX0 = t.x; typeBoxY0 = t.y; typeBoxW0 = t.boxWidth; typeBoxH0 = t.boxHeight;
+        typeResizeByPointer(ImVec2(t.x + t.boxWidth + 40, t.y + t.boxHeight + 24), false); typeResizeHandle = -1;
+        typeRotating = true; typeRotatePivotX = doc.cur().text.x; typeRotatePivotY = doc.cur().text.y;
+        typeRotateStartAngle = 0; typeRotation0 = doc.cur().text.rotation;
+        typeRotateByPointer(ImVec2(typeRotatePivotX + 100, typeRotatePivotY + 36.397f), false); typeRotating = false;
         const float x = doc.cur().text.x, y = doc.cur().text.y;
-        remember("Move Text"); moveTextTo(x + 72, y + 48);
-        const bool ok = doc.cur().isText() && std::fabs(doc.cur().text.x - x - 72) < 0.01f && std::fabs(doc.cur().text.y - y - 48) < 0.01f;
-        fprintf(stderr, "text-move: %s; text geometry and rendered hit box moved together without a grab jump\n", ok ? "passed" : "move check failed");
+        remember("Move Text"); typeMoving = true; typeMoveX = x; typeMoveY = y;
+        typeMoveByPointer(ImVec2(0, 0), ImVec2(72, 48)); typeMoving = false;
+        const bool ok = doc.cur().isText() && std::fabs(doc.cur().text.x - x - 72) < 0.01f && std::fabs(doc.cur().text.y - y - 48) < 0.01f && std::fabs(doc.cur().text.boxWidth - 320) < 0.01f && std::fabs(doc.cur().text.boxHeight - 204) < 0.01f && std::fabs(doc.cur().text.rotation - 20) < 0.1f && doc.cur().text.box[3] > doc.cur().text.box[1] + 64;
+        fprintf(stderr, "text-move: %s; paragraph wraps, resizes (%.1f x %.1f), rotates (%.1f°), and moves\n", ok ? "passed" : "type interaction check failed", doc.cur().text.boxWidth, doc.cur().text.boxHeight, doc.cur().text.rotation);
         return;
     }
     if (what == "artboard") {

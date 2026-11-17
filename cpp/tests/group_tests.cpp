@@ -1,7 +1,9 @@
 // Layer group checks ported from PhotoCraft (crates/doc/src/lib.rs and crates/compose/src/tests.rs).
 #include "doc.h"
 #include "blend.h"
+#include "text.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -143,6 +145,32 @@ static bool groupKnockoutUsesItsCompositeShape() {
     return out.at(0, 0)[2] == 255 && out.at(0, 0)[1] == 0 && out.at(1, 0)[1] == 255;
 }
 
+// PhotoCraft paragraph frames reflow the same words when their width changes.
+static bool paragraphTextWrapsAndPersists() {
+    Text point; point.str = "A paragraph box wraps words onto later lines"; point.size = 32;
+    point.font = defaultFont();
+    std::vector<float> pointPixels; float pointBox[4];
+    if (!textCoverage(point, 500, 300, pointPixels, pointBox)) return false;
+    Text paragraph = point; paragraph.boxWidth = 90; paragraph.boxHeight = 100; paragraph.x = 160; paragraph.y = 100; paragraph.rotation = 90; paragraph.scaleX = 1.25f; paragraph.scaleY = 0.8f;
+    std::vector<float> paragraphPixels; float paragraphBox[4];
+    if (!textCoverage(paragraph, 500, 300, paragraphPixels, paragraphBox)) return false;
+    Text roundTrip;
+    if (!roundTrip.load(paragraph.save())) return false;
+    Text legacy;
+    if (!legacy.load("text1 41 - 48 10 20 0 0 0 1.2")) return false;
+    Doc project = newDoc(500, 300, false); Fill fill; fill.kind = FILL_SOLID;
+    addTextLayer(project, paragraph, fill);
+    const std::filesystem::path path = std::filesystem::temp_directory_path() / "chimera-paragraph-text-selftest.chimera";
+    std::string error; Doc loaded;
+    const bool projectOk = saveProject(project, path.u8string(), error) && openDoc(path.u8string(), loaded, error);
+    std::error_code ec; std::filesystem::remove(path, ec);
+    const auto savedText = std::find_if(loaded.layers.begin(), loaded.layers.end(), [](const Layer& l) { return l.isText(); });
+    return paragraphBox[3] - paragraphBox[1] > pointBox[3] - pointBox[1] + 10 &&
+           std::fabs(roundTrip.boxWidth - paragraph.boxWidth) < 0.01f && roundTrip.boxHeight == paragraph.boxHeight && roundTrip.rotation == paragraph.rotation && roundTrip.scaleX == paragraph.scaleX && roundTrip.scaleY == paragraph.scaleY &&
+           legacy.boxWidth == 0 && legacy.boxHeight == 0 && projectOk && savedText != loaded.layers.end() &&
+           savedText->text.boxWidth == paragraph.boxWidth && savedText->text.boxHeight == paragraph.boxHeight && savedText->text.rotation == paragraph.rotation && savedText->text.scaleX == paragraph.scaleX && savedText->text.scaleY == paragraph.scaleY;
+}
+
 int runSelfTests() {
     struct Test { const char* name; bool (*run)(); };
     static const Test tests[] = {
@@ -156,6 +184,7 @@ int runSelfTests() {
         {"deep knockout uses the Background floor", deepKnockoutUsesBackgroundFloor},
         {"partial pass-through group isolates adjustments", partialPassThroughGroupIsIsolated},
         {"group knockout uses composite shape", groupKnockoutUsesItsCompositeShape},
+        {"paragraph text wraps and keeps legacy projects readable", paragraphTextWrapsAndPersists},
     };
     int failed = 0;
     for (const Test& test : tests) {
