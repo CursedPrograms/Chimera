@@ -86,11 +86,12 @@ static bool hidden[COUNT] = {};
 static std::string prefFile;
 static GLuint tex[COUNT] = {};
 static GLuint texEllipsis = 0, texChevL = 0, texChevR = 0;
+static bool (*isWorking)(int) = nullptr;
 
 int current() { return cur; }
 const char* label(int id) { return id >= 0 && id < COUNT ? TOOLS[id].label : ""; }
 char key(int id) { return id >= 0 && id < COUNT ? TOOLS[id].key : 0; }
-bool works(int id) { return id >= 0 && id < COUNT && TOOLS[id].works; }
+bool works(int id) { return id >= 0 && id < COUNT && (isWorking ? isWorking(id) : TOOLS[id].works); }
 static float drawnH = 900;   // how tall the strip came out last frame
 float height() { return drawnH; }
 float width() { return twoColumns ? BX * 2 + 2 + MARGIN * 2 : BX + MARGIN * 2; }
@@ -133,7 +134,8 @@ static GLuint loadSvg(const std::string& path, int px) {
     return t;
 }
 
-void init(const std::string& assetsDir, const std::string& prefDir) {
+void init(const std::string& assetsDir, const std::string& prefDir, bool (*working)(int)) {
+    isWorking = working;
     const std::string dir = assetsDir + "icons/";
     const int px = 48;   // drawn at 18-20 px: sharp on high-DPI screens too
     for (int i = 0; i < COUNT; ++i) tex[i] = loadSvg(dir + TOOLS[i].icon + ".svg", px);
@@ -171,7 +173,7 @@ static std::vector<int> visible(const std::vector<int>& slot) {
 static std::string tipFor(int t) {
     std::string s = TOOLS[t].label;
     if (TOOLS[t].key) { s += "  ("; s += TOOLS[t].key; s += ")"; }
-    if (!TOOLS[t].works) s += "\nNot in Chimera yet: it comes as PhotoCraft is ported.";
+    if (!works(t)) s += "\nNot in Chimera yet: it comes as PhotoCraft is ported.";
     return s;
 }
 
@@ -201,13 +203,13 @@ static void flyout(const std::vector<int>& slot, int shown) {
         const bool over = ImGui::IsMouseHoveringRect(a, b);
         if (over) dl->AddRectFilled(a, b, C_HOVER, 3);
         if (t == shown) dl->AddRectFilled(ImVec2(a.x + 6, a.y + 11), ImVec2(a.x + 10, a.y + 15), C_TEXT);
-        icon(dl, t, a.x + 26, a.y + 13, 16, TOOLS[t].works ? C_TEXT : C_DIM);
-        dl->AddText(ImVec2(a.x + 42, a.y + 13 - ImGui::GetFontSize() / 2), TOOLS[t].works ? C_TEXT : C_DIM, TOOLS[t].label);
+        icon(dl, t, a.x + 26, a.y + 13, 16, works(t) ? C_TEXT : C_DIM);
+        dl->AddText(ImVec2(a.x + 42, a.y + 13 - ImGui::GetFontSize() / 2), works(t) ? C_TEXT : C_DIM, TOOLS[t].label);
         if (TOOLS[t].key) {
             const char k[2] = {TOOLS[t].key, 0};
             dl->AddText(ImVec2(b.x - 8 - ImGui::CalcTextSize(k).x, a.y + 13 - ImGui::GetFontSize() / 2), C_DIM, k);
         }
-        if (over && !TOOLS[t].works) ImGui::SetTooltip("Not in Chimera yet: it comes as PhotoCraft is ported.");
+        if (over && !works(t)) ImGui::SetTooltip("Not in Chimera yet: it comes as PhotoCraft is ported.");
         if (clicked || (openByHold && over && ImGui::IsMouseReleased(0))) { select(t); picked = true; }
         ImGui::PopID();
     }

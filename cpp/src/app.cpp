@@ -12,6 +12,7 @@
 #include "quicksel.h"
 #include "splash.h"
 #include "toolbar.h"
+#include "magnetic.h"
 #include "util.h"
 
 #include <SDL.h>
@@ -104,6 +105,7 @@ static int docVersion = 0, selVersion = 0;
 static bool showMask = false;                    // Alt-click on a mask: see it in grey
 static bool quit = false, askQuit = false;
 static std::string toast; static double toastUntil = 0;
+static void magneticClear();
 
 enum Tool { T_MOVE, T_RECT, T_ELLIPSE, T_LASSO, T_POLY, T_MAGNETIC, T_WAND, T_BRUSH, T_ERASER, T_BUCKET, T_DROPPER, T_HAND, T_ROTATE,
             T_PENCIL, T_ZOOM, T_ROW, T_COL, T_CROP, T_GRADIENT, T_MAGIC_ERASER, T_RETOUCH, T_QUICK, T_OBJECT, T_REDEYE, T_HEAL, T_SHAPE, T_MARK, T_TYPE, T_PEN, T_COUNT,
@@ -128,7 +130,10 @@ static float cloneSrcX = 0, cloneSrcY = 0, cloneDX = 0, cloneDY = 0;
 static int gradToolStyle = 0; static bool gradToolReverse = false; static float gradToolOpacity = 1.0f;
 static bool cropPending = false, cropDelete = true; static float cropR[4] = {0, 0, 0, 0};
 static float quickSize = 30; static std::vector<float> quickPts;     // the Quick Selection brush and its stroke
-static float magneticWidth = 12, magneticContrast = 10; static std::vector<float> magneticPts; static Image magneticSource; static ImVec2 magneticCurrent;
+static float magneticWidth = 10, magneticContrast = 10, magneticFrequency = 57;
+static std::vector<Magnetic::Point> magneticPts, magneticTrail, magneticLive;
+static std::vector<size_t> magneticAnchors; static std::unique_ptr<Magnetic::Tracer> magneticTracer;
+static int magneticSelMode = SEL_NEW;
 static float pupilSize = 50, redDarken = 50;
 static int selMode = SEL_NEW; static float selFeather = 0;
 static int tolerance = 32; static bool contiguous = true, sampleAll = false; static float bucketOpacity = 1.0f;
@@ -158,7 +163,7 @@ static std::vector<GLuint> thumbs, mthumbs; static int thumbVersion = -1; static
 
 static double now() { return SDL_GetTicks() / 1000.0; }
 static void say(const std::string& s) { toast = s; toastUntil = now() + 5; }
-static void changed(Rect r = {0, 0, 1 << 30, 1 << 30}) { dirty = dirty.unite(r.clip(doc.w, doc.h)); docVersion++; doc.dirty = true; }
+static void changed(Rect r = {0, 0, 1 << 30, 1 << 30}) { magneticClear(); dirty = dirty.unite(r.clip(doc.w, doc.h)); docVersion++; doc.dirty = true; }
 static void selChanged() { selVersion++; }
 
 // ---------- document tabs ----------
@@ -181,6 +186,7 @@ static void stashTab() {
 }
 
 static void loadTab(int i) {
+    magneticClear();
     curTab = i;
     Tab& t = tabs[i];
     doc = std::move(t.doc); hist = std::move(t.hist); noDoc = t.noDoc;
@@ -1557,38 +1563,70 @@ static Image sampleImage() {
         }
     return comp;
 }
-// after PhotoCraft (crates/algo/src/magnetic.rs): follow the strongest nearby Sobel ridge.
-static ImVec2 magneticSnap(ImVec2 p) {
-    const int cx = (int)std::floor(p.x), cy = (int)std::floor(p.y);
-    const int r = (int)std::ceil(magneticWidth);
-    const float threshold = magneticContrast / 100.0f;
-    float best = threshold; ImVec2 result(std::clamp(p.x, 0.0f, (float)doc.w), std::clamp(p.y, 0.0f, (float)doc.h));
-    auto luma = [](const uint8_t* q) { return (0.2126f * q[0] + 0.7152f * q[1] + 0.0722f * q[2]) / 255.0f * q[3] / 255.0f; };
-    auto sample = [&](int x, int y) { x = std::clamp(x, 0, doc.w - 1); y = std::clamp(y, 0, doc.h - 1); return luma(magneticSource.at(x, y)); };
-    for (int y = std::max(1, cy - r); y <= std::min(doc.h - 2, cy + r); ++y)
-        for (int x = std::max(1, cx - r); x <= std::min(doc.w - 2, cx + r); ++x) {
-            const float gx = sample(x + 1, y - 1) + 2 * sample(x + 1, y) + sample(x + 1, y + 1) - sample(x - 1, y - 1) - 2 * sample(x - 1, y) - sample(x - 1, y + 1);
-            const float gy = sample(x - 1, y + 1) + 2 * sample(x, y + 1) + sample(x + 1, y + 1) - sample(x - 1, y - 1) - 2 * sample(x, y - 1) - sample(x + 1, y - 1);
-            const float strength = std::min(1.0f, std::hypot(gx, gy) * 0.25f);
-            const float dx = x + 0.5f - p.x, dy = y + 0.5f - p.y, distance = std::hypot(dx, dy);
-            if (distance <= magneticWidth && strength * (1.0f - 0.25f * distance / magneticWidth) > best) { best = strength * (1.0f - 0.25f * distance / magneticWidth); result = ImVec2(x + 0.5f, y + 0.5f); }
-        }
-    return result;
+// The tracer reads composite pixels in cached 128 px blocks and builds edge fields only around each live wire.
+static Magnetic::Settings magneticSettings() { return {magneticWidth, magneticContrast / 100.0f}; }
+static bool magneticActive() { return !magneticPts.empty(); }
+static double magneticLength(const std::vector<Magnetic::Point>& p) { double d = 0; for (size_t i = 1; i < p.size(); ++i) d += std::hypot(p[i].x - p[i - 1].x, p[i].y - p[i - 1].y); return d; }
+static void magneticClear() { magneticPts.clear(); magneticTrail.clear(); magneticLive.clear(); magneticAnchors.clear(); magneticTracer.reset(); }
+static double magneticSpacing(bool held) {
+    const double f = std::clamp((double)magneticFrequency, 0.0, 100.0), stored = std::floor(40.0 - 0.35 * f);
+    if (held) return stored;
+    double screen = 4.0 * stored + 4.0; if (zoom < 1.0f) screen /= 2.0; return screen / std::max((double)zoom, 0.01);
 }
-static void magneticAppend(ImVec2 point) {
-    const ImVec2 end = magneticSnap(point);
-    if (magneticPts.size() < 2) { magneticPts = {end.x, end.y}; return; }
-    const ImVec2 start(magneticPts[magneticPts.size() - 2], magneticPts.back());
-    const int steps = std::max(1, (int)std::ceil(std::hypot(end.x - start.x, end.y - start.y) / 4.0f));
-    for (int i = 1; i <= steps; ++i) {
-        const float t = (float)i / steps;
-        const ImVec2 q = magneticSnap(ImVec2(start.x + (end.x - start.x) * t, start.y + (end.y - start.y) * t));
-        magneticPts.push_back(q.x); magneticPts.push_back(q.y);
+static void magneticExtendTrail(Magnetic::Point p) {
+    const double gap = std::clamp((double)magneticWidth / 4.0, 1.0, 8.0);
+    if (magneticTrail.size() >= 2 && std::hypot(magneticTrail[magneticTrail.size()-2].x-p.x, magneticTrail[magneticTrail.size()-2].y-p.y) < gap) magneticTrail.back() = p;
+    else magneticTrail.push_back(p);
+}
+static bool magneticCut(const std::vector<Magnetic::Point>& p, double len, std::vector<Magnetic::Point>& head, Magnetic::Point& point) {
+    if (magneticLength(p) < len + 1.0) return false;
+    double acc = 0;
+    for (size_t i = 1; i < p.size(); ++i) { const auto a = p[i-1], b = p[i]; head.push_back(a); const double d = std::hypot(b.x-a.x,b.y-a.y); if (acc+d>=len&&d>0) { const double t=(len-acc)/d; point={a.x+(b.x-a.x)*t,a.y+(b.y-a.y)*t};head.push_back(point);return true;}acc+=d; }
+    return false;
+}
+static void magneticUpdate(Magnetic::Point p, bool held, bool autoAnchor) {
+    if (!magneticActive() || !magneticTracer) return;
+    magneticExtendTrail(p); const auto target = magneticTracer->snap(p, magneticSettings()); const double every = magneticSpacing(held);
+    for (int n = 0; n < 64; ++n) {
+        const auto from = magneticPts.back(); const auto live = magneticTracer->trace(from, target, magneticTrail, magneticSettings());
+        std::vector<Magnetic::Point> head; Magnetic::Point anchor;
+        if (autoAnchor && magneticCut(live, every, head, anchor)) {
+            magneticPts.insert(magneticPts.end(), head.begin() + std::min<size_t>(1, head.size()), head.end()); magneticAnchors.push_back(magneticPts.size() - 1);
+            size_t nearest = 0; double best = std::numeric_limits<double>::infinity();
+            for (size_t i = 0; i < magneticTrail.size(); ++i) { const double d = std::hypot(magneticTrail[i].x-anchor.x, magneticTrail[i].y-anchor.y); if (d < best) { best=d;nearest=i; } }
+            std::vector<Magnetic::Point> rest; rest.push_back(anchor); for (size_t i=nearest+1;i<magneticTrail.size();++i)rest.push_back(magneticTrail[i]); magneticTrail=std::move(rest);
+        } else { magneticLive = live; return; }
     }
 }
-static void magneticFinish() {
-    if (magneticPts.size() >= 6) finishShape(shapePolygon(doc, magneticPts), modeFromKeys(), "Magnetic Lasso");
-    magneticPts.clear(); magneticSource = Image();
+static void magneticFasten() {
+    const size_t before = magneticPts.size();
+    for (const auto& p : magneticLive) if (magneticPts.empty() || std::hypot(magneticPts.back().x-p.x, magneticPts.back().y-p.y)>1e-9) magneticPts.push_back(p);
+    if (magneticPts.size() > before) magneticAnchors.push_back(magneticPts.size()-1);
+    if (!magneticPts.empty()) magneticTrail = {magneticPts.back()};
+    magneticLive.clear();
+}
+static void magneticFinish(bool straight = false) {
+    if (magneticPts.size() < 3) { magneticClear(); return; }
+    if (!straight && magneticTracer) { auto closing = magneticTracer->trace(magneticPts.back(), magneticPts.front(), {}, magneticSettings()); magneticPts.insert(magneticPts.end(), closing.begin()+std::min<size_t>(1,closing.size()), closing.end()); }
+    std::vector<float> poly; poly.reserve(magneticPts.size()*2); for (auto p:magneticPts) { poly.push_back((float)p.x);poly.push_back((float)p.y); }
+    finishShape(shapePolygon(doc, poly), magneticSelMode, "Magnetic Lasso"); magneticClear();
+}
+static void magneticRemoveAnchor() {
+    if (magneticAnchors.size() <= 1) { magneticClear(); return; }
+    magneticAnchors.pop_back(); magneticPts.resize(magneticAnchors.back()+1); magneticLive.clear(); magneticTrail={magneticPts.back()};
+}
+static void magneticStart(Magnetic::Point p) {
+    uploadView(); magneticTracer = std::make_unique<Magnetic::Tracer>(view);
+    Magnetic::Point first = magneticTracer->snap(p, magneticSettings());
+    magneticPts = {first}; magneticAnchors = {0}; magneticTrail = {p}; magneticLive.clear(); magneticSelMode = modeFromKeys();
+}
+static void magneticClick(Magnetic::Point p, bool twice) {
+    if (!magneticActive()) { magneticStart(p); return; }
+    const double closeRadius = 8.0 / std::max((double)zoom, 0.01);
+    if (magneticPts.size() > 1 && magneticLength(magneticPts) > 2 * closeRadius && std::hypot(magneticPts.front().x-p.x, magneticPts.front().y-p.y) <= closeRadius) { magneticFinish(); return; }
+    magneticUpdate(p, false, false);
+    magneticFasten();
+    if (twice) magneticFinish();
 }
 static void quickSelectStroke() {
     if (quickPts.size() < 2) return;
@@ -1887,7 +1925,8 @@ static void canvasInput() {
     const bool space = ImGui::IsKeyDown(ImGuiKey_Space) && !io.WantTextInput;
     const int t = space ? T_HAND : tool;
 
-    if (t == T_MAGNETIC && !magneticPts.empty()) magneticCurrent = magneticSnap(c);
+    if (t == T_MAGNETIC && magneticActive() && (hovered || ImGui::IsMouseDown(ImGuiMouseButton_Left)))
+        magneticUpdate({c.x, c.y}, ImGui::IsMouseDown(ImGuiMouseButton_Left), true);
     if (hovered && io.MouseWheel != 0) zoomAt(zoom * (io.MouseWheel > 0 ? 1.15f : 1 / 1.15f), m);
     if (tool == T_ROTATE && viewRotation != 0.0f) {
         const ImVec2 q(canvasPos.x + canvasSize.x - 24, canvasPos.y + 24);
@@ -1918,11 +1957,8 @@ static void canvasInput() {
         case T_MOVE: remember("Move"); moveStartX = doc.cur().x; moveStartY = doc.cur().y; break;
         case T_LASSO: lasso = {c.x, c.y}; break;
         case T_MAGNETIC:
-            if (magneticPts.empty()) composite(doc, magneticSource, {0, 0, doc.w, doc.h}, false);
-            magneticAppend(c);
-            magneticCurrent = magneticPts.size() >= 2 ? ImVec2(magneticPts[magneticPts.size() - 2], magneticPts.back()) : magneticSnap(c);
+            magneticClick({c.x, c.y}, ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left));
             dragging = false;
-            if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) magneticFinish();
             break;
         case T_POLY:
             if (poly.empty()) poly = {c.x, c.y};
@@ -2070,19 +2106,10 @@ static void canvasInput() {
         default: break;
         }
     }
-    if (dragging && (ImGui::IsMouseDown(ImGuiMouseButton_Left) || ImGui::IsMouseReleased(ImGuiMouseButton_Left))) {
+    if (dragging && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
         const ImVec2 penLast = dragNow; (void)penLast;
         dragNow = c;
         switch (t) {
-        case T_ROTATE: {
-            const ImVec2 pivot(canvasPos.x + canvasSize.x * 0.5f, canvasPos.y + canvasSize.y * 0.5f);
-            const float pointer = std::atan2(m.y - pivot.y, m.x - pivot.x);
-            const float delta = std::remainder(pointer - rotateStartPointer, 6.283185307179586f);
-            float angle = rotateStartAngle + delta * 57.29577951308232f;
-            if (io.KeyShift) angle = std::round(angle / 15.0f) * 15.0f;
-            viewRotation = std::remainder(angle, 360.0f);
-            break;
-        }
         case T_MOVE: {
             Layer& l = doc.cur();
             const int nx = moveStartX + (int)std::lround(c.x - dragStart.x), ny = moveStartY + (int)std::lround(c.y - dragStart.y);
@@ -2134,6 +2161,15 @@ static void canvasInput() {
     if (dragging && ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
         dragging = false;
         switch (t) {
+        case T_ROTATE: {
+            const ImVec2 pivot(canvasPos.x + canvasSize.x * 0.5f, canvasPos.y + canvasSize.y * 0.5f);
+            const float pointer = std::atan2(m.y - pivot.y, m.x - pivot.x);
+            const float delta = std::remainder(pointer - rotateStartPointer, 6.283185307179586f);
+            float angle = rotateStartAngle + delta * 57.29577951308232f;
+            if (io.KeyShift) angle = std::round(angle / 15.0f) * 15.0f;
+            viewRotation = std::remainder(angle, 360.0f);
+            break;
+        }
         case T_RECT: case T_ELLIPSE:
             if (std::fabs(c.x - dragStart.x) < 1 && std::fabs(c.y - dragStart.y) < 1) { if (modeFromKeys() == SEL_NEW) { remember("Deselect"); deselect(); } }
             else finishShape(t == T_RECT ? shapeRect(doc, (int)std::lround(dragStart.x), (int)std::lround(dragStart.y), (int)std::lround(c.x), (int)std::lround(c.y))
@@ -2241,8 +2277,15 @@ static void drawCanvas() {
     const ImGuiIO& io = ImGui::GetIO();
     if (dragging && (tool == T_RECT || tool == T_ELLIPSE)) {
         const ImVec2 p0 = toScreen(dragStart.x, dragStart.y), p1 = toScreen(dragNow.x, dragNow.y);
-        if (tool == T_RECT) dl->AddRect(p0, p1, C_PINK, 0, 0, 1.5f);
-        else dl->AddEllipse(ImVec2((p0.x + p1.x) / 2, (p0.y + p1.y) / 2), std::fabs(p1.x - p0.x) / 2, std::fabs(p1.y - p0.y) / 2, C_PINK, 0, 64, 1.5f);
+        if (tool == T_RECT) {
+            const ImVec2 q[4] = {p0, toScreen(dragNow.x, dragStart.y), p1, toScreen(dragStart.x, dragNow.y)};
+            dl->AddPolyline(q, 4, C_PINK, ImDrawFlags_Closed, 1.5f);
+        } else {
+            const float cx = (dragStart.x + dragNow.x) * 0.5f, cy = (dragStart.y + dragNow.y) * 0.5f;
+            std::vector<ImVec2> q; q.reserve(64);
+            for (int i = 0; i < 64; ++i) { const float a = i * 6.28318530718f / 64; q.push_back(toScreen(cx + (dragNow.x - dragStart.x) * 0.5f * std::cos(a), cy + (dragNow.y - dragStart.y) * 0.5f * std::sin(a))); }
+            dl->AddPolyline(q.data(), (int)q.size(), C_PINK, ImDrawFlags_Closed, 1.5f);
+        }
     }
     auto path = [&](const std::vector<float>& v, bool toMouse) {
         for (size_t i = 0; i + 3 < v.size(); i += 2) dl->AddLine(toScreen(v[i], v[i + 1]), toScreen(v[i + 2], v[i + 3]), C_PINK, 1.5f);
@@ -2321,10 +2364,10 @@ static void drawCanvas() {
     }
     if (tool == T_MAGNETIC) {
         std::vector<ImVec2> pts;
-        for (size_t i = 0; i + 1 < magneticPts.size(); i += 2) pts.push_back(toScreen(magneticPts[i], magneticPts[i + 1]));
-        if (!magneticPts.empty() && ImGui::IsWindowHovered()) pts.push_back(toScreen(magneticCurrent.x, magneticCurrent.y));
+        for (const auto& p : magneticPts) pts.push_back(toScreen((float)p.x, (float)p.y));
+        for (const auto& p : magneticLive) pts.push_back(toScreen((float)p.x, (float)p.y));
         if (pts.size() >= 2) { dl->AddPolyline(pts.data(), (int)pts.size(), IM_COL32(0, 0, 0, 220), 0, 3); dl->AddPolyline(pts.data(), (int)pts.size(), C_PINK, 0, 1.5f); }
-        for (size_t i = 0; i < pts.size(); ++i) dl->AddCircleFilled(pts[i], i + 1 == pts.size() ? 3.5f : 2.5f, C_PINK, 12);
+        for (size_t i : magneticAnchors) if (i < magneticPts.size()) dl->AddCircleFilled(toScreen((float)magneticPts[i].x, (float)magneticPts[i].y), 3.0f, C_PINK, 12);
     }
     if (tool == T_SHAPE && dragging) {   // the shape being drawn, outlined
         const std::vector<float> o = shapeOutline(shapeFromDrag(dragStart, dragNow));
@@ -2359,15 +2402,18 @@ static void drawCanvas() {
     }
     // the brush outline
     if (tool == T_CROP && cropPending) {   // what's kept, the rest dimmed, thirds as a guide
-        const ImVec2 a0 = toScreen(std::min(cropR[0], cropR[2]), std::min(cropR[1], cropR[3])), a1 = toScreen(std::max(cropR[0], cropR[2]), std::max(cropR[1], cropR[3]));
-        const ImVec2 c0 = toScreen(0, 0), c1 = toScreen((float)doc.w, (float)doc.h);
+        const float x0 = std::clamp(std::min(cropR[0], cropR[2]), 0.0f, (float)doc.w), x1 = std::clamp(std::max(cropR[0], cropR[2]), 0.0f, (float)doc.w);
+        const float y0 = std::clamp(std::min(cropR[1], cropR[3]), 0.0f, (float)doc.h), y1 = std::clamp(std::max(cropR[1], cropR[3]), 0.0f, (float)doc.h);
+        const ImVec2 d0 = toScreen(0, 0), d1 = toScreen((float)doc.w, 0), d2 = toScreen((float)doc.w, (float)doc.h), d3 = toScreen(0, (float)doc.h);
+        const ImVec2 q0 = toScreen(x0,y0), q1 = toScreen(x1,y0), q2 = toScreen(x1,y1), q3 = toScreen(x0,y1);
         const ImU32 dim = IM_COL32(0, 0, 0, 140);
-        dl->AddRectFilled(c0, ImVec2(c1.x, a0.y), dim); dl->AddRectFilled(ImVec2(c0.x, a1.y), c1, dim);
-        dl->AddRectFilled(ImVec2(c0.x, a0.y), ImVec2(a0.x, a1.y), dim); dl->AddRectFilled(ImVec2(a1.x, a0.y), ImVec2(c1.x, a1.y), dim);
-        dl->AddRect(a0, a1, IM_COL32(255, 255, 255, 230), 0, 0, 1.5f);
+        const ImVec2 regions[4][4] = {{d0,d1,q1,q0},{d1,d2,q2,q1},{d3,d2,q2,q3},{d0,d3,q3,q0}};
+        for (const auto& region : regions) dl->AddConvexPolyFilled(region, 4, dim);
+        const ImVec2 outline[4] = {q0,q1,q2,q3}; dl->AddPolyline(outline, 4, IM_COL32(255, 255, 255, 230), ImDrawFlags_Closed, 1.5f);
         for (int k = 1; k < 3; ++k) {
-            const float fx = a0.x + (a1.x - a0.x) * k / 3, fy = a0.y + (a1.y - a0.y) * k / 3;
-            dl->AddLine(ImVec2(fx, a0.y), ImVec2(fx, a1.y), IM_COL32(255, 255, 255, 90)); dl->AddLine(ImVec2(a0.x, fy), ImVec2(a1.x, fy), IM_COL32(255, 255, 255, 90));
+            const float t = k / 3.0f;
+            dl->AddLine(ImVec2(q0.x + (q1.x-q0.x)*t, q0.y + (q1.y-q0.y)*t), ImVec2(q3.x + (q2.x-q3.x)*t, q3.y + (q2.y-q3.y)*t), IM_COL32(255, 255, 255, 90));
+            dl->AddLine(ImVec2(q0.x + (q3.x-q0.x)*t, q0.y + (q3.y-q0.y)*t), ImVec2(q1.x + (q2.x-q1.x)*t, q1.y + (q2.y-q1.y)*t), IM_COL32(255, 255, 255, 90));
         }
     }
     if (tool == T_OBJECT && dragging) dl->AddRect(toScreen(dragStart.x, dragStart.y), toScreen(dragNow.x, dragNow.y), C_PINK, 0, 0, 1.5f);
@@ -2451,8 +2497,9 @@ static int ltTool(int id) {
 }
 static void syncTool() {
     const int t = ltTool(Toolbar::current());
-    if (t != tool) { if (tool == T_TYPE) typeCommit(); tool = t; poly.clear(); }
+    if (t != tool) { if (tool == T_TYPE) typeCommit(); if (tool == T_MAGNETIC) magneticClear(); tool = t; poly.clear(); }
 }
+static bool toolbarToolWorks(int id) { return ltTool(id) != T_NONE; }
 
 static void toolsPanel() {
     // the tools scroll when the window is too short for them; the colour chips stay underneath (PhotoCraft)
@@ -2542,6 +2589,7 @@ static void optionsBar() {
         selModes(); ImGui::SameLine(0, 10);
         sliderF("Width", &magneticWidth, 1, 256, "%.0f px", ImGuiSliderFlags_Logarithmic); ImGui::SameLine(0, 10);
         sliderF("Contrast", &magneticContrast, 1, 100, "%.0f%%"); ImGui::SameLine(0, 10);
+        sliderF("Frequency", &magneticFrequency, 0, 100, "%.0f"); ImGui::SameLine(0, 10);
         sliderF("Feather", &selFeather, 0, 100, "%.0f px"); ImGui::SameLine(0, 10);
         ImGui::TextDisabled("Click anchors on an edge; double-click or Enter closes; Escape cancels");
         break;
@@ -3406,14 +3454,17 @@ static void keys() {
     if (alt && k(ImGuiKey_Backspace)) { fillWith(fg, "Fill"); return; }
     if (shift && k(ImGuiKey_F6)) { openDlg(D_FEATHER); return; }
     if (shift && k(ImGuiKey_F5)) { contentAwareFillSelection(); return; }
+    if (tool == T_MAGNETIC && magneticActive()) {
+        if (k(ImGuiKey_Enter) || k(ImGuiKey_KeypadEnter)) { magneticFinish(alt); return; }
+        if (k(ImGuiKey_Backspace) || k(ImGuiKey_Delete)) { magneticRemoveAnchor(); return; }
+    }
     if (k(ImGuiKey_Delete) || k(ImGuiKey_Backspace)) { clearSelection(); return; }
     if (tool == T_PEN && (k(ImGuiKey_Enter) || k(ImGuiKey_KeypadEnter))) {
         if (ctrl && !doc.workPath.empty()) { combineSel(doc, pathSelection(), SEL_NEW); selChanged(); } else penFinishSubpath();
         return;
     }
-    if (k(ImGuiKey_Enter) && tool == T_MAGNETIC && magneticPts.size() >= 6) { magneticFinish(); return; }
     if (k(ImGuiKey_Enter) && poly.size() >= 6) { finishShape(shapePolygon(doc, poly), selMode, "Polygonal Lasso"); poly.clear(); return; }
-    if (k(ImGuiKey_Escape)) { poly.clear(); lasso.clear(); magneticPts.clear(); magneticSource = Image(); return; }
+    if (k(ImGuiKey_Escape)) { poly.clear(); lasso.clear(); magneticClear(); return; }
     // the tool letters, PhotoCraft's way: a letter picks its group's tool, Shift+letter steps through the group
     if (Toolbar::keys(shift, ctrl, alt)) syncTool();
     if (k(ImGuiKey_X)) { uint8_t t[4]; memcpy(t, fg, 4); memcpy(fg, bgc, 4); memcpy(bgc, t, 4); }
@@ -3599,7 +3650,7 @@ void init(SDL_Window* win, const std::string& prefDir, void (*status)(const char
         Bathos::init(prefDir, bp ? bp : "");   // Filter > Bathos: Atelier's depth app, when it's on this PC
         MimicPlug::init(prefDir, bp ? bp : "");
         InoculantPlug::init(prefDir, bp ? bp : "");   // File > Save with / Open and Cure with Inoculant   // Filter > Mimic: Atelier's face-swap app
-        Toolbar::init(std::string(bp ? bp : "") + "assets/", prefDir);   // the tool strip's icons and its layout
+        Toolbar::init(std::string(bp ? bp : "") + "assets/", prefDir, toolbarToolWorks);   // the strip asks Chimera which tools work
         Toolbar::select(Toolbar::BRUSH);
         SDL_free(bp);
         step(Changeling::studioDir().empty() ? "Changeling Studio isn't on this PC" : "Asking Changeling Studio for its filters...", 0.5f);
@@ -3627,16 +3678,34 @@ void script(const std::string& what) {
         fprintf(stderr, "rotate-view: camera %.1f degrees; document pixels unchanged\n", viewRotation);
         return;
     }
+    if (what == "rotate-marquee") {
+        Toolbar::select(Toolbar::RECT_MARQUEE); syncTool(); viewRotation = 30.0f;
+        dragging = true; dragStart = ImVec2(doc.w * 0.2f, doc.h * 0.2f); dragNow = ImVec2(doc.w * 0.8f, doc.h * 0.75f);
+        fprintf(stderr, "rotate-marquee: rotated rectangle preview\n"); return;
+    }
+    if (what == "rotate-crop") {
+        Toolbar::select(Toolbar::CROP); syncTool(); viewRotation = 30.0f; cropPending = true;
+        cropR[0] = doc.w * 0.18f; cropR[1] = doc.h * 0.16f; cropR[2] = doc.w * 0.82f; cropR[3] = doc.h * 0.84f;
+        fprintf(stderr, "rotate-crop: rotated crop outline and thirds\n"); return;
+    }
     if (what == "magnetic-lasso") {
         Toolbar::select(Toolbar::MAGNETIC_LASSO); syncTool();
         magneticWidth = 18; magneticContrast = 6;
-        composite(doc, magneticSource, {0, 0, doc.w, doc.h}, false);
+        Image source; composite(doc, source, {0, 0, doc.w, doc.h}, false);
+        magneticTracer = std::make_unique<Magnetic::Tracer>(source);
+        const Magnetic::Point firstRaw{doc.w * 0.5, doc.h * 0.12};
+        magneticPts = {magneticTracer->snap(firstRaw, magneticSettings())}; magneticAnchors = {0}; magneticTrail = {firstRaw}; magneticSelMode = SEL_NEW;
         for (int i = 0; i < 16; ++i) {
             const float a = -1.57079632679f + i * 6.28318530718f / 16;
-            magneticAppend(ImVec2(doc.w * (0.5f + 0.16f * std::cos(a)), doc.h * (0.44f + 0.32f * std::sin(a))));
+            if (i) {
+                const Magnetic::Point p{doc.w * (0.5f + 0.16f * std::cos(a)), doc.h * (0.44f + 0.32f * std::sin(a))};
+                magneticUpdate(p, false, true);
+                if (i % 4 == 0) magneticClick(p, false);
+            }
         }
+        const size_t points = magneticPts.size();
         magneticFinish();
-        fprintf(stderr, "magnetic-lasso: 16 anchors snapped to nearby image edges\n");
+        fprintf(stderr, "magnetic-lasso: 16 live-wire anchors traced in %zu path points\n", points);
         return;
     }
     if (what == "about") { scriptDlg = D_ABOUT; return; }   // Help > About: the splash art

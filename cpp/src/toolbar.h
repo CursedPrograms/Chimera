@@ -34,7 +34,7 @@ enum Id {
     COUNT
 };
 
-void init(const std::string& assetsDir, const std::string& prefDir);   // the icons, and which tools are hidden
+void init(const std::string& assetsDir, const std::string& prefDir, bool (*isWorking)(int));   // the icons, working tools and hidden tools
 int current();                         // the tool picked (an Id)
 void select(int id);                   // pick a tool (also what the slot shows from now on)
 const char* label(int id);             // "Brush Tool"
