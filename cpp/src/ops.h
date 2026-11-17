@@ -100,3 +100,11 @@ void magicErase(Doc& d, int x, int y, int tolerance, bool contiguous, bool sampl
 // the Red Eye tool (PhotoCraft's algo/src/redeye.rs): the red pupil nearest the click, within pupilSize (1..100), made
 // neutral and darker by darken (0..100). Returns how many pixels changed
 int redEye(Doc& d, int x, int y, float pupilSize, float darken);
+// Content-Aware Fill (Spot Healing, Remove, Edit > Content-Aware Fill): the hole (canvas-sized, > 127 is hole) filled
+// on the active layer from what's round it (inpaint.h). False when there was nothing to copy from
+bool contentAwareFill(Doc& d, const std::vector<uint8_t>& hole);
+// the Healing Brush and the Patch tool: the region (canvas-sized) copied from (dx, dy) away, its colour and light
+// taken from round the region (a membrane over the difference at its edge)
+void healRegion(Doc& d, const std::vector<uint8_t>& region, int dx, int dy);
+// Content-Aware Move: the selection's pixels moved by (dx, dy), and where they were filled
+void contentAwareMove(Doc& d, int dx, int dy);

@@ -1,6 +1,7 @@
 // Chimera - adjustments, filters, fills, selections, resizing and the brush.
 #include "ops.h"
 #include "blend.h"
+#include "inpaint.h"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -1006,6 +1007,122 @@ int redEye(Doc& d, int cx, int cy, float pupilSize, float darken) {
         }
     if (changed) d.dirty = true;
     return changed;
+}
+
+// ---------- Content-Aware Fill, healing, Content-Aware Move ----------
+// the hole's bounds (canvas), or empty
+static Rect holeBounds(const Doc& d, const std::vector<uint8_t>& hole) {
+    Rect r{d.w, d.h, 0, 0};
+    for (int y = 0; y < d.h; ++y) for (int x = 0; x < d.w; ++x) if (hole[(size_t)y * d.w + x] > 127) { r.x0 = std::min(r.x0, x); r.y0 = std::min(r.y0, y); r.x1 = std::max(r.x1, x + 1); r.y1 = std::max(r.y1, y + 1); }
+    return r;
+}
+bool contentAwareFill(Doc& d, const std::vector<uint8_t>& hole) {
+    Layer& l = d.cur();
+    if (l.isAdjust() || l.isFill() || hole.size() != (size_t)d.w * d.h) return false;
+    const Rect hb = holeBounds(d, hole);
+    if (hb.empty()) return false;
+    expandToCanvas(d, l);
+    // the window: the hole and plenty round it to copy from (as PhotoCraft's sampling window)
+    const int m = std::max(64, 2 * std::max(hb.x1 - hb.x0, hb.y1 - hb.y0));
+    const Rect win = Rect{hb.x0 - m, hb.y0 - m, hb.x1 + m, hb.y1 + m}.clip(d.w, d.h);
+    const int w = win.x1 - win.x0, h = win.y1 - win.y0;
+    std::vector<float> img((size_t)w * h * 3);
+    std::vector<uint8_t> hl((size_t)w * h), src((size_t)w * h);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            const size_t i = (size_t)y * w + x;
+            const uint8_t* p = l.img.at(x + win.x0 - l.x, y + win.y0 - l.y);
+            for (int c = 0; c < 3; ++c) img[i * 3 + c] = p[c] / 255.0f;
+            hl[i] = hole[(size_t)(y + win.y0) * d.w + x + win.x0] > 127;
+            src[i] = p[3] > 250;   // copy only from solid pixels
+        }
+    if (!Inpaint::complete(w, h, img, hl, &src)) return false;
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            const size_t i = (size_t)y * w + x;
+            if (!hl[i]) continue;
+            uint8_t* p = l.img.at(x + win.x0 - l.x, y + win.y0 - l.y);
+            for (int c = 0; c < 3; ++c) p[c] = to8(img[i * 3 + c]);
+            p[3] = 255;
+        }
+    d.dirty = true;
+    return true;
+}
+void healRegion(Doc& d, const std::vector<uint8_t>& region, int dx, int dy) {
+    Layer& l = d.cur();
+    if (l.isAdjust() || l.isFill()) return;
+    const Rect hb = holeBounds(d, region);
+    if (hb.empty()) return;
+    expandToCanvas(d, l);
+    const Rect win = Rect{hb.x0 - 1, hb.y0 - 1, hb.x1 + 1, hb.y1 + 1}.clip(d.w, d.h);
+    const int w = win.x1 - win.x0, h = win.y1 - win.y0;
+    std::vector<uint8_t> unknown((size_t)w * h);
+    for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) unknown[(size_t)y * w + x] = region[(size_t)(y + win.y0) * d.w + x + win.x0] > 127;
+    auto at = [&](int cx, int cy) { cx = std::clamp(cx, 0, d.w - 1); cy = std::clamp(cy, 0, d.h - 1); return l.img.at(cx - l.x, cy - l.y); };
+    // the texture from the source; the difference (here - source) known round the region, a membrane inside it
+    std::vector<float> src((size_t)w * h * 3), diff((size_t)w * h);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            const uint8_t* s = at(x + win.x0 + dx, y + win.y0 + dy);
+            for (int c = 0; c < 3; ++c) src[((size_t)y * w + x) * 3 + c] = s[c] / 255.0f;
+        }
+    std::vector<float> out((size_t)w * h * 3);
+    for (int c = 0; c < 3; ++c) {
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x) {
+                const size_t i = (size_t)y * w + x;
+                diff[i] = at(x + win.x0, y + win.y0)[c] / 255.0f - src[i * 3 + c];
+            }
+        Inpaint::membrane(w, h, diff, unknown);
+        for (size_t i = 0; i < diff.size(); ++i) out[i * 3 + c] = src[i * 3 + c] + diff[i];
+    }
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            const size_t i = (size_t)y * w + x;
+            const float a = region[(size_t)(y + win.y0) * d.w + x + win.x0] / 255.0f;
+            if (a <= 0) continue;
+            uint8_t* p = l.img.at(x + win.x0 - l.x, y + win.y0 - l.y);
+            for (int c = 0; c < 3; ++c) p[c] = to8(p[c] / 255.0f + (out[i * 3 + c] - p[c] / 255.0f) * a);
+        }
+    d.dirty = true;
+}
+void contentAwareMove(Doc& d, int dx, int dy) {
+    Layer& l = d.cur();
+    if (l.isAdjust() || l.isFill() || !d.hasSel()) return;
+    expandToCanvas(d, l);
+    const std::vector<uint8_t> sel = d.sel;
+    const Image before = l.img;
+    // where it was: filled from round it (a little grown, so no edge of the object is left)
+    std::vector<uint8_t> hole(sel.size());
+    for (int y = 0; y < d.h; ++y)
+        for (int x = 0; x < d.w; ++x) {
+            uint8_t v = 0;
+            for (int k = -2; k <= 2 && !v; ++k) for (int j = -2; j <= 2 && !v; ++j) {
+                const int nx = x + j, ny = y + k;
+                if (nx >= 0 && ny >= 0 && nx < d.w && ny < d.h && sel[(size_t)ny * d.w + nx] > 127) v = 255;
+            }
+            hole[(size_t)y * d.w + x] = v;
+        }
+    d.sel.clear();
+    contentAwareFill(d, hole);
+    // the pixels in their new place, through the selection's edge
+    for (int y = 0; y < d.h; ++y)
+        for (int x = 0; x < d.w; ++x) {
+            const float a = sel[(size_t)y * d.w + x] / 255.0f;
+            const int nx = x + dx, ny = y + dy;
+            if (a <= 0 || nx < 0 || ny < 0 || nx >= d.w || ny >= d.h) continue;
+            const uint8_t* s = before.at(x - l.x, y - l.y);
+            uint8_t* p = l.img.at(nx - l.x, ny - l.y);
+            for (int c = 0; c < 4; ++c) p[c] = (uint8_t)std::lround(p[c] + (s[c] - p[c]) * a);
+        }
+    // the selection moves with them
+    d.sel.assign(sel.size(), 0);
+    for (int y = 0; y < d.h; ++y)
+        for (int x = 0; x < d.w; ++x) {
+            const int nx = x + dx, ny = y + dy;
+            if (nx >= 0 && ny >= 0 && nx < d.w && ny < d.h) d.sel[(size_t)ny * d.w + nx] = sel[(size_t)y * d.w + x];
+        }
+    d.dirty = true;
 }
 
 // ---------- the Magic Eraser ----------
