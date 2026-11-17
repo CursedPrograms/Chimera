@@ -108,7 +108,7 @@ static std::string toast; static double toastUntil = 0;
 static void magneticClear();
 
 enum Tool { T_MOVE, T_RECT, T_ELLIPSE, T_LASSO, T_POLY, T_MAGNETIC, T_WAND, T_BRUSH, T_ERASER, T_BUCKET, T_DROPPER, T_HAND, T_ROTATE,
-            T_PENCIL, T_ZOOM, T_ROW, T_COL, T_CROP, T_PCROP, T_GRADIENT, T_MAGIC_ERASER, T_RETOUCH, T_QUICK, T_OBJECT, T_REDEYE, T_HEAL, T_SHAPE, T_MARK, T_TYPE, T_PEN, T_COUNT,
+            T_PENCIL, T_ZOOM, T_ROW, T_COL, T_CROP, T_PCROP, T_SLICE, T_SLICE_SELECT, T_GRADIENT, T_MAGIC_ERASER, T_RETOUCH, T_QUICK, T_OBJECT, T_REDEYE, T_HEAL, T_SHAPE, T_MARK, T_TYPE, T_PEN, T_COUNT,
             T_NONE = T_COUNT };   // T_NONE: a tool on the strip Chimera doesn't have yet
 static int tool = T_BRUSH;
 static uint8_t fg[4] = {0, 0, 0, 255}, bgc[4] = {255, 255, 255, 255};   // black on white, as PhotoCraft (D)
@@ -132,6 +132,9 @@ static bool cropPending = false, cropDelete = true; static float cropR[4] = {0, 
 static bool pcropPending = false, pcropCustomSize = false; static float pcropQ[8] = {0};
 static std::vector<ImVec2> pcropClicks; static int pcropDragPart = -1, pcropOutW = 0, pcropOutH = 0;
 static ImVec2 pcropMoveStart; static float pcropMoveQ[8] = {0};
+static int sliceActive = -1;
+static Rect sliceStartRect;
+static bool sliceDidMove = false;
 static float quickSize = 30; static std::vector<float> quickPts;     // the Quick Selection brush and its stroke
 static float magneticWidth = 10, magneticContrast = 10, magneticFrequency = 57;
 static std::vector<Magnetic::Point> magneticPts, magneticTrail, magneticLive;
@@ -1660,8 +1663,16 @@ static void applyCrop() {
     if (!cropPending) return;
     Rect r{(int)std::lround(std::min(cropR[0], cropR[2])), (int)std::lround(std::min(cropR[1], cropR[3])), (int)std::lround(std::max(cropR[0], cropR[2])), (int)std::lround(std::max(cropR[1], cropR[3]))};
     cropPending = false;
-    if (r.clip(doc.w, doc.h).empty()) return;
-    remember("Crop"); cropCanvas(doc, r, cropDelete); changed(); selChanged(); fitNext = true;
+    r = r.clip(doc.w, doc.h);
+    if (r.empty()) return;
+    remember("Crop"); cropCanvas(doc, r, cropDelete);
+    for (Slice& s : doc.slices) {
+        s.rect = {std::max(s.rect.x0, r.x0) - r.x0, std::max(s.rect.y0, r.y0) - r.y0,
+                  std::min(s.rect.x1, r.x1) - r.x0, std::min(s.rect.y1, r.y1) - r.y0};
+    }
+    doc.slices.erase(std::remove_if(doc.slices.begin(), doc.slices.end(), [](const Slice& s) { return s.rect.empty(); }), doc.slices.end());
+    sliceActive = -1;
+    changed(); selChanged(); fitNext = true;
 }
 // Check that the four corners make a nondegenerate convex quadrilateral.
 static bool pcropValid(const float q[8]) {
@@ -1808,6 +1819,8 @@ static void applyPerspectiveCrop() {
     doc.layers.clear();
     doc.active = 0;
     doc.sel.clear();
+    doc.slices.clear();
+    sliceActive = -1;
     Layer result = emptyLayer(doc, "Perspective Crop");
     result.img = std::move(out);
     result.x = result.y = 0;
@@ -1823,6 +1836,88 @@ static void applyPerspectiveCrop() {
     selChanged();
     fitNext = true;
     say("Perspective Crop flattened the visible image");
+}
+// Return free rectangles that tile the canvas around the stored user slices.
+static std::vector<Rect> autoSliceRects() {
+    std::vector<int> xs = {0, doc.w}, ys = {0, doc.h};
+    for (const Slice& s : doc.slices) {
+        Rect r = s.rect.clip(doc.w, doc.h);
+        if (r.empty()) continue;
+        xs.push_back(r.x0); xs.push_back(r.x1); ys.push_back(r.y0); ys.push_back(r.y1);
+    }
+    std::sort(xs.begin(), xs.end()); xs.erase(std::unique(xs.begin(), xs.end()), xs.end());
+    std::sort(ys.begin(), ys.end()); ys.erase(std::unique(ys.begin(), ys.end()), ys.end());
+    std::vector<Rect> out;
+    for (size_t yi = 1; yi < ys.size(); ++yi) {
+        int run = -1;
+        for (size_t xi = 0; xi < xs.size(); ++xi) {
+            bool free = xi + 1 < xs.size();
+            if (free) for (const Slice& s : doc.slices) {
+                Rect r = s.rect.clip(doc.w, doc.h);
+                if (r.x0 <= xs[xi] && xs[xi + 1] <= r.x1 && r.y0 <= ys[yi - 1] && ys[yi] <= r.y1) { free = false; break; }
+            }
+            if (free && run < 0) run = (int)xi;
+            if ((!free || xi + 1 == xs.size()) && run >= 0) {
+                Rect r{xs[run], ys[yi - 1], xs[xi], ys[yi]};
+                auto prior = std::find_if(out.rbegin(), out.rend(), [&](const Rect& p) { return p.x0 == r.x0 && p.x1 == r.x1 && p.y1 == r.y0; });
+                if (prior != out.rend()) prior->y1 = r.y1;
+                else out.push_back(r);
+                run = -1;
+            }
+        }
+    }
+    return out;
+}
+// Add one clipped user slice and select it for editing.
+static bool createSlice(Rect r) {
+    r = r.clip(doc.w, doc.h);
+    if (r.empty()) return false;
+    int id = 1;
+    for (const Slice& s : doc.slices) id = std::max(id, s.id + 1);
+    remember("Create Slice");
+    doc.slices.push_back({id, r, "Slice " + std::to_string(id)});
+    sliceActive = (int)doc.slices.size() - 1;
+    changed();
+    return true;
+}
+// Write each user slice and free canvas rectangle as a standalone PNG.
+static bool writeSlices(const std::filesystem::path& folder, size_t& written, std::string& err) {
+    std::error_code ec;
+    std::filesystem::create_directories(folder, ec);
+    if (ec) { err = "Could not create the slice export folder"; return false; }
+    std::vector<std::pair<Rect, std::string>> slices;
+    for (size_t i = 0; i < doc.slices.size(); ++i) {
+        const Slice& s = doc.slices[i];
+        Rect r = s.rect.clip(doc.w, doc.h);
+        if (!r.empty()) slices.push_back({r, s.name.empty() ? "slice_" + std::to_string(i + 1) : s.name});
+    }
+    for (Rect r : autoSliceRects()) slices.push_back({r, "auto_" + std::to_string(slices.size() + 1)});
+    Image all(doc.w, doc.h);
+    composite(doc, all, {0, 0, doc.w, doc.h}, false);
+    for (const auto& slice : slices) {
+        const Rect r = slice.first;
+        Image part(r.x1 - r.x0, r.y1 - r.y0);
+        for (int y = 0; y < part.h; ++y) memcpy(part.at(0, y), all.at(r.x0, r.y0 + y), (size_t)part.w * 4);
+        Doc output = newDoc(part.w, part.h, false);
+        output.layers[0].img = std::move(part);
+        std::string err;
+        if (!saveImage(output, (folder / std::filesystem::u8path(slice.second + ".png")).u8string(), err)) return false;
+        ++written;
+    }
+    return true;
+}
+// Ask where the sibling export folder should be created, then write all slices.
+static void exportSlices() {
+    if (noDoc) return;
+    const std::string start = doc.path.empty() ? "slices.png" : doc.path;
+    const std::string chosen = fileDialog(true, "PNG|*.png|", "png", start);
+    if (chosen.empty()) return;
+    const std::filesystem::path chosenPath = std::filesystem::u8path(chosen);
+    const std::filesystem::path folder = chosenPath.parent_path() / (chosenPath.stem().string() + "_slices");
+    size_t written = 0;
+    std::string err;
+    if (!writeSlices(folder, written, err)) { say(err); return; }
+    say("Exported " + std::to_string(written) + " slices");
 }
 // ---------- the Pen tools (PhotoCraft's paths): Pen, Freeform Pen, Curvature Pen, Add / Delete Anchor, Convert
 // Point, Path Selection and Direct Selection, on the document's work path ----------
@@ -2162,6 +2257,19 @@ static void canvasInput() {
             memcpy(pcropMoveQ, pcropQ, sizeof pcropQ);
             pcropMoveStart = c;
             break;
+        case T_SLICE:
+            sliceActive = -1;
+            break;
+        case T_SLICE_SELECT: {
+            sliceActive = -1;
+            sliceDidMove = false;
+            for (int i = (int)doc.slices.size() - 1; i >= 0; --i) {
+                const Rect r = doc.slices[i].rect;
+                if (c.x >= r.x0 && c.x < r.x1 && c.y >= r.y0 && c.y < r.y1) { sliceActive = i; break; }
+            }
+            if (sliceActive >= 0) { remember("Move Slice"); sliceStartRect = doc.slices[sliceActive].rect; }
+            break;
+        }
         case T_GRADIENT: case T_OBJECT: break;   // done when the drag ends
         case T_QUICK: quickPts = {c.x, c.y}; break;
         case T_REDEYE:
@@ -2304,6 +2412,15 @@ static void canvasInput() {
                 for (int i = 0; i < 4; ++i) { pcropQ[i * 2] = pcropMoveQ[i * 2] + c.x - pcropMoveStart.x; pcropQ[i * 2 + 1] = pcropMoveQ[i * 2 + 1] + c.y - pcropMoveStart.y; }
             }
             break;
+        case T_SLICE_SELECT:
+            if (sliceActive >= 0) {
+                Slice& s = doc.slices[sliceActive];
+                const int dx = std::clamp((int)std::lround(c.x - dragStart.x), -sliceStartRect.x0, doc.w - sliceStartRect.x1);
+                const int dy = std::clamp((int)std::lround(c.y - dragStart.y), -sliceStartRect.y0, doc.h - sliceStartRect.y1);
+                s.rect = {sliceStartRect.x0 + dx, sliceStartRect.y0 + dy, sliceStartRect.x1 + dx, sliceStartRect.y1 + dy};
+                sliceDidMove = dx != 0 || dy != 0;
+            }
+            break;
         case T_QUICK: if (std::hypot(c.x - quickPts[quickPts.size() - 2], c.y - quickPts.back()) * zoom > 3) { quickPts.push_back(c.x); quickPts.push_back(c.y); } break;
         case T_PENCIL: if (stroke.on) changed(pencilTo(doc, stroke, c.x, c.y, pencilSize, pencilOpacity, brushColour(), false, false)); break;
         case T_RETOUCH: if (stroke.on) changed(retouchTo(doc, stroke, c.x, c.y, rtSize, rtHard, retouchOpts(), false)); break;
@@ -2379,6 +2496,16 @@ static void canvasInput() {
                 else pcropPending = false;
             }
             pcropDragPart = -1;
+            break;
+        case T_SLICE:
+            if (std::fabs(c.x - dragStart.x) >= 3 && std::fabs(c.y - dragStart.y) >= 3) {
+                Rect r{(int)std::floor(std::min(c.x, dragStart.x)), (int)std::floor(std::min(c.y, dragStart.y)),
+                       (int)std::ceil(std::max(c.x, dragStart.x)), (int)std::ceil(std::max(c.y, dragStart.y))};
+                createSlice(r);
+            }
+            break;
+        case T_SLICE_SELECT:
+            if (sliceActive >= 0 && sliceDidMove) changed();
             break;
         case T_QUICK: quickSelectStroke(); break;
         case T_PEN:
@@ -2639,6 +2766,28 @@ static void drawCanvas() {
         for (size_t i = 1; i < pcropClicks.size(); ++i) dl->AddLine(toScreen(pcropClicks[i - 1].x, pcropClicks[i - 1].y), toScreen(pcropClicks[i].x, pcropClicks[i].y), C_PINK, 1.5f);
         for (ImVec2 p : pcropClicks) dl->AddCircleFilled(toScreen(p.x, p.y), 4, C_PINK, 12);
     }
+    if (tool == T_SLICE || tool == T_SLICE_SELECT) {
+        for (Rect r : autoSliceRects()) {
+            const ImVec2 q[4] = {toScreen((float)r.x0, (float)r.y0), toScreen((float)r.x1, (float)r.y0),
+                                 toScreen((float)r.x1, (float)r.y1), toScreen((float)r.x0, (float)r.y1)};
+            dl->AddPolyline(q, 4, IM_COL32(0, 170, 230, 90), ImDrawFlags_Closed, 1.0f);
+        }
+        for (size_t i = 0; i < doc.slices.size(); ++i) {
+            const Rect r = doc.slices[i].rect;
+            const ImVec2 q[4] = {toScreen((float)r.x0, (float)r.y0), toScreen((float)r.x1, (float)r.y0),
+                                 toScreen((float)r.x1, (float)r.y1), toScreen((float)r.x0, (float)r.y1)};
+            const ImU32 col = (int)i == sliceActive ? C_PINK : IM_COL32(0, 170, 230, 230);
+            dl->AddPolyline(q, 4, col, ImDrawFlags_Closed, (int)i == sliceActive ? 2.0f : 1.2f);
+            char label[24]; snprintf(label, sizeof label, "%d", doc.slices[i].id);
+            dl->AddRectFilled(ImVec2(q[0].x, q[0].y - 18), ImVec2(q[0].x + 22, q[0].y), col);
+            dl->AddText(ImVec2(q[0].x + 6, q[0].y - 17), IM_COL32(255, 255, 255, 255), label);
+        }
+        if (tool == T_SLICE && dragging) {
+            const ImVec2 q[4] = {toScreen(dragStart.x, dragStart.y), toScreen(dragNow.x, dragStart.y),
+                                 toScreen(dragNow.x, dragNow.y), toScreen(dragStart.x, dragNow.y)};
+            dl->AddPolyline(q, 4, C_PINK, ImDrawFlags_Closed, 1.5f);
+        }
+    }
     if (tool == T_OBJECT && dragging) {
         const ImVec2 q[4] = {toScreen(dragStart.x, dragStart.y), toScreen(dragNow.x, dragStart.y), toScreen(dragNow.x, dragNow.y), toScreen(dragStart.x, dragNow.y)};
         dl->AddPolyline(q, 4, C_PINK, ImDrawFlags_Closed, 1.5f);
@@ -2707,7 +2856,9 @@ static int ltTool(int id) {
     case Toolbar::MAGNETIC_LASSO: return T_MAGNETIC;
     case Toolbar::PENCIL: return T_PENCIL; case Toolbar::ZOOM: return T_ZOOM;
     case Toolbar::SINGLE_ROW_MARQUEE: return T_ROW; case Toolbar::SINGLE_COLUMN_MARQUEE: return T_COL;
-    case Toolbar::CROP: return T_CROP; case Toolbar::PERSPECTIVE_CROP: return T_PCROP; case Toolbar::GRADIENT: return T_GRADIENT; case Toolbar::MAGIC_ERASER: return T_MAGIC_ERASER;
+    case Toolbar::CROP: return T_CROP; case Toolbar::PERSPECTIVE_CROP: return T_PCROP;
+    case Toolbar::SLICE: return T_SLICE; case Toolbar::SLICE_SELECT: return T_SLICE_SELECT;
+    case Toolbar::GRADIENT: return T_GRADIENT; case Toolbar::MAGIC_ERASER: return T_MAGIC_ERASER;
     case Toolbar::BLUR: case Toolbar::SHARPEN: case Toolbar::SMUDGE: case Toolbar::DODGE: case Toolbar::BURN: case Toolbar::SPONGE:
     case Toolbar::CLONE_STAMP: case Toolbar::BACKGROUND_ERASER: return T_RETOUCH;
     case Toolbar::PATTERN_STAMP: case Toolbar::HISTORY_BRUSH: case Toolbar::ART_HISTORY_BRUSH: case Toolbar::COLOR_REPLACEMENT: case Toolbar::MIXER_BRUSH: return T_RETOUCH;
@@ -2896,6 +3047,19 @@ static void optionsBar() {
         ImGui::TextDisabled("Drag a box or click four corners; drag corners to adjust, Enter applies, Escape cancels");
         break;
     }
+    case T_SLICE:
+        if (ImGui::Button("Export Slices...")) exportSlices(); ImGui::SameLine(0, 14);
+        ImGui::TextDisabled("Drag rectangles to mark parts of the picture for export");
+        break;
+    case T_SLICE_SELECT:
+        ImGui::BeginDisabled(sliceActive < 0 || sliceActive >= (int)doc.slices.size());
+        if (ImGui::Button("Delete Slice")) {
+            remember("Delete Slice"); doc.slices.erase(doc.slices.begin() + sliceActive); sliceActive = -1; changed();
+        }
+        ImGui::EndDisabled(); ImGui::SameLine(0, 14);
+        if (ImGui::Button("Export Slices...")) exportSlices(); ImGui::SameLine(0, 14);
+        ImGui::TextDisabled(sliceActive >= 0 && sliceActive < (int)doc.slices.size() ? doc.slices[sliceActive].name.c_str() : "Click a slice to select it; drag to move");
+        break;
     case T_ZOOM: ImGui::TextDisabled("Click zooms in, Alt+click zooms out; the wheel zooms too"); break;
     case T_ROTATE:
         ImGui::TextDisabled("Drag around the canvas centre to rotate the view; Shift snaps to 15 degrees; double-click or Escape resets");
@@ -3470,6 +3634,7 @@ static void menus() {
         if (item("Save Project", "Ctrl+S", !noDoc)) save();
         if (item("Save Project As...", nullptr, !noDoc)) saveAs(true);
         if (item("Export PNG / JPG...", "Ctrl+Shift+S", !noDoc)) saveAs(false);
+        if (item("Export Slices as Images...", nullptr, !noDoc)) exportSlices();
         if (item("Export ICO...", nullptr, !noDoc)) saveAs(false, true);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", "A Windows icon: the picture at 16, 24, 32, 48, 64, 128 and 256 px in one .ico (not square: fitted, transparent round it)");
         if (item("Save with Inoculant...", nullptr, !noDoc && inoculantHave())) inoculantSave();
@@ -3956,6 +4121,26 @@ void script(const std::string& what) {
             fprintf(stderr, "perspective-crop: warped the visible image to %d x %d pixels\n", doc.w, doc.h);
         } else {
             fprintf(stderr, "perspective-crop-preview: four-corner homography preview\n");
+        }
+        return;
+    }
+    if (what == "slices-preview" || what == "slices-export") {
+        Toolbar::select(Toolbar::SLICE_SELECT); syncTool();
+        doc.slices.clear(); sliceActive = -1;
+        createSlice({doc.w / 10, doc.h / 8, doc.w * 48 / 100, doc.h * 7 / 8});
+        createSlice({doc.w * 52 / 100, doc.h / 5, doc.w * 9 / 10, doc.h * 4 / 5});
+        sliceActive = 0;
+        if (what == "slices-export") {
+            size_t written = 0; std::string err;
+            const auto folder = std::filesystem::path("cpp/build/slice-export-test");
+            if (!writeSlices(folder, written, err)) fprintf(stderr, "slices-export: %s\n", err.c_str());
+            else fprintf(stderr, "slices-export: wrote %zu PNG files\n", written);
+            const std::string project = "cpp/build/slices-roundtrip.chimera";
+            Doc roundTrip;
+            if (!saveProject(doc, project, err) || !openDoc(project, roundTrip, err)) fprintf(stderr, "slices-roundtrip: %s\n", err.c_str());
+            else fprintf(stderr, "slices-roundtrip: restored %zu user slices\n", roundTrip.slices.size());
+        } else {
+            fprintf(stderr, "slices-preview: %zu user slices and generated auto slices\n", doc.slices.size());
         }
         return;
     }

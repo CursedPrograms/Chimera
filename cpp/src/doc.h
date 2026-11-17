@@ -20,6 +20,13 @@ struct Rect {
     Rect unite(const Rect& o) const;
 };
 
+// A user-created web slice in document pixel coordinates.
+struct Slice {
+    int id = 0;
+    Rect rect;
+    std::string name;
+};
+
 struct Image {
     int w = 0, h = 0;
     std::vector<uint8_t> px;                     // RGBA
@@ -75,6 +82,7 @@ struct Doc {
     int active = 0;
     bool editMask = false;                       // painting / filters go to the active layer's mask
     std::vector<uint8_t> sel;                    // canvas-sized; empty() = nothing selected (everything is fair game)
+    std::vector<Slice> slices;                   // user slices used by the Slice tools and image export
     std::string path;                            // where it was opened from / saved to
     // the marks on it (PhotoCraft's Color Sampler, Count, Note and Ruler tools): not part of the picture
     struct Mark { float x = 0, y = 0; std::string text; };

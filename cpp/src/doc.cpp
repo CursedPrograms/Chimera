@@ -514,6 +514,23 @@ bool openDoc(const std::string& path, Doc& d, std::string& err) {
             }
             n.layers.push_back(std::move(l));
         }
+        // Newer projects append their user slices after the layer data; older files end here.
+        if (r.ok && r.i < b.size()) {
+            if (r.i + 8 > b.size() || memcmp(b.data() + r.i, "SLI1", 4)) {
+                err = "The project has an unknown extension";
+                return false;
+            }
+            r.i += 4;
+            const uint32_t slices = r.u32();
+            if (slices > 100000) { err = "The project has too many slices"; return false; }
+            for (uint32_t i = 0; i < slices && r.ok; ++i) {
+                Slice s;
+                s.id = r.i32(); s.rect.x0 = r.i32(); s.rect.y0 = r.i32(); s.rect.x1 = r.i32(); s.rect.y1 = r.i32();
+                auto name = r.bytes(); s.name.assign(name.begin(), name.end());
+                if (s.rect.empty()) { r.ok = false; break; }
+                n.slices.push_back(std::move(s));
+            }
+        }
         if (!r.ok || n.layers.empty()) { err = "The project is damaged"; return false; }
         n.active = std::clamp(n.active, 0, (int)n.layers.size() - 1);
         n.path = path;
@@ -622,6 +639,13 @@ bool saveProject(const Doc& d, const std::string& path, std::string& err) {
         if (l.isFill()) { const std::string f = l.fill.save(); putBytes(o, (const uint8_t*)f.data(), f.size()); }
         if (l.isShape()) { const std::string sh = l.shape.save(); putBytes(o, (const uint8_t*)sh.data(), sh.size()); }
         if (l.isText()) { const std::string tx = l.text.save(); putBytes(o, (const uint8_t*)tx.data(), tx.size()); }
+    }
+    o.insert(o.end(), {'S', 'L', 'I', '1'});
+    putU32(o, (uint32_t)d.slices.size());
+    for (const Slice& s : d.slices) {
+        putU32(o, (uint32_t)s.id); putU32(o, (uint32_t)s.rect.x0); putU32(o, (uint32_t)s.rect.y0);
+        putU32(o, (uint32_t)s.rect.x1); putU32(o, (uint32_t)s.rect.y1);
+        putBytes(o, (const uint8_t*)s.name.data(), s.name.size());
     }
     if (!writeFile(path, o)) { err = "Can't write " + path; return false; }
     return true;
