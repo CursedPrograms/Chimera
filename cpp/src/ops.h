@@ -80,13 +80,22 @@ void strokeEnd(Stroke& s);
 Rect pencilTo(Doc& d, Stroke& s, float x, float y, float size, float opacity, const uint8_t rgb[3], bool erase, bool first);
 
 // ---- the retouching brushes (Photoshop's, as PhotoCraft has them): each dab changes the pixels under it, in place
-enum Retouch { RT_BLUR, RT_SHARPEN, RT_SMUDGE, RT_DODGE, RT_BURN, RT_SPONGE_SAT, RT_SPONGE_DESAT, RT_CLONE, RT_BG_ERASE };
+enum Retouch { RT_BLUR, RT_SHARPEN, RT_SMUDGE, RT_DODGE, RT_BURN, RT_SPONGE_SAT, RT_SPONGE_DESAT, RT_CLONE, RT_BG_ERASE,
+               RT_PATTERN, RT_HISTORY, RT_ART_HISTORY, RT_REPLACE, RT_MIXER, RT_COUNT };
 struct RetouchOpts {
     int mode = RT_BLUR;
     float strength = 0.5f;                       // Blur/Sharpen/Smudge strength, Dodge/Burn exposure, Sponge flow: 0..1
     int range = 1;                               // Dodge/Burn: 0 shadows, 1 midtones, 2 highlights
     float srcDX = 0, srcDY = 0;                  // Clone Stamp: where it copies from, as an offset from the brush
-    float tolerance = 0.25f;                     // Background Eraser: how far from the sampled colour still goes
+    float tolerance = 0.25f;                     // Background Eraser, Color Replacement: how far from the sampled colour still goes
+    const uint8_t* fg = nullptr;                 // Color Replacement, Mixer Brush: the foreground colour
+    const Image* pattern = nullptr;              // Pattern Stamp: the pattern (tiled from the canvas's top left)
+    const Image* history = nullptr;              // History Brush, Art History: the layer as it was (its canvas place below)
+    int histX = 0, histY = 0;
+    int replaceMode = 2;                         // Color Replacement: 0 hue, 1 saturation, 2 colour, 3 luminosity
+    float wet = 0.5f, load = 0.5f, mix = 0.5f;   // Mixer Brush: how much paint it picks up, holds, mixes in
+    int artStyle = 0;                            // Art History: 0 tight short, 1 loose medium, 2 dab, 3 tight curl
+    float artArea = 50;                          // Art History: how far round the brush its strokes land, pixels
 };
 Rect retouchTo(Doc& d, Stroke& s, float x, float y, float size, float hardness, const RetouchOpts& o, bool first);
 

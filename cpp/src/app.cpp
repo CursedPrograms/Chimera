@@ -115,7 +115,14 @@ static float eraserSize = 40, eraserHard = 0.8f, eraserOpacity = 1.0f;
 static float pencilSize = 4, pencilOpacity = 1.0f;
 // the retouching brushes (Blur, Sharpen, Smudge, Dodge, Burn, Sponge, Clone Stamp, Background Eraser): one size and
 // hardness for them all, each its own strength; Dodge/Burn's range, the Sponge's mode, the Clone Stamp's source
-static float rtSize = 60, rtHard = 0.5f, rtStrength[9] = {0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 1.0f, 0.25f};
+static float rtSize = 60, rtHard = 0.5f, rtStrength[RT_COUNT] = {0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 1.0f, 0.25f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+// Pattern Stamp's patterns (built in, and Edit > Define Pattern), the History Brush's source, and the others' settings
+static std::vector<std::pair<std::string, Image>> patterns;
+static int patternPick = 0;
+
+static float replaceTol = 0.3f; static int replaceMode = 2;
+static float mixWet = 0.5f, mixLoad = 0.5f, mixMix = 0.5f;
+static int artStyle = 0; static float artArea = 50;
 static int rtRange = 1; static bool spongeDesat = false, cloneSet = false, cloneAligned = true, cloneHaveOffset = false;
 static float cloneSrcX = 0, cloneSrcY = 0, cloneDX = 0, cloneDY = 0;
 static int gradToolStyle = 0; static bool gradToolReverse = false; static float gradToolOpacity = 1.0f;
@@ -368,6 +375,7 @@ static void fresh() {
     showMask = false; dirty = {0, 0, doc.w, doc.h}; texW = -1;
     docVersion++; selVersion++; fitNext = true;
     doc.dirty = false;
+    if (!doc.historyState) doc.historyState = std::make_shared<const std::vector<Layer>>(doc.layers);   // the History Brush's source
 }
 
 bool open(const std::string& path) {
@@ -1484,6 +1492,8 @@ static int retouchMode() {
     case Toolbar::SHARPEN: return RT_SHARPEN; case Toolbar::SMUDGE: return RT_SMUDGE; case Toolbar::DODGE: return RT_DODGE;
     case Toolbar::BURN: return RT_BURN; case Toolbar::SPONGE: return spongeDesat ? RT_SPONGE_DESAT : RT_SPONGE_SAT;
     case Toolbar::CLONE_STAMP: return RT_CLONE; case Toolbar::BACKGROUND_ERASER: return RT_BG_ERASE;
+    case Toolbar::PATTERN_STAMP: return RT_PATTERN; case Toolbar::HISTORY_BRUSH: return RT_HISTORY; case Toolbar::ART_HISTORY_BRUSH: return RT_ART_HISTORY;
+    case Toolbar::COLOR_REPLACEMENT: return RT_REPLACE; case Toolbar::MIXER_BRUSH: return RT_MIXER;
     default: return RT_BLUR;
     }
 }
@@ -1491,6 +1501,25 @@ static RetouchOpts retouchOpts() {
     RetouchOpts o; o.mode = retouchMode();
     const int slot = o.mode == RT_SPONGE_DESAT ? RT_SPONGE_SAT : o.mode;
     o.strength = rtStrength[slot]; o.range = rtRange; o.srcDX = cloneDX; o.srcDY = cloneDY; o.tolerance = rtStrength[RT_BG_ERASE];
+    if (o.mode == RT_REPLACE) o.tolerance = replaceTol;
+    o.fg = fg; o.replaceMode = replaceMode; o.wet = mixWet; o.load = mixLoad; o.mix = mixMix; o.artStyle = artStyle; o.artArea = artArea;
+    if (o.mode == RT_PATTERN) {
+        if (patterns.empty()) {   // the built-in ones: checks, stripes, dots, bricks
+            auto make = [](const char* name, int w, int h, auto f) { Image im(w, h); for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) { uint8_t* q = im.at(x, y); const float v = f(x, y); q[0] = q[1] = q[2] = (uint8_t)(v * 255); q[3] = 255; } patterns.push_back({name, im}); };
+            make("Checks", 32, 32, [](int x, int y) { return ((x / 16 + y / 16) & 1) ? 0.85f : 0.3f; });
+            make("Stripes", 24, 24, [](int x, int y) { return ((x + y) / 6) & 1 ? 0.9f : 0.2f; });
+            make("Dots", 20, 20, [](int x, int y) { const float dx = x - 9.5f, dy = y - 9.5f; return dx * dx + dy * dy < 25 ? 0.15f : 0.9f; });
+            make("Bricks", 40, 20, [](int x, int y) { const int xs = (y / 10) & 1 ? x + 20 : x; return (y % 10 == 0 || xs % 40 == 0) ? 0.35f : 0.75f; });
+        }
+        patternPick = std::clamp(patternPick, 0, (int)patterns.size() - 1);
+        o.pattern = &patterns[patternPick].second;
+    }
+    if (o.mode == RT_HISTORY || o.mode == RT_ART_HISTORY) {
+        // the source: the active layer as it was when the document opened (or Set Source); a layer made since: as it is
+        if (!doc.historyState) doc.historyState = std::make_shared<const std::vector<Layer>>(doc.layers);
+        const Layer& L = doc.active < (int)doc.historyState->size() ? (*doc.historyState)[doc.active] : doc.cur();
+        o.history = &L.img; o.histX = L.x; o.histY = L.y;
+    }
     return o;
 }
 // what Quick Selection and Object Selection look at: the layer, or everything (Sample All Layers)
@@ -2017,6 +2046,7 @@ static int ltTool(int id) {
     case Toolbar::CROP: return T_CROP; case Toolbar::GRADIENT: return T_GRADIENT; case Toolbar::MAGIC_ERASER: return T_MAGIC_ERASER;
     case Toolbar::BLUR: case Toolbar::SHARPEN: case Toolbar::SMUDGE: case Toolbar::DODGE: case Toolbar::BURN: case Toolbar::SPONGE:
     case Toolbar::CLONE_STAMP: case Toolbar::BACKGROUND_ERASER: return T_RETOUCH;
+    case Toolbar::PATTERN_STAMP: case Toolbar::HISTORY_BRUSH: case Toolbar::ART_HISTORY_BRUSH: case Toolbar::COLOR_REPLACEMENT: case Toolbar::MIXER_BRUSH: return T_RETOUCH;
     case Toolbar::QUICK_SELECTION: return T_QUICK; case Toolbar::OBJECT_SELECTION: return T_OBJECT; case Toolbar::RED_EYE: return T_REDEYE;
     case Toolbar::SPOT_HEALING: case Toolbar::REMOVE: case Toolbar::HEALING: case Toolbar::PATCH: case Toolbar::CONTENT_AWARE_MOVE: return T_HEAL;
     case Toolbar::RECTANGLE: case Toolbar::ELLIPSE: case Toolbar::TRIANGLE: case Toolbar::POLYGON: case Toolbar::STAR: case Toolbar::LINE: return T_SHAPE;
@@ -2130,12 +2160,38 @@ static void optionsBar() {
         const int mode = retouchMode(), slot = mode == RT_SPONGE_DESAT ? RT_SPONGE_SAT : mode;
         sliderF("Size", &rtSize, 1, 1000, "%.0f px", ImGuiSliderFlags_Logarithmic); ImGui::SameLine(0, 14);
         float h = rtHard * 100; if (sliderF("Hardness", &h, 0, 100, "%.0f%%")) rtHard = h / 100; ImGui::SameLine(0, 14);
-        const char* what = mode == RT_DODGE || mode == RT_BURN ? "Exposure" : mode == RT_SPONGE_SAT || mode == RT_SPONGE_DESAT ? "Flow" : mode == RT_CLONE ? "Opacity" : mode == RT_BG_ERASE ? "Tolerance" : "Strength";
+        const char* what = mode == RT_DODGE || mode == RT_BURN ? "Exposure" : mode == RT_SPONGE_SAT || mode == RT_SPONGE_DESAT || mode == RT_MIXER ? "Flow" : mode == RT_CLONE || mode == RT_PATTERN || mode == RT_HISTORY || mode == RT_ART_HISTORY || mode == RT_REPLACE ? "Opacity" : mode == RT_BG_ERASE ? "Tolerance" : "Strength";
         float s = rtStrength[slot] * 100; if (sliderF(what, &s, 1, 100, "%.0f%%")) rtStrength[slot] = s / 100;
         if (mode == RT_DODGE || mode == RT_BURN) { ImGui::SameLine(0, 14); const char* rs[] = {"Shadows", "Midtones", "Highlights"}; ImGui::SetNextItemWidth(110); ImGui::Combo("##range", &rtRange, rs, 3); }
         if (mode == RT_SPONGE_SAT || mode == RT_SPONGE_DESAT) { ImGui::SameLine(0, 14); int m2 = spongeDesat ? 1 : 0; const char* ms[] = {"Saturate", "Desaturate"}; ImGui::SetNextItemWidth(110); if (ImGui::Combo("##sp", &m2, ms, 2)) spongeDesat = m2 == 1; }
         if (mode == RT_CLONE) { ImGui::SameLine(0, 14); ImGui::Checkbox("Aligned", &cloneAligned); ImGui::SameLine(0, 14); ImGui::TextDisabled(cloneSet ? "Alt+click sets a new source" : "Alt+click where to copy from"); }
         if (mode == RT_BG_ERASE) { ImGui::SameLine(0, 14); ImGui::TextDisabled("Erases the colour under the brush's centre where you start"); }
+        if (mode == RT_PATTERN) {
+            ImGui::SameLine(0, 14); retouchOpts();   // (makes the built-in patterns)
+            std::vector<const char*> names; for (auto& pt : patterns) names.push_back(pt.first.c_str());
+            ImGui::SetNextItemWidth(140); ImGui::Combo("##pat", &patternPick, names.data(), (int)names.size());
+            ImGui::SameLine(0, 14); ImGui::TextDisabled("Edit > Define Pattern makes one from the selection");
+        }
+        if (mode == RT_HISTORY || mode == RT_ART_HISTORY) {
+            ImGui::SameLine(0, 14);
+            if (ImGui::Button("Set Source to Now")) { doc.historyState = std::make_shared<const std::vector<Layer>>(doc.layers); say("The History Brush paints back to the picture as it is now"); }
+            if (ImGui::IsItemHovered()) ImGui::SetTooltip("It paints back to the picture as it was when it opened (or when you press this)");
+            if (mode == RT_ART_HISTORY) {
+                ImGui::SameLine(0, 14); const char* st[] = {"Tight Short", "Loose Medium", "Dab", "Tight Curl"}; ImGui::SetNextItemWidth(120); ImGui::Combo("##art", &artStyle, st, 4);
+                ImGui::SameLine(0, 14); sliderF("Area", &artArea, 5, 200, "%.0f px");
+            }
+        }
+        if (mode == RT_REPLACE) {
+            ImGui::SameLine(0, 14); const char* rm[] = {"Hue", "Saturation", "Color", "Luminosity"}; ImGui::SetNextItemWidth(110); ImGui::Combo("##rmode", &replaceMode, rm, 4);
+            float t = replaceTol * 100; ImGui::SameLine(0, 14); if (sliderF("Tolerance", &t, 1, 100, "%.0f%%")) replaceTol = t / 100;
+            ImGui::SameLine(0, 14); ImGui::TextDisabled("Recolours what's like the colour where you start, with the foreground");
+        }
+        if (mode == RT_MIXER) {
+            float w = mixWet * 100, l2 = mixLoad * 100, m2 = mixMix * 100;
+            ImGui::SameLine(0, 14); if (sliderF("Wet", &w, 0, 100, "%.0f%%")) mixWet = w / 100;
+            ImGui::SameLine(0, 14); if (sliderF("Load", &l2, 1, 100, "%.0f%%")) mixLoad = l2 / 100;
+            ImGui::SameLine(0, 14); if (sliderF("Mix", &m2, 0, 100, "%.0f%%")) mixMix = m2 / 100;
+        }
         break;
     }
     case T_GRADIENT: {
@@ -2666,6 +2722,18 @@ static void menus() {
         if (item("Fill with Background", "Ctrl+Backspace")) fillWith(bgc, "Fill");
         if (item("Clear", "Delete")) clearSelection();
         if (item("Content-Aware Fill", "Shift+F5", doc.hasSel())) contentAwareFillSelection();
+        if (item("Define Pattern...")) {   // the selection's box of the picture (or all of it), as a pattern for the Pattern Stamp
+            Rect r = doc.hasSel() ? doc.selBounds() : Rect{0, 0, doc.w, doc.h};
+            r = r.clip(doc.w, doc.h);
+            if (!r.empty() && (r.x1 - r.x0) <= 1024 && (r.y1 - r.y0) <= 1024) {
+                Image all(doc.w, doc.h); composite(doc, all, {0, 0, doc.w, doc.h}, false);
+                Image pt(r.x1 - r.x0, r.y1 - r.y0);
+                for (int y = 0; y < pt.h; ++y) memcpy(pt.at(0, y), all.at(r.x0, y + r.y0), (size_t)pt.w * 4);
+                retouchOpts();
+                patterns.push_back({"Pattern " + std::to_string(patterns.size() - 3), pt}); patternPick = (int)patterns.size() - 1;
+                say("Defined a pattern: pick the Pattern Stamp to paint with it");
+            } else say("Select at most 1024 x 1024 pixels to define a pattern");
+        }
         ImGui::Separator();
         if (item("Free Transform...", "Ctrl+T")) openDlg(D_TRANSFORM);
         if (item("Flip Horizontal")) { remember("Flip"); flipLayer(doc, true); changed(); }
@@ -3158,6 +3226,21 @@ void script(const std::string& what) {
     if (what.rfind("ico:", 0) == 0) {   // tests: File > Export ICO to a file
         std::string err; const bool ok = saveImage(doc, what.substr(4), err);
         fprintf(stderr, "ico: %s %s\n", ok ? "saved" : "failed", err.c_str());
+    }
+    if (what == "brushes") {   // tests: each new brush along a line, as a mouse would
+        const int ids[] = {Toolbar::PATTERN_STAMP, Toolbar::HISTORY_BRUSH, Toolbar::ART_HISTORY_BRUSH, Toolbar::COLOR_REPLACEMENT, Toolbar::MIXER_BRUSH};
+        fg[0] = 220; fg[1] = 40; fg[2] = 120;
+        for (int i = 0; i < 5; ++i) {
+            Toolbar::select(ids[i]); syncTool();
+            if (i == 1) { remember("x"); Work o = getWork(doc), r = o; adjInvert(r); putWork(doc, o, r); }   // something to paint back from
+            const float y = doc.h * (0.15f + 0.17f * i);
+            RetouchOpts op = retouchOpts();
+            strokeBegin(doc, stroke);
+            for (int k = 0; k <= 20; ++k) retouchTo(doc, stroke, doc.w * (0.15f + 0.035f * k), y, 70, 0.5f, op, k == 0);
+            strokeEnd(stroke);
+        }
+        fprintf(stderr, "brushes: done\n");
+        changed();
     }
     if (what == "marks") {   // tests: samplers, counts, a note and a ruler, then the Ruler tool's bar
         for (int i = 0; i < 3; ++i) { Doc::Mark k; k.x = doc.w * (0.3f + 0.2f * i); k.y = doc.h * 0.4f; doc.samplers.push_back(k); }

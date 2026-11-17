@@ -768,8 +768,10 @@ Rect retouchTo(Doc& d, Stroke& s, float x, float y, float size, float hardness, 
     std::vector<float> dabs = dabsTo(s, x, y, r, first);
     s.lastX = x; s.lastY = y;
     Rect changed{0, 0, 0, 0};
-    static float sampled[3] = {0, 0, 0};          // Background Eraser: the colour under the first dab
-    if (first && op.mode == RT_BG_ERASE) {
+    static float sampled[3] = {0, 0, 0};          // Background Eraser, Color Replacement: the colour under the first dab
+    static float reservoir[4] = {0, 0, 0, 1}, loaded = 1;   // Mixer Brush: the paint on the brush, and how much
+    if (first && op.mode == RT_MIXER && op.fg) { for (int c = 0; c < 3; ++c) reservoir[c] = op.fg[c] / 255.0f; reservoir[3] = 1; loaded = 1; }
+    if (first && (op.mode == RT_BG_ERASE || op.mode == RT_REPLACE)) {
         const int sx = (int)x - o.ox, sy = (int)y - o.oy;
         if (sx >= 0 && sy >= 0 && sx < o.w && sy < o.h) { const float* p = o.at(sx, sy); sampled[0] = p[0]; sampled[1] = p[1]; sampled[2] = p[2]; }
     }
@@ -786,6 +788,12 @@ Rect retouchTo(Doc& d, Stroke& s, float x, float y, float size, float hardness, 
         const int x0 = std::max(0, (int)std::floor(cx - r)), y0 = std::max(0, (int)std::floor(cy - r));
         const int x1 = std::min(o.w, (int)std::ceil(cx + r) + 1), y1 = std::min(o.h, (int)std::ceil(cy + r) + 1);
         if (x1 <= x0 || y1 <= y0) continue;
+        if (op.mode == RT_MIXER) {   // the brush picks up the colour under it (wet), mixed into what it holds (mix)
+            float avg[4] = {0, 0, 0, 0}; int n = 0;
+            for (int py = y0; py < y1; py += 2) for (int px = x0; px < x1; px += 2) { float q4[4]; get(px, py, q4); for (int c = 0; c < 4; ++c) avg[c] += q4[c]; ++n; }
+            if (n) { for (int c = 0; c < 4; ++c) avg[c] /= n; const float t = op.wet * op.mix; for (int c = 0; c < 4; ++c) reservoir[c] += (avg[c] - reservoir[c]) * t; }
+            loaded = std::max(0.0f, loaded - (1 - op.load) * 0.04f);   // it runs dry, more slowly the more it loads
+        }
         // this dab's result from the pixels as they are now, written after (so a dab doesn't read its own output)
         std::vector<float> out((size_t)(x1 - x0) * (y1 - y0) * 4);
         std::vector<float> wgt((size_t)(x1 - x0) * (y1 - y0), 0.0f);
@@ -856,6 +864,62 @@ Rect retouchTo(Doc& d, Stroke& s, float x, float y, float size, float hardness, 
                     a = 1;
                     break;
                 }
+                case RT_PATTERN: {   // the pattern, tiled from the canvas's corner (Aligned), over the pixels
+                    if (!op.pattern || op.pattern->w <= 0) { a = 0; break; }
+                    const Image& pt = *op.pattern;
+                    const int tx = ((canvasX % pt.w) + pt.w) % pt.w, ty = ((canvasY % pt.h) + pt.h) % pt.h;
+                    const uint8_t* sp8 = pt.at(tx, ty);
+                    float b[4] = {p[0], p[1], p[2], p[3]};
+                    const float sp[4] = {sp8[0] / 255.0f, sp8[1] / 255.0f, sp8[2] / 255.0f, sp8[3] / 255.0f * a * st};
+                    compositePixel(BM_Normal, b, sp, canvasX, canvasY);
+                    for (int c = 0; c < 4; ++c) q[c] = b[c];
+                    a = 1;
+                    break;
+                }
+                case RT_HISTORY: {   // back towards the layer as it was (the History Brush's source)
+                    if (!op.history) { a = 0; break; }
+                    const int hx = canvasX - op.histX, hy = canvasY - op.histY;
+                    if (hx < 0 || hy < 0 || hx >= op.history->w || hy >= op.history->h) { a = 0; break; }
+                    const uint8_t* h8 = op.history->at(hx, hy);
+                    const float t = a * st;
+                    for (int c = 0; c < 4; ++c) q[c] = p[c] + (h8[c] / 255.0f - p[c]) * t;
+                    a = 1;
+                    break;
+                }
+                case RT_ART_HISTORY: a = 0; break;   // (its strokes are laid below, per dab)
+                case RT_REPLACE: {   // pixels near the sampled colour take the foreground's hue / saturation / colour / lightness
+                    if (!op.fg) { a = 0; break; }
+                    const float dist = std::sqrt((p[0] - sampled[0]) * (p[0] - sampled[0]) + (p[1] - sampled[1]) * (p[1] - sampled[1]) + (p[2] - sampled[2]) * (p[2] - sampled[2])) / 1.732f;
+                    const float near = std::clamp((op.tolerance - dist) / 0.06f + 0.5f, 0.0f, 1.0f);
+                    if (near <= 0) { a = 0; break; }
+                    float h, sat, v, fh, fs, fv;
+                    auto toHsv = [](const float* c, float& H, float& S, float& V) {
+                        const float mx = std::max({c[0], c[1], c[2]}), mn = std::min({c[0], c[1], c[2]}), dl = mx - mn;
+                        V = mx; S = mx > 1e-6f ? dl / mx : 0;
+                        if (dl < 1e-6f) H = 0; else if (mx == c[0]) H = std::fmod((c[1] - c[2]) / dl + 6, 6.0f); else if (mx == c[1]) H = (c[2] - c[0]) / dl + 2; else H = (c[0] - c[1]) / dl + 4;
+                    };
+                    const float fgc[3] = {op.fg[0] / 255.0f, op.fg[1] / 255.0f, op.fg[2] / 255.0f};
+                    toHsv(p, h, sat, v); toHsv(fgc, fh, fs, fv);
+                    if (op.replaceMode == 0 || op.replaceMode == 2) h = fh;
+                    if (op.replaceMode == 1 || op.replaceMode == 2) sat = fs;
+                    if (op.replaceMode == 3) v = fv;
+                    float r3[3];
+                    const float cch = v * sat, xx = cch * (1 - std::fabs(std::fmod(h, 2.0f) - 1)), m = v - cch;
+                    const int seg = (int)h % 6;
+                    const float rgbT[6][3] = {{cch, xx, 0}, {xx, cch, 0}, {0, cch, xx}, {0, xx, cch}, {xx, 0, cch}, {cch, 0, xx}};
+                    for (int c = 0; c < 3; ++c) r3[c] = rgbT[seg][c] + m;
+                    const float t = a * near * st;
+                    for (int c = 0; c < 3; ++c) q[c] = p[c] + (r3[c] - p[c]) * t;
+                    a = 1;
+                    break;
+                }
+                case RT_MIXER: {   // the brush's paint (the foreground, mixed with what it picked up) laid on as it runs dry
+                    const float t = a * st * loaded * reservoir[3];
+                    for (int c = 0; c < 3; ++c) q[c] = p[c] + (reservoir[c] - p[c]) * t;
+                    q[3] = p[3] + (1 - p[3]) * t;
+                    a = 1;
+                    break;
+                }
                 case RT_BG_ERASE: {   // pixels near the sampled colour go transparent
                     const float dist = std::sqrt((p[0] - sampled[0]) * (p[0] - sampled[0]) + (p[1] - sampled[1]) * (p[1] - sampled[1]) + (p[2] - sampled[2]) * (p[2] - sampled[2])) / 1.732f;
                     const float keep = std::clamp((dist - op.tolerance) / 0.08f + 0.5f, 0.0f, 1.0f);
@@ -865,6 +929,45 @@ Rect retouchTo(Doc& d, Stroke& s, float x, float y, float size, float hardness, 
                 }
                 wgt[j] = a;
             }
+        if (op.mode == RT_ART_HISTORY && op.history) {
+            // a few short strokes in the source's colours scattered round the brush (the area), each along the
+            // source's own edges (perpendicular to its gradient): the style sets their length and curl
+            static uint32_t seed = 12345;
+            auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return (seed >> 8) / 16777216.0f; };
+            const float len = op.artStyle == 0 ? 6.0f : op.artStyle == 1 ? 14.0f : op.artStyle == 2 ? 2.0f : 9.0f;
+            const int count = std::max(1, (int)(op.artArea * op.artArea / 400 * op.strength));
+            auto srcAt = [&](int cx2, int cy2, float out[4]) {
+                const int hx = std::clamp(cx2 - op.histX, 0, op.history->w - 1), hy = std::clamp(cy2 - op.histY, 0, op.history->h - 1);
+                const uint8_t* h8 = op.history->at(hx, hy);
+                for (int c = 0; c < 4; ++c) out[c] = h8[c] / 255.0f;
+            };
+            for (int n = 0; n < count; ++n) {
+                const float ang0 = rnd() * 6.2831853f, rad = std::sqrt(rnd()) * op.artArea;
+                float sx = dabs[k] + std::cos(ang0) * rad, sy = dabs[k + 1] + std::sin(ang0) * rad;
+                float col[4]; srcAt((int)sx, (int)sy, col);
+                float gl[4], gr[4], gu[4], gd[4];
+                srcAt((int)sx - 2, (int)sy, gl); srcAt((int)sx + 2, (int)sy, gr); srcAt((int)sx, (int)sy - 2, gu); srcAt((int)sx, (int)sy + 2, gd);
+                const float gx = lumOf(gr) - lumOf(gl), gy = lumOf(gd) - lumOf(gu);
+                float dir = (std::fabs(gx) + std::fabs(gy) > 1e-3f ? std::atan2(gy, gx) + 1.5707963f : rnd() * 6.2831853f);
+                const float thick = std::max(1.0f, r * 0.08f);
+                for (float t = 0; t < len; t += 0.7f) {
+                    if (op.artStyle == 3) dir += 0.12f;
+                    sx += std::cos(dir) * 0.7f; sy += std::sin(dir) * 0.7f;
+                    const int ix = (int)sx - o.ox, iy = (int)sy - o.oy;
+                    for (int oy2 = -(int)thick; oy2 <= (int)thick; ++oy2)
+                        for (int ox2 = -(int)thick; ox2 <= (int)thick; ++ox2) {
+                            const int qx = ix + ox2, qy = iy + oy2;
+                            if (qx < 0 || qy < 0 || qx >= o.w || qy >= o.h || ox2 * ox2 + oy2 * oy2 > thick * thick) continue;
+                            const int ccx = qx + o.ox, ccy = qy + o.oy;
+                            const float sa = d.hasSel() ? ((ccx >= 0 && ccy >= 0 && ccx < d.w && ccy < d.h) ? d.sel[(size_t)ccy * d.w + ccx] / 255.0f : 0.0f) : 1.0f;
+                            if (sa <= 0) continue;
+                            uint8_t* dst = &l.img.px[((size_t)qy * o.w + qx) * 4];
+                            for (int c = 0; c < 4; ++c) dst[c] = to8(dst[c] / 255.0f + (col[c] - dst[c] / 255.0f) * sa * 0.85f);
+                        }
+                    changed = changed.unite(Rect{(int)sx - (int)thick - 1, (int)sy - (int)thick - 1, (int)sx + (int)thick + 2, (int)sy + (int)thick + 2});
+                }
+            }
+        }
         for (int py = y0; py < y1; ++py)
             for (int px = x0; px < x1; ++px) {
                 const size_t j = (size_t)(py - y0) * (x1 - x0) + (px - x0);
