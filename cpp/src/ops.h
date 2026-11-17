@@ -97,3 +97,6 @@ void gradientFill(Doc& d, float x0, float y0, float x1, float y1, const uint8_t 
 void cropCanvas(Doc& d, Rect r, bool deleteCropped);
 // the Magic Eraser: what the Magic Wand would pick at (x, y), made transparent on the active layer
 void magicErase(Doc& d, int x, int y, int tolerance, bool contiguous, bool sampleAll, float opacity);
+// the Red Eye tool (PhotoCraft's algo/src/redeye.rs): the red pupil nearest the click, within pupilSize (1..100), made
+// neutral and darker by darken (0..100). Returns how many pixels changed
+int redEye(Doc& d, int x, int y, float pupilSize, float darken);

@@ -932,6 +932,82 @@ void cropCanvas(Doc& d, Rect r, bool deleteCropped) {
     d.dirty = true;
 }
 
+// ---------- the Red Eye tool (PhotoCraft's redeye.rs) ----------
+static float lumaRE(const uint8_t* p) { return (0.2126f * p[0] + 0.7152f * p[1] + 0.0722f * p[2]) / 255.0f; }
+static bool isRedEye(const uint8_t* p) {
+    const float r = p[0] / 255.0f, g = p[1] / 255.0f, b = p[2] / 255.0f;
+    if (r <= g + 0.15f || r <= b + 0.15f) return false;
+    if (lumaRE(p) >= 0.92f) return false;
+    return std::max({r, g, b}) - std::min({r, g, b}) >= 0.08f;
+}
+int redEye(Doc& d, int cx, int cy, float pupilSize, float darken) {
+    Layer& l = d.cur();
+    if (l.isAdjust() || l.isFill()) return 0;
+    const float radius = std::clamp(4.0f + 1.2f * std::clamp(pupilSize, 1.0f, 100.0f), 8.0f, 128.0f);
+    const float amt = std::clamp(darken, 0.0f, 100.0f) / 100.0f;
+    const int R = (int)std::ceil(radius) + 6;   // the search, plus the halo the erode and blur read
+    const int x0 = std::max(0, cx - R - l.x), y0 = std::max(0, cy - R - l.y);
+    const int x1 = std::min(l.img.w, cx + R + 1 - l.x), y1 = std::min(l.img.h, cy + R + 1 - l.y);
+    if (x1 <= x0 || y1 <= y0) return 0;
+    const int w = x1 - x0, h = y1 - y0;
+    auto within = [&](int x, int y) { const float dx = (float)(x + x0 + l.x - cx), dy = (float)(y + y0 + l.y - cy); return std::sqrt(dx * dx + dy * dy) <= radius; };
+    std::vector<uint8_t> hard((size_t)w * h, 0);
+    int seed = -1; float best = 1e30f;
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x)
+            if (within(x, y) && isRedEye(l.img.at(x + x0, y + y0))) {
+                hard[(size_t)y * w + x] = 1;
+                const float dx = (float)(x + x0 + l.x - cx), dy = (float)(y + y0 + l.y - cy), dd = dx * dx + dy * dy;
+                if (dd < best) { best = dd; seed = y * w + x; }
+            }
+    if (seed < 0) return 0;
+    // keep only the red region the seed is in (8-connected)
+    std::vector<uint8_t> keep((size_t)w * h, 0);
+    std::vector<int> stack = {seed}; keep[seed] = 1;
+    while (!stack.empty()) {
+        const int i = stack.back(); stack.pop_back();
+        const int x = i % w, y = i / w;
+        for (int dy = -1; dy <= 1; ++dy) for (int dx = -1; dx <= 1; ++dx) {
+            const int nx = x + dx, ny = y + dy;
+            if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+            const int j = ny * w + nx;
+            if (hard[j] && !keep[j]) { keep[j] = 1; stack.push_back(j); }
+        }
+    }
+    // a 1 px erode, then a Gaussian of sigma 0.8: a soft edge inside the pupil
+    std::vector<float> soft((size_t)w * h, 0.0f), tmp((size_t)w * h, 0.0f);
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            bool on = keep[(size_t)y * w + x] != 0;
+            for (int k = 0; k < 4 && on; ++k) {
+                const int nx = x + (k == 0) - (k == 1), ny = y + (k == 2) - (k == 3);
+                if (nx < 0 || ny < 0 || nx >= w || ny >= h || !keep[(size_t)ny * w + nx]) on = false;
+            }
+            soft[(size_t)y * w + x] = on ? 1.0f : 0.0f;
+        }
+    const float sg = 0.8f; const int kr = 3;
+    float kern[2 * kr + 1], ks = 0;
+    for (int k = -kr; k <= kr; ++k) { kern[k + kr] = std::exp(-(float)(k * k) / (2 * sg * sg)); ks += kern[k + kr]; }
+    for (float& v : kern) v /= ks;
+    for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) { float a = 0; for (int k = -kr; k <= kr; ++k) a += kern[k + kr] * soft[(size_t)y * w + std::clamp(x + k, 0, w - 1)]; tmp[(size_t)y * w + x] = a; }
+    for (int y = 0; y < h; ++y) for (int x = 0; x < w; ++x) { float a = 0; for (int k = -kr; k <= kr; ++k) a += kern[k + kr] * tmp[(size_t)std::clamp(y + k, 0, h - 1) * w + x]; soft[(size_t)y * w + x] = a; }
+    int changed = 0;
+    for (int y = 0; y < h; ++y)
+        for (int x = 0; x < w; ++x) {
+            if (!within(x, y)) continue;
+            uint8_t* p = l.img.at(x + x0, y + y0);
+            if (lumaRE(p) >= 0.92f) continue;
+            const float t = std::clamp(soft[(size_t)y * w + x], 0.0f, 1.0f) * amt;
+            if (t <= 1e-4f) continue;
+            const float r0 = p[0] / 255.0f, g0 = p[1] / 255.0f, b0 = p[2] / 255.0f;
+            const float neut = (g0 + b0) * 0.5f, r1 = r0 + (neut - r0) * t, sc = 1.0f - 0.45f * t;
+            p[0] = to8(r1 * sc); p[1] = to8(g0 * sc); p[2] = to8(b0 * sc);
+            ++changed;
+        }
+    if (changed) d.dirty = true;
+    return changed;
+}
+
 // ---------- the Magic Eraser ----------
 void magicErase(Doc& d, int x, int y, int tolerance, bool contiguous, bool sampleAll, float opacity) {
     const std::vector<uint8_t> pick = shapeWand(d, x, y, tolerance, contiguous, sampleAll);

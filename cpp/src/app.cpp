@@ -8,6 +8,7 @@
 #include "mimicplug.h"
 #include "changeling.h"
 #include "segment.h"
+#include "quicksel.h"
 #include "splash.h"
 #include "toolbar.h"
 #include "util.h"
@@ -104,7 +105,7 @@ static bool quit = false, askQuit = false;
 static std::string toast; static double toastUntil = 0;
 
 enum Tool { T_MOVE, T_RECT, T_ELLIPSE, T_LASSO, T_POLY, T_WAND, T_BRUSH, T_ERASER, T_BUCKET, T_DROPPER, T_HAND,
-            T_PENCIL, T_ZOOM, T_ROW, T_COL, T_CROP, T_GRADIENT, T_MAGIC_ERASER, T_RETOUCH, T_COUNT,
+            T_PENCIL, T_ZOOM, T_ROW, T_COL, T_CROP, T_GRADIENT, T_MAGIC_ERASER, T_RETOUCH, T_QUICK, T_OBJECT, T_REDEYE, T_COUNT,
             T_NONE = T_COUNT };   // T_NONE: a tool on the strip Chimera doesn't have yet
 static int tool = T_BRUSH;
 static uint8_t fg[4] = {0, 0, 0, 255}, bgc[4] = {255, 255, 255, 255};   // black on white, as PhotoCraft (D)
@@ -118,6 +119,8 @@ static int rtRange = 1; static bool spongeDesat = false, cloneSet = false, clone
 static float cloneSrcX = 0, cloneSrcY = 0, cloneDX = 0, cloneDY = 0;
 static int gradToolStyle = 0; static bool gradToolReverse = false; static float gradToolOpacity = 1.0f;
 static bool cropPending = false, cropDelete = true; static float cropR[4] = {0, 0, 0, 0};
+static float quickSize = 30; static std::vector<float> quickPts;     // the Quick Selection brush and its stroke
+static float pupilSize = 50, redDarken = 50;
 static int selMode = SEL_NEW; static float selFeather = 0;
 static int tolerance = 32; static bool contiguous = true, sampleAll = false; static float bucketOpacity = 1.0f;
 
@@ -1369,6 +1372,44 @@ static RetouchOpts retouchOpts() {
     o.strength = rtStrength[slot]; o.range = rtRange; o.srcDX = cloneDX; o.srcDY = cloneDY; o.tolerance = rtStrength[RT_BG_ERASE];
     return o;
 }
+// what Quick Selection and Object Selection look at: the layer, or everything (Sample All Layers)
+static Image sampleImage() {
+    Image comp;
+    if (sampleAll) { composite(doc, comp, {0, 0, doc.w, doc.h}, false); return comp; }
+    comp = Image(doc.w, doc.h);
+    const Layer& l = doc.cur();
+    for (int y = 0; y < l.img.h; ++y)
+        for (int x = 0; x < l.img.w; ++x) {
+            const int cx = x + l.x, cy = y + l.y;
+            if (cx >= 0 && cy >= 0 && cx < doc.w && cy < doc.h) memcpy(comp.at(cx, cy), l.img.at(x, y), 4);
+        }
+    return comp;
+}
+static void quickSelectStroke() {
+    if (quickPts.size() < 2) return;
+    const std::vector<uint8_t> region = QuickSel::select(sampleImage(), quickPts, quickSize);
+    quickPts.clear();
+    if (region.empty()) return;
+    // the first stroke makes a selection, the next ones add to it (Alt takes away), as in Photoshop
+    int mode = modeFromKeys();
+    if (mode == SEL_NEW && doc.hasSel()) mode = SEL_ADD;
+    finishShape(region, mode, "Quick Selection");
+}
+// Object Selection: the subject model on just the box drawn round the object
+static void objectSelect(float ax, float ay, float bx, float by) {
+    const int x0 = std::clamp((int)std::min(ax, bx), 0, doc.w), y0 = std::clamp((int)std::min(ay, by), 0, doc.h);
+    const int x1 = std::clamp((int)std::ceil(std::max(ax, bx)), 0, doc.w), y1 = std::clamp((int)std::ceil(std::max(ay, by)), 0, doc.h);
+    if (x1 - x0 < 8 || y1 - y0 < 8) return;
+    say("Finding the object...");
+    const Image all = sampleImage();
+    Image crop(x1 - x0, y1 - y0);
+    for (int y = 0; y < crop.h; ++y) memcpy(crop.at(0, y), all.at(x0, y + y0), (size_t)crop.w * 4);
+    std::vector<uint8_t> m; std::string err;
+    if (!segmentSubject(crop, m, err)) { say(err); return; }
+    std::vector<uint8_t> region((size_t)doc.w * doc.h, 0);
+    for (int y = 0; y < crop.h; ++y) memcpy(&region[(size_t)(y + y0) * doc.w + x0], &m[(size_t)y * crop.w], crop.w);
+    finishShape(region, modeFromKeys(), "Object Selection");
+}
 static void applyCrop() {
     if (!cropPending) return;
     Rect r{(int)std::lround(std::min(cropR[0], cropR[2])), (int)std::lround(std::min(cropR[1], cropR[3])), (int)std::lround(std::max(cropR[0], cropR[2])), (int)std::lround(std::max(cropR[1], cropR[3]))};
@@ -1418,7 +1459,13 @@ static void canvasInput() {
             if (cropPending && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) { applyCrop(); dragging = false; }
             else { cropPending = true; cropR[0] = cropR[2] = c.x; cropR[1] = cropR[3] = c.y; }
             break;
-        case T_GRADIENT: break;   // drawn when the drag ends
+        case T_GRADIENT: case T_OBJECT: break;   // done when the drag ends
+        case T_QUICK: quickPts = {c.x, c.y}; break;
+        case T_REDEYE:
+            if (doc.cur().isAdjust() || doc.cur().isFill()) { say("Red Eye works on a layer's pixels"); dragging = false; break; }
+            remember("Red Eye");
+            if (redEye(doc, (int)c.x, (int)c.y, pupilSize, redDarken)) changed(); else { hist.doUndo(doc); say("No red pupil there: click in the middle of the eye"); }
+            dragging = false; break;
         case T_MAGIC_ERASER:
             if (c.x >= 0 && c.y >= 0 && c.x < doc.w && c.y < doc.h) { remember("Magic Eraser"); magicErase(doc, (int)c.x, (int)c.y, tolerance, contiguous, sampleAll, 1.0f); changed(); }
             dragging = false; break;
@@ -1460,6 +1507,7 @@ static void canvasInput() {
         case T_LASSO: if (std::hypot(c.x - lasso[lasso.size() - 2], c.y - lasso.back()) * zoom > 2) { lasso.push_back(c.x); lasso.push_back(c.y); } break;
         case T_DROPPER: pickColour(c, io.KeyAlt); break;
         case T_CROP: cropR[2] = c.x; cropR[3] = c.y; break;
+        case T_QUICK: if (std::hypot(c.x - quickPts[quickPts.size() - 2], c.y - quickPts.back()) * zoom > 3) { quickPts.push_back(c.x); quickPts.push_back(c.y); } break;
         case T_PENCIL: if (stroke.on) changed(pencilTo(doc, stroke, c.x, c.y, pencilSize, pencilOpacity, brushColour(), false, false)); break;
         case T_RETOUCH: if (stroke.on) changed(retouchTo(doc, stroke, c.x, c.y, rtSize, rtHard, retouchOpts(), false)); break;
         case T_BRUSH: case T_ERASER:
@@ -1480,6 +1528,8 @@ static void canvasInput() {
         case T_LASSO: if (lasso.size() >= 6) finishShape(shapePolygon(doc, lasso), modeFromKeys(), "Lasso"); lasso.clear(); break;
         case T_BRUSH: case T_ERASER: case T_PENCIL: case T_RETOUCH: strokeEnd(stroke); break;
         case T_CROP: if (std::fabs(cropR[2] - cropR[0]) < 2 || std::fabs(cropR[3] - cropR[1]) < 2) cropPending = false; break;
+        case T_QUICK: quickSelectStroke(); break;
+        case T_OBJECT: objectSelect(dragStart.x, dragStart.y, c.x, c.y); break;
         case T_GRADIENT:
             if (std::hypot(c.x - dragStart.x, c.y - dragStart.y) * zoom >= 3) {
                 if (doc.cur().isAdjust() || doc.cur().isFill()) { say("The Gradient tool paints a layer's pixels (or its mask)"); break; }
@@ -1543,6 +1593,12 @@ static void drawCanvas() {
             dl->AddLine(ImVec2(fx, a0.y), ImVec2(fx, a1.y), IM_COL32(255, 255, 255, 90)); dl->AddLine(ImVec2(a0.x, fy), ImVec2(a1.x, fy), IM_COL32(255, 255, 255, 90));
         }
     }
+    if (tool == T_OBJECT && dragging) dl->AddRect(toScreen(dragStart.x, dragStart.y), toScreen(dragNow.x, dragNow.y), C_PINK, 0, 0, 1.5f);
+    if (tool == T_QUICK && ImGui::IsWindowHovered()) {
+        const float r = quickSize * 0.5f * zoom;
+        dl->AddCircle(io.MousePos, r, IM_COL32(255, 255, 255, 200), 48, 1.0f); dl->AddCircle(io.MousePos, r + 1, IM_COL32(0, 0, 0, 160), 48, 1.0f);
+        for (size_t k = 0; k + 3 < quickPts.size(); k += 2) dl->AddLine(toScreen(quickPts[k], quickPts[k + 1]), toScreen(quickPts[k + 2], quickPts[k + 3]), IM_COL32(255, 255, 255, 160), std::max(1.0f, quickSize * zoom * 0.25f));
+    }
     if (tool == T_GRADIENT && dragging) {
         const ImVec2 p0 = toScreen(dragStart.x, dragStart.y), p1 = toScreen(dragNow.x, dragNow.y);
         dl->AddLine(p0, p1, IM_COL32(0, 0, 0, 200), 3); dl->AddLine(p0, p1, IM_COL32(255, 255, 255, 230), 1.5f);
@@ -1603,6 +1659,7 @@ static int ltTool(int id) {
     case Toolbar::CROP: return T_CROP; case Toolbar::GRADIENT: return T_GRADIENT; case Toolbar::MAGIC_ERASER: return T_MAGIC_ERASER;
     case Toolbar::BLUR: case Toolbar::SHARPEN: case Toolbar::SMUDGE: case Toolbar::DODGE: case Toolbar::BURN: case Toolbar::SPONGE:
     case Toolbar::CLONE_STAMP: case Toolbar::BACKGROUND_ERASER: return T_RETOUCH;
+    case Toolbar::QUICK_SELECTION: return T_QUICK; case Toolbar::OBJECT_SELECTION: return T_OBJECT; case Toolbar::RED_EYE: return T_REDEYE;
     default: return T_NONE;
     }
 }
@@ -1735,6 +1792,20 @@ static void optionsBar() {
         ImGui::TextDisabled("Drag what to keep; Enter or double-click crops, Escape cancels");
         break;
     case T_ZOOM: ImGui::TextDisabled("Click zooms in, Alt+click zooms out; the wheel zooms too"); break;
+    case T_QUICK:
+        sliderF("Size", &quickSize, 1, 500, "%.0f px", ImGuiSliderFlags_Logarithmic); ImGui::SameLine(0, 14);
+        ImGui::Checkbox("Sample all layers", &sampleAll); ImGui::SameLine(0, 14);
+        ImGui::TextDisabled("Paint over what you want: it grows to the edges. Strokes add; Alt takes away");
+        break;
+    case T_OBJECT:
+        selModes(); ImGui::SameLine(0, 14); ImGui::Checkbox("Sample all layers", &sampleAll); ImGui::SameLine(0, 14);
+        ImGui::TextDisabled("Drag a box round an object: it's found inside the box");
+        break;
+    case T_REDEYE:
+        sliderF("Pupil Size", &pupilSize, 1, 100, "%.0f%%"); ImGui::SameLine(0, 14);
+        sliderF("Darken", &redDarken, 1, 100, "%.0f%%"); ImGui::SameLine(0, 14);
+        ImGui::TextDisabled("Click a red pupil");
+        break;
     case T_ROW: case T_COL: selModes(); ImGui::SameLine(0, 14); ImGui::TextDisabled("Click: a selection one pixel %s", tool == T_ROW ? "high, across the picture" : "wide, down the picture"); break;
     case T_MAGIC_ERASER:
         sliderI("Tolerance", &tolerance, 0, 255); ImGui::SameLine(0, 10);
@@ -2607,6 +2678,21 @@ void script(const std::string& what) {
         combineSel(doc, shapeEllipse(doc, doc.w / 8, doc.h / 8, doc.w / 3, doc.h / 2), SEL_NEW);
         changed(); selChanged();
         Toolbar::select(Toolbar::BRUSH); syncTool();
+    }
+    if (what == "redeye") {   // tests: a click in the middle of the picture with the Red Eye tool
+        const int n = redEye(doc, doc.w / 2, doc.h / 2, 50, 50);
+        const uint8_t* p = doc.cur().img.at(doc.w / 2, doc.h / 2);
+        fprintf(stderr, "redeye: %d px changed, centre now %d %d %d\n", n, p[0], p[1], p[2]);
+        changed();
+    }
+    if (what == "quicksel") {   // tests: one click of a 30 px Quick Selection brush in the middle of the picture
+        const std::vector<float> pts = {doc.w / 2.0f, doc.h / 2.0f};
+        auto t0 = std::chrono::steady_clock::now();
+        const std::vector<uint8_t> r = QuickSel::select(sampleImage(), pts, 30);
+        const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+        size_t n = 0; for (uint8_t v : r) n += v > 127;
+        fprintf(stderr, "quicksel: %zu px selected (%.0f ms)\n", n, ms);
+        if (!r.empty()) { combineSel(doc, r, SEL_NEW); selChanged(); }
     }
     if (what == "tools") {   // tests: the retouching brushes, the gradient, the magic eraser and the crop, driven as a mouse would
         auto strokeLine = [&](int mode, float x0, float y0, float x1, float y1, float size, float strength) {
