@@ -106,7 +106,7 @@ static bool quit = false, askQuit = false;
 static std::string toast; static double toastUntil = 0;
 
 enum Tool { T_MOVE, T_RECT, T_ELLIPSE, T_LASSO, T_POLY, T_WAND, T_BRUSH, T_ERASER, T_BUCKET, T_DROPPER, T_HAND,
-            T_PENCIL, T_ZOOM, T_ROW, T_COL, T_CROP, T_GRADIENT, T_MAGIC_ERASER, T_RETOUCH, T_QUICK, T_OBJECT, T_REDEYE, T_HEAL, T_SHAPE, T_MARK, T_TYPE, T_COUNT,
+            T_PENCIL, T_ZOOM, T_ROW, T_COL, T_CROP, T_GRADIENT, T_MAGIC_ERASER, T_RETOUCH, T_QUICK, T_OBJECT, T_REDEYE, T_HEAL, T_SHAPE, T_MARK, T_TYPE, T_PEN, T_COUNT,
             T_NONE = T_COUNT };   // T_NONE: a tool on the strip Chimera doesn't have yet
 static int tool = T_BRUSH;
 static uint8_t fg[4] = {0, 0, 0, 255}, bgc[4] = {255, 255, 255, 255};   // black on white, as PhotoCraft (D)
@@ -1567,6 +1567,80 @@ static void applyCrop() {
     if (r.clip(doc.w, doc.h).empty()) return;
     remember("Crop"); cropCanvas(doc, r, cropDelete); changed(); selChanged(); fitNext = true;
 }
+// ---------- the Pen tools (PhotoCraft's paths): Pen, Freeform Pen, Curvature Pen, Add / Delete Anchor, Convert
+// Point, Path Selection and Direct Selection, on the document's work path ----------
+enum { PN_PEN, PN_FREE, PN_CURVE, PN_ADD, PN_DEL, PN_CONVERT, PN_PATHSEL, PN_DIRECT };
+static int penMode() {
+    switch (Toolbar::current()) {
+    case Toolbar::FREEFORM_PEN: return PN_FREE; case Toolbar::CURVATURE_PEN: return PN_CURVE; case Toolbar::ADD_ANCHOR: return PN_ADD;
+    case Toolbar::DELETE_ANCHOR: return PN_DEL; case Toolbar::CONVERT_POINT: return PN_CONVERT; case Toolbar::PATH_SELECTION: return PN_PATHSEL;
+    case Toolbar::DIRECT_SELECTION: return PN_DIRECT; default: return PN_PEN;
+    }
+}
+static int penSub = -1;                 // the subpath being drawn (open), -1 none
+static int penGrabSub = -1, penGrabKnot = -1, penGrabPart = 0;   // dragging: 0 anchor, 1 in handle, 2 out handle, 3 the whole subpath
+static std::vector<float> penFree;      // the Freeform Pen's points as it's dragged
+static float penStrokeWidth = 4;
+// a knot's handles made smooth from its neighbours (Catmull-Rom: the Curvature Pen's way)
+static void smoothKnot(Subpath& sp, int i) {
+    const int n = (int)sp.knots.size();
+    Knot& k = sp.knots[i];
+    const bool hasPrev = sp.closed || i > 0, hasNext = sp.closed || i < n - 1;
+    const Knot& a = sp.knots[hasPrev ? (i + n - 1) % n : i];
+    const Knot& b = sp.knots[hasNext ? (i + 1) % n : i];
+    const float tx = (b.ax - a.ax) / 6, ty = (b.ay - a.ay) / 6;
+    k.ix = k.ax - tx; k.iy = k.ay - ty; k.ox = k.ax + tx; k.oy = k.ay + ty; k.smooth = true;
+}
+static void smoothAll(Subpath& sp) { for (int i = 0; i < (int)sp.knots.size(); ++i) smoothKnot(sp, i); }
+// what's under the mouse: an anchor or a handle (part 0/1/2), within px screen pixels
+static bool penHit(ImVec2 c, float px, int& sub, int& knot, int& part, bool handles) {
+    for (int s2 = (int)doc.workPath.size() - 1; s2 >= 0; --s2)
+        for (int k = 0; k < (int)doc.workPath[s2].knots.size(); ++k) {
+            const Knot& kn = doc.workPath[s2].knots[k];
+            const float pts[3][2] = {{kn.ax, kn.ay}, {kn.ix, kn.iy}, {kn.ox, kn.oy}};
+            for (int q = handles ? 2 : 0; q >= 0; --q)
+                if (std::hypot(pts[q][0] - c.x, pts[q][1] - c.y) * zoom <= px) { sub = s2; knot = k; part = q; return true; }
+        }
+    return false;
+}
+// the nearest point on a segment of the path: its subpath, the segment (from knot i) and t along it
+static bool penNearSegment(ImVec2 c, float px, int& sub, int& seg, float& tOut) {
+    float best = px / std::max(zoom, 1e-3f);
+    bool found = false;
+    for (int s2 = 0; s2 < (int)doc.workPath.size(); ++s2) {
+        const Subpath& sp = doc.workPath[s2];
+        const int n = (int)sp.knots.size(), segs = sp.closed ? n : n - 1;
+        for (int i = 0; i < segs; ++i) {
+            const Knot& a = sp.knots[i]; const Knot& b = sp.knots[(i + 1) % n];
+            for (int k = 0; k <= 40; ++k) {
+                const float t = k / 40.0f, u = 1 - t;
+                const float x = u * u * u * a.ax + 3 * u * u * t * a.ox + 3 * u * t * t * b.ix + t * t * t * b.ax;
+                const float y = u * u * u * a.ay + 3 * u * u * t * a.oy + 3 * u * t * t * b.iy + t * t * t * b.ay;
+                const float d = std::hypot(x - c.x, y - c.y);
+                if (d < best) { best = d; sub = s2; seg = i; tOut = t; found = true; }
+            }
+        }
+    }
+    return found;
+}
+// a knot put in at t along segment i (de Casteljau: the curve keeps its shape)
+static void penSplit(Subpath& sp, int i, float t) {
+    const int n = (int)sp.knots.size();
+    Knot& a = sp.knots[i]; Knot& b = sp.knots[(i + 1) % n];
+    auto L = [t](float p, float q) { return p + (q - p) * t; };
+    const float p01x = L(a.ax, a.ox), p01y = L(a.ay, a.oy), p12x = L(a.ox, b.ix), p12y = L(a.oy, b.iy), p23x = L(b.ix, b.ax), p23y = L(b.iy, b.ay);
+    const float p012x = L(p01x, p12x), p012y = L(p01y, p12y), p123x = L(p12x, p23x), p123y = L(p12y, p23y);
+    Knot m; m.ax = L(p012x, p123x); m.ay = L(p012y, p123y); m.ix = p012x; m.iy = p012y; m.ox = p123x; m.oy = p123y; m.smooth = true;
+    a.ox = p01x; a.oy = p01y; b.ix = p23x; b.iy = p23y;
+    sp.knots.insert(sp.knots.begin() + i + 1, m);
+}
+static std::vector<uint8_t> pathSelection() {
+    std::vector<float> cov; polygonsCoverage(flattenPath(doc.workPath), doc.w, doc.h, cov);
+    std::vector<uint8_t> m(cov.size()); for (size_t i = 0; i < cov.size(); ++i) m[i] = to8(cov[i]);
+    return m;
+}
+static void penFinishSubpath() { penSub = -1; }
+
 // ---------- the Type tools (PhotoCraft's point text; the Type Mask tools make a selection of the letters) ----------
 static Text typeNext = [] { Text t; t.size = 48; return t; }();
 static int typeLayer = -1;              // the text layer being typed into (-1: none)
@@ -1818,6 +1892,63 @@ static void canvasInput() {
             changed(retouchTo(doc, stroke, c.x, c.y, rtSize, rtHard, retouchOpts(), true));
             break;
         }
+        case T_PEN: {
+            const int pm = penMode();
+            int sb, kn, part;
+            penGrabSub = penGrabKnot = -1; penGrabPart = 0;
+            if (pm == PN_PEN || pm == PN_CURVE) {
+                if (penSub >= 0 && penSub < (int)doc.workPath.size()) {
+                    Subpath& sp = doc.workPath[penSub];
+                    if (sp.knots.size() >= 2 && std::hypot(sp.knots[0].ax - c.x, sp.knots[0].ay - c.y) * zoom <= 8) {   // on the first: closed
+                        remember("Close Path"); sp.closed = true; if (pm == PN_CURVE) smoothAll(sp); penSub = -1; dragging = false; changed(); break;
+                    }
+                } else if (penHit(c, 7, sb, kn, part, false)) {   // on an existing anchor with nothing open: drag it
+                    remember("Move Anchor"); penGrabSub = sb; penGrabKnot = kn; penGrabPart = 0; break;
+                }
+                remember(pm == PN_CURVE ? "Curvature Pen" : "Pen");
+                if (penSub < 0 || penSub >= (int)doc.workPath.size()) { doc.workPath.push_back(Subpath()); penSub = (int)doc.workPath.size() - 1; }
+                Subpath& sp = doc.workPath[penSub];
+                Knot k; k.ax = k.ix = k.ox = c.x; k.ay = k.iy = k.oy = c.y;
+                sp.knots.push_back(k);
+                if (pm == PN_CURVE) smoothAll(sp);
+                else { penGrabSub = penSub; penGrabKnot = (int)sp.knots.size() - 1; penGrabPart = 2; }   // a drag pulls its handles out
+                changed();
+                break;
+            }
+            if (pm == PN_FREE) { penFree = {c.x, c.y}; break; }
+            if (pm == PN_ADD) {
+                int seg; float t;
+                if (penNearSegment(c, 8, sb, seg, t)) { remember("Add Anchor Point"); penSplit(doc.workPath[sb], seg, t); changed(); }
+                dragging = false; break;
+            }
+            if (pm == PN_DEL) {
+                if (penHit(c, 8, sb, kn, part, false)) {
+                    remember("Delete Anchor Point");
+                    auto& ks = doc.workPath[sb].knots; ks.erase(ks.begin() + kn);
+                    if (ks.empty()) doc.workPath.erase(doc.workPath.begin() + sb);
+                    else if (ks.size() < 3) doc.workPath[sb].closed = false;
+                    penSub = -1; changed();
+                }
+                dragging = false; break;
+            }
+            if (pm == PN_CONVERT) {   // a click: smooth <-> corner; a drag from an anchor pulls new handles
+                if (penHit(c, 8, sb, kn, part, true)) {
+                    remember("Convert Point");
+                    Knot& k = doc.workPath[sb].knots[kn];
+                    if (part == 0) { if (k.smooth) { k.ix = k.ox = k.ax; k.iy = k.oy = k.ay; k.smooth = false; } else smoothKnot(doc.workPath[sb], kn); penGrabSub = sb; penGrabKnot = kn; penGrabPart = 4; }
+                    else { k.smooth = false; penGrabSub = sb; penGrabKnot = kn; penGrabPart = part; }   // a handle on its own: a corner
+                    changed();
+                }
+                break;
+            }
+            if (pm == PN_DIRECT) { if (penHit(c, 8, sb, kn, part, true)) { remember("Move Point"); penGrabSub = sb; penGrabKnot = kn; penGrabPart = part; } break; }
+            if (pm == PN_PATHSEL) {
+                int seg; float t;
+                if (penHit(c, 8, sb, kn, part, false) || penNearSegment(c, 8, sb, seg, t)) { remember("Move Path"); penGrabSub = sb; penGrabPart = 3; }
+                break;
+            }
+            break;
+        }
         case T_TYPE:
             if (typeLayer >= 0 || typeMaskEditing) typeCommit();   // a click away finishes what was being typed
             else typeBegin(c);
@@ -1859,6 +1990,7 @@ static void canvasInput() {
         }
     }
     if (dragging && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
+        const ImVec2 penLast = dragNow; (void)penLast;
         dragNow = c;
         switch (t) {
         case T_MOVE: {
@@ -1873,6 +2005,26 @@ static void canvasInput() {
         case T_QUICK: if (std::hypot(c.x - quickPts[quickPts.size() - 2], c.y - quickPts.back()) * zoom > 3) { quickPts.push_back(c.x); quickPts.push_back(c.y); } break;
         case T_PENCIL: if (stroke.on) changed(pencilTo(doc, stroke, c.x, c.y, pencilSize, pencilOpacity, brushColour(), false, false)); break;
         case T_RETOUCH: if (stroke.on) changed(retouchTo(doc, stroke, c.x, c.y, rtSize, rtHard, retouchOpts(), false)); break;
+        case T_PEN: {
+            if (penMode() == PN_FREE) { if (penFree.size() >= 2 && std::hypot(c.x - penFree[penFree.size() - 2], c.y - penFree.back()) * zoom > 3) { penFree.push_back(c.x); penFree.push_back(c.y); } break; }
+            if (penGrabSub < 0 || penGrabSub >= (int)doc.workPath.size()) break;
+            Subpath& sp = doc.workPath[penGrabSub];
+            const float dx = c.x - penLast.x, dy = c.y - penLast.y;
+            if (penGrabPart == 3) { for (auto& k : sp.knots) { k.ax += dx; k.ix += dx; k.ox += dx; k.ay += dy; k.iy += dy; k.oy += dy; } changed(); break; }
+            if (penGrabKnot < 0 || penGrabKnot >= (int)sp.knots.size()) break;
+            Knot& k = sp.knots[penGrabKnot];
+            if (penGrabPart == 0) { k.ax += dx; k.ay += dy; k.ix += dx; k.iy += dy; k.ox += dx; k.oy += dy; }
+            else if (penGrabPart == 2 || penGrabPart == 4) {   // the out handle to the mouse; a smooth knot's in handle mirrors it
+                k.ox = c.x; k.oy = c.y;
+                if (k.smooth || penGrabPart == 4 || penMode() == PN_PEN) { k.ix = 2 * k.ax - c.x; k.iy = 2 * k.ay - c.y; k.smooth = true; }
+            } else if (penGrabPart == 1) {
+                k.ix = c.x; k.iy = c.y;
+                if (k.smooth) { const float l = std::hypot(k.ox - k.ax, k.oy - k.ay), m = std::max(1e-3f, std::hypot(k.ix - k.ax, k.iy - k.ay)); k.ox = k.ax - (k.ix - k.ax) / m * l; k.oy = k.ay - (k.iy - k.ay) / m * l; }
+            }
+            if (penMode() == PN_CURVE) smoothAll(sp);
+            changed();
+            break;
+        }
         case T_MARK:
             if (markMode() == MK_RULER) { doc.ruler[2] = c.x; doc.ruler[3] = c.y; if (io.KeyShift) {   // in 45-degree steps
                 const float dx = c.x - doc.ruler[0], dy = c.y - doc.ruler[1], l = std::hypot(dx, dy), a = std::round(std::atan2(dy, dx) / 0.785398f) * 0.785398f;
@@ -1902,6 +2054,24 @@ static void canvasInput() {
         case T_BRUSH: case T_ERASER: case T_PENCIL: case T_RETOUCH: strokeEnd(stroke); break;
         case T_CROP: if (std::fabs(cropR[2] - cropR[0]) < 2 || std::fabs(cropR[3] - cropR[1]) < 2) cropPending = false; break;
         case T_QUICK: quickSelectStroke(); break;
+        case T_PEN:
+            if (penMode() == PN_FREE && penFree.size() >= 6) {   // the dragged line as a smooth path (a point every few pixels)
+                remember("Freeform Pen");
+                Subpath sp;
+                const float step = 12 / std::max(zoom, 0.05f);
+                float lx = penFree[0], ly = penFree[1];
+                Knot k0; k0.ax = lx; k0.ay = ly; sp.knots.push_back(k0);
+                for (size_t i = 2; i + 1 < penFree.size(); i += 2)
+                    if (std::hypot(penFree[i] - lx, penFree[i + 1] - ly) >= step || i + 2 >= penFree.size()) { Knot k; k.ax = lx = penFree[i]; k.ay = ly = penFree[i + 1]; sp.knots.push_back(k); }
+                sp.closed = sp.knots.size() >= 3 && std::hypot(sp.knots.back().ax - sp.knots[0].ax, sp.knots.back().ay - sp.knots[0].ay) * zoom < 12;
+                if (sp.closed) sp.knots.pop_back();
+                smoothAll(sp);
+                doc.workPath.push_back(sp);
+                changed();
+            }
+            penFree.clear();
+            penGrabSub = penGrabKnot = -1;
+            break;
         case T_MARK:
             markDrag = -1;
             if (markMode() == MK_RULER && std::hypot(doc.ruler[2] - doc.ruler[0], doc.ruler[3] - doc.ruler[1]) * zoom < 2) doc.hasRuler = false;
@@ -1981,6 +2151,35 @@ static void drawCanvas() {
     // the Lasso draws nothing while you drag: its selection appears when you let go. The Polygonal Lasso shows its
     // points, since it's built click by click.
     if (!poly.empty()) path(poly, true);
+    if (tool == T_PEN) {   // the work path; its anchors, and the handles of curved ones
+        const auto polys = flattenPath(doc.workPath);
+        for (size_t i = 0; i < polys.size(); ++i) {
+            std::vector<ImVec2> pts;
+            for (size_t k = 0; k + 1 < polys[i].size(); k += 2) pts.push_back(toScreen(polys[i][k], polys[i][k + 1]));
+            if (pts.size() >= 2) {
+                const ImDrawFlags fl = doc.workPath[i].closed ? ImDrawFlags_Closed : 0;
+                dl->AddPolyline(pts.data(), (int)pts.size(), IM_COL32(0, 0, 0, 160), fl, 3); dl->AddPolyline(pts.data(), (int)pts.size(), C_PINK, fl, 1.5f);
+            }
+        }
+        const bool showHandles = penMode() != PN_PATHSEL;
+        for (const auto& sp : doc.workPath)
+            for (const auto& k : sp.knots) {
+                const ImVec2 a = toScreen(k.ax, k.ay);
+                if (showHandles && (k.ix != k.ax || k.iy != k.ay || k.ox != k.ax || k.oy != k.ay)) {
+                    const ImVec2 hi = toScreen(k.ix, k.iy), ho = toScreen(k.ox, k.oy);
+                    dl->AddLine(a, hi, IM_COL32(255, 255, 255, 160), 1); dl->AddLine(a, ho, IM_COL32(255, 255, 255, 160), 1);
+                    dl->AddCircleFilled(hi, 3.5f, C_PINK); dl->AddCircleFilled(ho, 3.5f, C_PINK);
+                }
+                dl->AddRectFilled(ImVec2(a.x - 3.5f, a.y - 3.5f), ImVec2(a.x + 3.5f, a.y + 3.5f), IM_COL32(255, 255, 255, 255));
+                dl->AddRect(ImVec2(a.x - 3.5f, a.y - 3.5f), ImVec2(a.x + 3.5f, a.y + 3.5f), C_PINK);
+            }
+        if (penFree.size() >= 4) { std::vector<ImVec2> pts; for (size_t k = 0; k + 1 < penFree.size(); k += 2) pts.push_back(toScreen(penFree[k], penFree[k + 1])); dl->AddPolyline(pts.data(), (int)pts.size(), C_PINK, 0, 1.5f); }
+        // the Pen's next segment, to the mouse
+        if ((penMode() == PN_PEN || penMode() == PN_CURVE) && penSub >= 0 && penSub < (int)doc.workPath.size() && !doc.workPath[penSub].knots.empty() && ImGui::IsWindowHovered() && !dragging) {
+            const Knot& l = doc.workPath[penSub].knots.back();
+            dl->AddLine(toScreen(l.ax, l.ay), io.MousePos, IM_COL32(255, 255, 255, 120), 1);
+        }
+    }
     if (tool == T_TYPE) {   // the text layers' boxes, faint; the one being typed in, clear
         for (int i = 0; i < (int)doc.layers.size(); ++i) {
             const Layer& L = doc.layers[i];
@@ -2136,6 +2335,8 @@ static int ltTool(int id) {
     case Toolbar::RECTANGLE: case Toolbar::ELLIPSE: case Toolbar::TRIANGLE: case Toolbar::POLYGON: case Toolbar::STAR: case Toolbar::LINE: return T_SHAPE;
     case Toolbar::COLOR_SAMPLER: case Toolbar::RULER: case Toolbar::NOTE: case Toolbar::COUNT_TOOL: return T_MARK;
     case Toolbar::TYPE_H: case Toolbar::TYPE_V: case Toolbar::TYPE_H_MASK: case Toolbar::TYPE_V_MASK: return T_TYPE;
+    case Toolbar::PEN: case Toolbar::FREEFORM_PEN: case Toolbar::CURVATURE_PEN: case Toolbar::ADD_ANCHOR: case Toolbar::DELETE_ANCHOR:
+    case Toolbar::CONVERT_POINT: case Toolbar::PATH_SELECTION: case Toolbar::DIRECT_SELECTION: return T_PEN;
     default: return T_NONE;
     }
 }
@@ -2303,6 +2504,42 @@ static void optionsBar() {
         selModes(); ImGui::SameLine(0, 14); ImGui::Checkbox("Sample all layers", &sampleAll); ImGui::SameLine(0, 14);
         ImGui::TextDisabled("Drag a box round an object: it's found inside the box");
         break;
+    case T_PEN: {
+        const bool any = !doc.workPath.empty();
+        ImGui::BeginDisabled(!any);
+        if (ImGui::Button("Make Selection")) { combineSel(doc, pathSelection(), SEL_NEW); selChanged(); say("The path made a selection"); }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) ImGui::SetTooltip("Ctrl+Enter");
+        ImGui::SameLine(); if (ImGui::Button("Fill Path")) {
+            if (!pixelLayer()) say("Fill Path paints a layer's pixels");
+            else { remember("Fill Path"); const auto saved = doc.sel; combineSel(doc, pathSelection(), SEL_NEW); fillSelection(doc, fg, 1.0f, BM_Normal); doc.sel = saved; changed(); selChanged(); }
+        }
+        ImGui::SameLine(); if (ImGui::Button("Stroke Path")) {
+            if (!pixelLayer()) say("Stroke Path paints a layer's pixels");
+            else {   // a line along the path in the foreground colour, Width wide, through the selection if there is one
+                remember("Stroke Path");
+                std::vector<bool> closed; for (const auto& sp : doc.workPath) closed.push_back(sp.closed);
+                std::vector<float> cov; polylinesStroke(flattenPath(doc.workPath), closed, penStrokeWidth, doc.w, doc.h, cov);
+                std::vector<uint8_t> m(cov.size()); for (size_t i = 0; i < cov.size(); ++i) m[i] = to8(cov[i] * (doc.hasSel() ? doc.sel[i] / 255.0f : 1.0f));
+                const auto saved = doc.sel; doc.sel = m; fillSelection(doc, fg, 1.0f, BM_Normal); doc.sel = saved; changed();
+            }
+        }
+        ImGui::SameLine(0, 4); ImGui::SetNextItemWidth(90); ImGui::SliderFloat("##psw", &penStrokeWidth, 0.5f, 100, "%.1f px", ImGuiSliderFlags_Logarithmic);
+        ImGui::SameLine(0, 10); if (ImGui::Button("Make Shape")) {   // a shape layer of the path, in the foreground colour
+            remember("New Path Shape");
+            Shape sh; sh.kind = SHAPE_PATH; sh.path = doc.workPath;
+            Fill f; f.kind = FILL_SOLID; for (int k = 0; k < 3; ++k) f.colour[k] = fg[k] / 255.0f;
+            addShapeLayer(doc, sh, f); doc.workPath.clear(); penSub = -1; changed();
+        }
+        ImGui::SameLine(); if (ImGui::Button("Delete Path")) { remember("Delete Path"); doc.workPath.clear(); penSub = -1; changed(); }
+        ImGui::EndDisabled();
+        ImGui::SameLine(0, 14);
+        const char* tips[] = {"Click for corners, drag for curves; click the first point to close it, Enter ends it open",
+                              "Drag to draw a path freehand", "Click points: the curve runs smoothly through them; click the first to close",
+                              "Click on the path to add a point", "Click a point to take it away", "Click a point: smooth <-> corner; drag a handle to break it",
+                              "Drag a path to move it", "Drag a point or a handle to change the curve"};
+        ImGui::TextDisabled("%s", tips[penMode()]);
+        break;
+    }
     case T_TYPE: {
         // the active text layer's type, or the next text's
         Layer& L = doc.cur();
@@ -3050,6 +3287,10 @@ static void keys() {
     if (shift && k(ImGuiKey_F6)) { openDlg(D_FEATHER); return; }
     if (shift && k(ImGuiKey_F5)) { contentAwareFillSelection(); return; }
     if (k(ImGuiKey_Delete) || k(ImGuiKey_Backspace)) { clearSelection(); return; }
+    if (tool == T_PEN && (k(ImGuiKey_Enter) || k(ImGuiKey_KeypadEnter))) {
+        if (ctrl && !doc.workPath.empty()) { combineSel(doc, pathSelection(), SEL_NEW); selChanged(); } else penFinishSubpath();
+        return;
+    }
     if (k(ImGuiKey_Enter) && poly.size() >= 6) { finishShape(shapePolygon(doc, poly), selMode, "Polygonal Lasso"); poly.clear(); return; }
     if (k(ImGuiKey_Escape)) { poly.clear(); lasso.clear(); return; }
     // the tool letters, PhotoCraft's way: a letter picks its group's tool, Shift+letter steps through the group
@@ -3353,6 +3594,22 @@ void script(const std::string& what) {
     if (what.rfind("ico:", 0) == 0) {   // tests: File > Export ICO to a file
         std::string err; const bool ok = saveImage(doc, what.substr(4), err);
         fprintf(stderr, "ico: %s %s\n", ok ? "saved" : "failed", err.c_str());
+    }
+    if (what == "pen") {   // tests: a Pen path (corners and a curve), a Curvature path, split, a shape and a selection
+        Toolbar::select(Toolbar::PEN); syncTool();
+        const float W = (float)doc.w, H = (float)doc.h;
+        Subpath a; for (auto [x, y] : std::vector<std::pair<float, float>>{{0.1f, 0.2f}, {0.3f, 0.15f}, {0.35f, 0.45f}, {0.12f, 0.5f}}) { Knot k; k.ax = k.ix = k.ox = W * x; k.ay = k.iy = k.oy = H * y; a.knots.push_back(k); }
+        a.knots[1].ox = W * 0.38f; a.knots[1].oy = H * 0.2f; a.knots[1].ix = W * 0.22f; a.knots[1].iy = H * 0.1f; a.knots[1].smooth = true;
+        a.closed = true; doc.workPath.push_back(a);
+        Subpath b; for (auto [x, y] : std::vector<std::pair<float, float>>{{0.6f, 0.2f}, {0.75f, 0.35f}, {0.9f, 0.2f}, {0.75f, 0.6f}}) { Knot k; k.ax = W * x; k.ay = H * y; b.knots.push_back(k); }
+        b.closed = true; smoothAll(b); doc.workPath.push_back(b);
+        penSplit(doc.workPath[1], 0, 0.5f);
+        Shape sh; sh.kind = SHAPE_PATH; sh.path = {doc.workPath[1]}; sh.strokeOn = true; sh.strokeWidth = 4; sh.stroke[0] = sh.stroke[1] = sh.stroke[2] = 1;
+        Fill f; f.kind = FILL_SOLID; f.colour[0] = 0; f.colour[1] = 0.48f; f.colour[2] = 0.72f;
+        addShapeLayer(doc, sh, f);
+        combineSel(doc, pathSelection(), SEL_NEW); selChanged();
+        fprintf(stderr, "pen: %d subpaths, %d knots in the second; shape layer %s\n", (int)doc.workPath.size(), (int)doc.workPath[1].knots.size(), doc.cur().name.c_str());
+        changed();
     }
     if (what == "text") {   // tests: horizontal and vertical text layers, centred, a Type Mask selection
         Toolbar::select(Toolbar::TYPE_H); syncTool();

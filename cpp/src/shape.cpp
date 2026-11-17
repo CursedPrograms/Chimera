@@ -4,11 +4,12 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <sstream>
 
 static const float PI = 3.14159265f;
 
 const char* shapeName(int k) {
-    static const char* n[] = {"Shape", "Rectangle", "Ellipse", "Triangle", "Polygon", "Star", "Line"};
+    static const char* n[] = {"Shape", "Rectangle", "Ellipse", "Triangle", "Polygon", "Star", "Line", "Path"};
     return k >= 0 && k < SHAPE_COUNT ? n[k] : "Shape";
 }
 
@@ -16,7 +17,15 @@ std::string Shape::save() const {
     char b[320];
     snprintf(b, sizeof b, "shape1 %d %g %g %g %g %g %d %g %g %d %d %g %g %g %g", kind, x0, y0, x1, y1, radius, sides, inner, weight,
              fillOn ? 1 : 0, strokeOn ? 1 : 0, stroke[0], stroke[1], stroke[2], strokeWidth);
-    return b;
+    std::string o = b;
+    if (kind == SHAPE_PATH) {   // then its path: subpaths, each "closed count" and its knots
+        o += " " + std::to_string(path.size());
+        for (const auto& sp : path) {
+            o += " " + std::to_string(sp.closed ? 1 : 0) + " " + std::to_string(sp.knots.size());
+            for (const auto& k : sp.knots) { snprintf(b, sizeof b, " %g %g %g %g %g %g %d", k.ax, k.ay, k.ix, k.iy, k.ox, k.oy, k.smooth ? 1 : 0); o += b; }
+        }
+    }
+    return o;
 }
 bool Shape::load(const std::string& blob) {
     int k = 0, f = 1, st = 0;
@@ -24,6 +33,17 @@ bool Shape::load(const std::string& blob) {
                &f, &st, &stroke[0], &stroke[1], &stroke[2], &strokeWidth) != 15) return false;
     kind = std::clamp(k, 0, SHAPE_COUNT - 1); fillOn = f != 0; strokeOn = st != 0;
     sides = std::clamp(sides, 3, 100);
+    path.clear();
+    if (kind == SHAPE_PATH) {
+        std::istringstream in(blob);
+        std::string w; for (int i = 0; i < 16 && (in >> w); ++i) {}   // past the fixed fields
+        size_t n = 0; in >> n;
+        for (size_t i = 0; i < n && in; ++i) {
+            Subpath sp; int c = 0; size_t m = 0; in >> c >> m; sp.closed = c != 0;
+            for (size_t j = 0; j < m && in; ++j) { Knot kn; int sm = 0; in >> kn.ax >> kn.ay >> kn.ix >> kn.iy >> kn.ox >> kn.oy >> sm; kn.smooth = sm != 0; sp.knots.push_back(kn); }
+            path.push_back(sp);
+        }
+    }
     return true;
 }
 
@@ -81,6 +101,7 @@ std::vector<float> shapeOutline(const Shape& s) {
         }
         return roundCorners(p, s.radius);
     }
+    case SHAPE_PATH: { auto ps = flattenPath(s.path); return ps.empty() ? p : ps[0]; }
     case SHAPE_LINE: {   // a thick line: the rectangle round the segment
         const float dx = s.x1 - s.x0, dy = s.y1 - s.y0, l = std::hypot(dx, dy);
         if (l < 1e-3f) return p;
@@ -91,13 +112,43 @@ std::vector<float> shapeOutline(const Shape& s) {
     return p;
 }
 
-// the polygon's area coverage per pixel (even-odd): 5 rows per pixel, each span's ends exact along x
-static void fillCoverage(const std::vector<float>& p, int w, int h, std::vector<float>& cov) {
+std::vector<std::vector<float>> flattenPath(const BezierPath& path) {
+    std::vector<std::vector<float>> out;
+    for (const auto& sp : path) {
+        const size_t n = sp.knots.size();
+        if (n == 0) continue;
+        std::vector<float> poly;
+        const size_t segs = sp.closed ? n : n - 1;
+        poly.push_back(sp.knots[0].ax); poly.push_back(sp.knots[0].ay);
+        for (size_t i = 0; i < segs; ++i) {
+            const Knot& a = sp.knots[i]; const Knot& b = sp.knots[(i + 1) % n];
+            const float len = std::hypot(a.ox - a.ax, a.oy - a.ay) + std::hypot(b.ix - a.ox, b.iy - a.oy) + std::hypot(b.ax - b.ix, b.ay - b.iy);
+            const int steps = std::clamp((int)(len / 3), 1, 200);
+            for (int k = 1; k <= steps; ++k) {
+                const float t = (float)k / steps, u = 1 - t;
+                const float x = u * u * u * a.ax + 3 * u * u * t * a.ox + 3 * u * t * t * b.ix + t * t * t * b.ax;
+                const float y = u * u * u * a.ay + 3 * u * u * t * a.oy + 3 * u * t * t * b.iy + t * t * t * b.ay;
+                poly.push_back(x); poly.push_back(y);
+            }
+        }
+        if (sp.closed && poly.size() >= 4) { poly.pop_back(); poly.pop_back(); }   // (the last point is the first again)
+        out.push_back(poly);
+    }
+    return out;
+}
+
+// the polygons' area coverage per pixel (even-odd): 5 rows per pixel, each span's ends exact along x
+void polygonsCoverage(const std::vector<std::vector<float>>& polys, int w, int h, std::vector<float>& cov) {
     cov.assign((size_t)w * h, 0.0f);
-    const int n = (int)p.size() / 2;
-    if (n < 3) return;
+    std::vector<float> e;   // edges: x0 y0 x1 y1
+    for (const auto& p : polys) {
+        const int n = (int)p.size() / 2;
+        if (n < 2) continue;
+        for (int i = 0; i < n; ++i) { e.push_back(p[i * 2]); e.push_back(p[i * 2 + 1]); e.push_back(p[((i + 1) % n) * 2]); e.push_back(p[((i + 1) % n) * 2 + 1]); }
+    }
+    if (e.empty()) return;
     float ymin = 1e9f, ymax = -1e9f;
-    for (int i = 0; i < n; ++i) { ymin = std::min(ymin, p[i * 2 + 1]); ymax = std::max(ymax, p[i * 2 + 1]); }
+    for (size_t i = 0; i < e.size(); i += 2) { ymin = std::min(ymin, e[i + 1]); ymax = std::max(ymax, e[i + 1]); }
     const int SUB = 5;
     const int r0 = std::max(0, (int)std::floor(ymin)), r1 = std::min(h - 1, (int)std::ceil(ymax));
     std::vector<float> xs;
@@ -105,8 +156,8 @@ static void fillCoverage(const std::vector<float>& p, int w, int h, std::vector<
         for (int s = 0; s < SUB; ++s) {
             const float sy = y + (s + 0.5f) / SUB;
             xs.clear();
-            for (int i = 0; i < n; ++i) {
-                const float ax = p[i * 2], ay = p[i * 2 + 1], bx = p[((i + 1) % n) * 2], by = p[((i + 1) % n) * 2 + 1];
+            for (size_t i = 0; i < e.size(); i += 4) {
+                const float ax = e[i], ay = e[i + 1], bx = e[i + 2], by = e[i + 3];
                 if ((ay <= sy && by > sy) || (by <= sy && ay > sy)) xs.push_back(ax + (sy - ay) / (by - ay) * (bx - ax));
             }
             std::sort(xs.begin(), xs.end());
@@ -123,10 +174,11 @@ static void fillCoverage(const std::vector<float>& p, int w, int h, std::vector<
         }
     for (auto& v : cov) v = std::min(v, 1.0f);
 }
+static void fillCoverage(const std::vector<float>& p, int w, int h, std::vector<float>& cov) { polygonsCoverage({p}, w, h, cov); }
 
-// the outline's stroke: how close each pixel is to the closed outline, against half the width (a soft pixel edge)
-static void strokeCoverage(const std::vector<float>& p, float width, int w, int h, std::vector<float>& cov) {
-    cov.assign((size_t)w * h, 0.0f);
+// the outline's stroke: how close each pixel is to the outline, against half the width (a soft pixel edge)
+static void strokeCoverage(const std::vector<float>& p, float width, int w, int h, std::vector<float>& cov, bool closed = true, bool clear = true) {
+    if (clear) cov.assign((size_t)w * h, 0.0f);
     const int n = (int)p.size() / 2;
     if (n < 2 || width <= 0) return;
     float xmin = 1e9f, xmax = -1e9f, ymin = 1e9f, ymax = -1e9f;
@@ -134,7 +186,7 @@ static void strokeCoverage(const std::vector<float>& p, float width, int w, int 
     const float half = width / 2;
     const int x0 = std::max(0, (int)(xmin - half - 2)), x1 = std::min(w - 1, (int)(xmax + half + 2));
     const int y0 = std::max(0, (int)(ymin - half - 2)), y1 = std::min(h - 1, (int)(ymax + half + 2));
-    for (int i = 0; i < n; ++i) {   // each segment marks the pixels near it (its own box only)
+    for (int i = 0; i < (closed ? n : n - 1); ++i) {   // each segment marks the pixels near it (its own box only)
         const float ax = p[i * 2], ay = p[i * 2 + 1], bx = p[((i + 1) % n) * 2], by = p[((i + 1) % n) * 2 + 1];
         const float dx = bx - ax, dy = by - ay, l2 = std::max(1e-6f, dx * dx + dy * dy);
         const int sx0 = std::max(x0, (int)(std::min(ax, bx) - half - 2)), sx1 = std::min(x1, (int)(std::max(ax, bx) + half + 2));
@@ -151,7 +203,19 @@ static void strokeCoverage(const std::vector<float>& p, float width, int w, int 
     }
 }
 
+void polylinesStroke(const std::vector<std::vector<float>>& lines, const std::vector<bool>& closed, float width, int w, int h, std::vector<float>& cov) {
+    cov.assign((size_t)w * h, 0.0f);
+    for (size_t i = 0; i < lines.size(); ++i) strokeCoverage(lines[i], width, w, h, cov, i < closed.size() ? closed[i] : true, false);
+}
+
 void shapeCoverage(const Shape& s, int w, int h, std::vector<float>& fill, std::vector<float>& stroke) {
+    if (s.kind == SHAPE_PATH) {   // every subpath: filled even-odd (holes), stroked as drawn
+        const auto polys = flattenPath(s.path);
+        std::vector<bool> closed; for (const auto& sp : s.path) closed.push_back(sp.closed);
+        if (s.fillOn) polygonsCoverage(polys, w, h, fill); else fill.assign((size_t)w * h, 0.0f);
+        if (s.strokeOn) polylinesStroke(polys, closed, s.strokeWidth, w, h, stroke); else stroke.clear();
+        return;
+    }
     const std::vector<float> outline = shapeOutline(s);
     if (s.fillOn) fillCoverage(outline, w, h, fill); else fill.assign((size_t)w * h, 0.0f);
     if (s.strokeOn) strokeCoverage(outline, s.strokeWidth, w, h, stroke); else stroke.clear();

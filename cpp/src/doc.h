@@ -80,6 +80,7 @@ struct Doc {
     struct Mark { float x = 0, y = 0; std::string text; };
     std::vector<Mark> samplers, counts, notes;
     float ruler[4] = {0, 0, 0, 0}; bool hasRuler = false;
+    BezierPath workPath;                         // the Pen tools' path (Photoshop's Work Path)
     // the History Brush's source: the layers as they were when it opened (or Set Source); shared, so undo's copies
     // of the document don't copy it
     std::shared_ptr<const std::vector<Layer>> historyState;

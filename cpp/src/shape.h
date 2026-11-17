@@ -6,7 +6,18 @@
 #include <string>
 #include <vector>
 
-enum ShapeKind { SHAPE_NONE, SHAPE_RECT, SHAPE_ELLIPSE, SHAPE_TRIANGLE, SHAPE_POLYGON, SHAPE_STAR, SHAPE_LINE, SHAPE_COUNT };
+enum ShapeKind { SHAPE_NONE, SHAPE_RECT, SHAPE_ELLIPSE, SHAPE_TRIANGLE, SHAPE_POLYGON, SHAPE_STAR, SHAPE_LINE, SHAPE_PATH, SHAPE_COUNT };
+
+// a Bezier path (the Pen tools'): subpaths of knots, each an anchor and its two handles
+struct Knot { float ax = 0, ay = 0, ix = 0, iy = 0, ox = 0, oy = 0; bool smooth = false; };
+struct Subpath { std::vector<Knot> knots; bool closed = false; };
+using BezierPath = std::vector<Subpath>;
+// each subpath flattened to a polygon (x, y pairs); open ones too (filled as if closed)
+std::vector<std::vector<float>> flattenPath(const BezierPath& p);
+// coverage of polygons, even-odd (holes), anti-aliased, over a w x h canvas
+void polygonsCoverage(const std::vector<std::vector<float>>& polys, int w, int h, std::vector<float>& cov);
+// a stroke along polylines (closed ones round), width centred, over a w x h canvas
+void polylinesStroke(const std::vector<std::vector<float>>& lines, const std::vector<bool>& closed, float width, int w, int h, std::vector<float>& cov);
 const char* shapeName(int k);   // "Rectangle"...
 
 struct Shape {
@@ -20,9 +31,13 @@ struct Shape {
     bool strokeOn = false;
     float stroke[3] = {0, 0, 0};
     float strokeWidth = 3;                  // pixels, centred on the outline
+    BezierPath path;                        // SHAPE_PATH: its own path (made with the Pen tools)
     std::string save() const;
     bool load(const std::string& blob);
-    void move(float dx, float dy) { x0 += dx; x1 += dx; y0 += dy; y1 += dy; }
+    void move(float dx, float dy) {
+        x0 += dx; x1 += dx; y0 += dy; y1 += dy;
+        for (auto& sp : path) for (auto& k : sp.knots) { k.ax += dx; k.ix += dx; k.ox += dx; k.ay += dy; k.iy += dy; k.oy += dy; }
+    }
 };
 
 // its outline as a closed polygon (x, y pairs), curves and rounded corners flattened
