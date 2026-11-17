@@ -297,6 +297,22 @@ static bool textSummaryFollowsFirstStyleRun() {
     return t.font==style.font && t.size==style.size && t.tracking==style.tracking && t.leading==style.leading;
 }
 
+// Project persistence must retain the editable character and paragraph runs, not only their summary.
+static bool richTextRunsSurviveProjectRoundTrip() {
+    Doc d=newDoc(40,30,false); Text t; t.str="Run persistence";
+    TextStyle s; s.font="Family A"; s.size=23; s.bold=true; t.runs={{4,s},{t.str.size()-4,TextStyle{}}};
+    ParagraphStyle p; p.align=2; p.spaceAfter=5; t.paragraphs={{t.str.size(),p}};
+    Fill f; f.kind=FILL_SOLID; addTextLayer(d,t,f);
+    const auto path=std::filesystem::temp_directory_path()/"chimera-rich-text-runs.chimera";
+    std::string error; Doc loaded; const bool ok=saveProject(d,path.u8string(),error)&&openDoc(path.u8string(),loaded,error);
+    std::error_code ec; std::filesystem::remove(path,ec);
+    if(!ok) return false;
+    const auto layer=std::find_if(loaded.layers.begin(),loaded.layers.end(),[](const Layer& l){return l.isText();});
+    return layer!=loaded.layers.end() && layer->text.runs.size()==2 && layer->text.runs[0].bytes==4 &&
+        layer->text.runs[0].style.font==s.font && layer->text.runs[0].style.size==23 && layer->text.runs[0].style.bold &&
+        layer->text.paragraphs.size()==1 && layer->text.paragraphs[0].style.align==2 && layer->text.paragraphs[0].style.spaceAfter==5;
+}
+
 int runSelfTests() {
     struct Test { const char* name; bool (*run)(); };
     static const Test tests[] = {
@@ -319,6 +335,7 @@ int runSelfTests() {
         {"smart quotes use opening and closing context", smartQuotesMapOpeningAndClosingContext},
         {"type unit conversion follows document resolution", typeUnitsFollowResolution},
         {"text summary follows first character run", textSummaryFollowsFirstStyleRun},
+        {"rich text runs survive project round trip", richTextRunsSurviveProjectRoundTrip},
     };
     int failed = 0;
     for (const Test& test : tests) {
