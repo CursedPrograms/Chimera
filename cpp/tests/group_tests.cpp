@@ -200,16 +200,16 @@ static bool textFollowsBezierPathAndPersists() {
     Text bounded = text; bounded.pathEnd = 180;
     Text decoded, oldText2;
     const std::string encoded = bounded.save();
-    const size_t finalSpace = encoded.find_last_of(' ');
-    if (!decoded.load(encoded) || finalSpace == std::string::npos || !oldText2.load(encoded.substr(0, finalSpace)) || oldText2.pathEnd != -1) return false;
+    if (!decoded.load(encoded) || !oldText2.load("text2 41 - - 34 0 0 0 0 0 1.2 0 0 1 1 0 0 1 0") || oldText2.pathEnd != -1) return false;
     Doc project = newDoc(500, 300, false); Fill fill; fill.kind = FILL_SOLID; addTextLayer(project, text, fill);
     const std::filesystem::path path = std::filesystem::temp_directory_path() / "chimera-text-path-selftest.chimera";
     std::string error; Doc loaded;
     const bool saved = saveProject(project, path.u8string(), error) && openDoc(path.u8string(), loaded, error);
     std::error_code ec; std::filesystem::remove(path, ec);
     const auto layer = std::find_if(loaded.layers.begin(), loaded.layers.end(), [](const Layer& l) { return l.isText(); });
-    return ink > 100 && box[3] < 180 && closedInk > openInk * 1.4f && decoded.pathText && decoded.path.size() == 1 && decoded.path[0].knots.size() == 2 &&
+    const bool result=ink > 100 && box[3] < 180 && closedInk > openInk * 1.4f && decoded.pathText && decoded.path.size() == 1 && decoded.path[0].knots.size() == 2 &&
            decoded.pathEnd == bounded.pathEnd && saved && layer != loaded.layers.end() && layer->text.pathText && layer->text.path.size() == 1 && layer->text.pathStart == text.pathStart;
+    return result;
 }
 
 // after PhotoCraft (crates/ui-egui/src/tools/type_path_placement.rs effective_range): explicit
@@ -233,6 +233,26 @@ static bool textPathPlacementRangeBehaves() {
     return fullInk > shortInk && shortInk > 0 && wrapInk > clippedInk && clippedInk > 0;
 }
 
+// after PhotoCraft (crates/doc/src/lib.rs char_runs and paragraph_runs): styles cover UTF-8 bytes
+// without splitting a code point, and a short run list extends with the last style.
+static bool richTextRunsNormalizeAndPersist() {
+    Text t; t.str = "A\xc3\xa9Z"; t.size = 42;
+    TextStyle first; first.size=18; first.font="Example Font"; first.bold=true;
+    TextStyle second; second.size=27; second.italic=true;
+    t.runs={{1,first},{1,second}};
+    ParagraphStyle para; para.align=2; para.firstIndent=7.5f; para.spaceAfter=3;
+    t.paragraphs={{1,para}};
+    const auto runs=t.normalizedRuns(); const auto paragraphs=t.normalizedParagraphs();
+    Text decoded; const bool loaded=decoded.load(t.save());
+    Text old; const bool oldLoaded=old.load("text2 41 - - 48 10 20 0 0 0 1.2 0 0 1 1 0 0 0 0 -1");
+    const bool result=loaded && oldLoaded && runs.size()==3 && runs[0].bytes==1 && runs[1].bytes==2 && runs[2].bytes==1 &&
+        runs[0].style.bold && runs[1].style.italic && runs[1].style.size==27 &&
+        paragraphs.size()==2 && paragraphs[0].bytes==1 && paragraphs[1].bytes==3 &&
+        paragraphs[0].style.align==2 && decoded.runs.size()==2 && decoded.runs[0].bytes==1 && decoded.runs[0].style==first && decoded.runs[1].style==second && decoded.paragraphs.size()==1 &&
+        decoded.paragraphs[0].style.firstIndent==7.5f && old.runs.empty();
+    return result;
+}
+
 int runSelfTests() {
     struct Test { const char* name; bool (*run)(); };
     static const Test tests[] = {
@@ -249,6 +269,7 @@ int runSelfTests() {
         {"paragraph text wraps and keeps legacy projects readable", paragraphTextWrapsAndPersists},
         {"type follows and saves a Bezier path", textFollowsBezierPathAndPersists},
         {"text path placement respects open ends and closed seams", textPathPlacementRangeBehaves},
+        {"rich text runs normalize UTF-8 and persist", richTextRunsNormalizeAndPersist},
     };
     int failed = 0;
     for (const Test& test : tests) {

@@ -6,6 +6,23 @@
 #include <string>
 #include <vector>
 
+// after PhotoCraft (crates/doc/src/text.rs CharStyle): per-run settings stay editable even
+// when the renderer has not yet applied a particular character attribute.
+struct TextStyle {
+    std::string font;
+    float size = 48, tracking = 0, leading = 1.2f;
+    float baselineShift = 0, horizontalScale = 1, verticalScale = 1;
+    bool bold = false, italic = false, underline = false, strikethrough = false;
+    bool operator==(const TextStyle& o) const {
+        return font == o.font && size == o.size && tracking == o.tracking && leading == o.leading &&
+            baselineShift == o.baselineShift && horizontalScale == o.horizontalScale && verticalScale == o.verticalScale &&
+            bold == o.bold && italic == o.italic && underline == o.underline && strikethrough == o.strikethrough;
+    }
+};
+struct TextRun { size_t bytes = 0; TextStyle style; };
+struct ParagraphStyle { int align = 0; float firstIndent = 0, startIndent = 0, endIndent = 0, spaceBefore = 0, spaceAfter = 0, autoLeading = 1.2f; };
+struct ParagraphRun { size_t bytes = 0; ParagraphStyle style; };
+
 struct Text {
     std::string str;                 // UTF-8, lines split by '\n'
     std::string font;                // a .ttf / .otf / .ttc path ("" the default: Segoe UI)
@@ -20,10 +37,15 @@ struct Text {
     BezierPath path;                  // optional path the type follows, in canvas coordinates
     float pathStart = 0, pathEnd = -1; // path placement interval; a negative end follows the text length
     bool pathText = false, pathFlip = false;
+    // Runs cover UTF-8 bytes; empty lists inherit the legacy layer-wide settings above.
+    std::vector<TextRun> runs;
+    std::vector<ParagraphRun> paragraphs;
     float box[4] = {0, 0, 0, 0};     // where it was last drawn (canvas), for clicking on it (not saved)
     bool active() const { return !str.empty() || !font.empty(); }
     std::string save() const;
     bool load(const std::string& blob);
+    std::vector<TextRun> normalizedRuns() const;
+    std::vector<ParagraphRun> normalizedParagraphs() const;
 };
 
 // the fonts on this PC (Windows' Fonts folder, the user's own): their files and names, sorted by name

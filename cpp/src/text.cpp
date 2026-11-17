@@ -23,12 +23,20 @@ std::string Text::save() const {
     const std::string pathData = pathText ? pathShape.save() : std::string();
     char b[256];
     snprintf(b, sizeof b, " %g %g %g %d %d %g %g %g %g %g %g %g %g %d %d %g", size, x, y, align, vertical ? 1 : 0, tracking, leading, boxWidth, boxHeight, scaleX, scaleY, rotation, pathStart, pathText ? 1 : 0, pathFlip ? 1 : 0, pathEnd);
-    return "text2 " + hex(str) + " " + hex(font) + " " + hex(pathData) + b;
+    std::string runData, paraData;
+    for (const TextRun& r : runs) {
+        char q[256]; snprintf(q, sizeof q, "%zu,%g,%g,%g,%g,%g,%g,%d,%d,%d,%d,", r.bytes, r.style.size, r.style.tracking, r.style.leading,
+            r.style.baselineShift, r.style.horizontalScale, r.style.verticalScale, r.style.bold, r.style.italic, r.style.underline, r.style.strikethrough);
+        runData += q + hex(r.style.font) + ";";
+    }
+    for (const ParagraphRun& r : paragraphs) { char q[180]; snprintf(q, sizeof q, "%zu,%d,%g,%g,%g,%g,%g,%g;", r.bytes, r.style.align, r.style.firstIndent, r.style.startIndent, r.style.endIndent, r.style.spaceBefore, r.style.spaceAfter, r.style.autoLeading); paraData += q; }
+    return "text3 " + hex(str) + " " + hex(font) + " " + hex(pathData) + b + " " + hex(runData) + " " + hex(paraData);
 }
 bool Text::load(const std::string& blob) {
     auto unhex = [](const std::string& h) { std::string o; if (h.empty() || h[0] == '-') return o; for (size_t i = 0; i + 1 < h.size(); i += 2) { char b[3] = {h[i], h[i + 1], 0}; o += (char)strtol(b, nullptr, 16); } return o; };
     std::string version, textHex, fontHex; int al = 0, v = 0;
-    if (blob.rfind("text2 ", 0) == 0) {
+    if (blob.rfind("text3 ", 0) == 0 || blob.rfind("text2 ", 0) == 0) {
+        const bool v3 = blob.rfind("text3 ", 0) == 0;
         std::string pathHex; int onPath = 0, flipped = 0;
         std::istringstream in(blob);
         if (!(in >> version >> textHex >> fontHex >> pathHex >> size >> x >> y >> al >> v >> tracking >> leading >> boxWidth >> boxHeight >> scaleX >> scaleY >> rotation >> pathStart >> onPath >> flipped)) return false;
@@ -36,6 +44,20 @@ bool Text::load(const std::string& blob) {
         pathText = onPath != 0; pathFlip = flipped != 0; path.clear();
         const std::string pathData = unhex(pathHex);
         if (!pathData.empty()) { Shape shape; if (!shape.load(pathData) || shape.kind != SHAPE_PATH) return false; path = std::move(shape.path); }
+        runs.clear(); paragraphs.clear();
+        if (v3) {
+            std::string rh, ph; if (!(in >> rh >> ph)) return false;
+            std::istringstream ri(unhex(rh)); std::string item;
+            while (std::getline(ri, item, ';')) { if (item.empty()) continue; std::istringstream fields(item); TextRun r; std::string fhex; int bo=0,it=0,un=0,st=0; char comma;
+                if (!(fields >> r.bytes >> comma >> r.style.size >> comma >> r.style.tracking >> comma >> r.style.leading >> comma >> r.style.baselineShift >> comma >> r.style.horizontalScale >> comma >> r.style.verticalScale >> comma >> bo >> comma >> it >> comma >> un >> comma >> st >> comma)) return false;
+                if (!(fields >> fhex)) return false; r.style.font = unhex(fhex); r.style.bold=bo!=0; r.style.italic=it!=0; r.style.underline=un!=0; r.style.strikethrough=st!=0; runs.push_back(std::move(r));
+            }
+            std::istringstream pi(unhex(ph));
+            while (std::getline(pi, item, ';')) { if (item.empty()) continue; std::istringstream fields(item); ParagraphRun r; char comma;
+                if (!(fields >> r.bytes >> comma >> r.style.align >> comma >> r.style.firstIndent >> comma >> r.style.startIndent >> comma >> r.style.endIndent >> comma >> r.style.spaceBefore >> comma >> r.style.spaceAfter >> comma >> r.style.autoLeading)) return false;
+                paragraphs.push_back(r);
+            }
+        }
     } else {
         char s1[65536], s2[4096];
         const int fields = sscanf(blob.c_str(), "text1 %65535s %4095s %f %f %f %d %d %f %f %f %f %f %f %f", s1, s2, &size, &x, &y, &al, &v, &tracking, &leading, &boxWidth, &boxHeight, &scaleX, &scaleY, &rotation);
@@ -52,6 +74,26 @@ bool Text::load(const std::string& blob) {
     if (!std::isfinite(pathEnd)) pathEnd = -1;
     str = unhex(textHex); font = unhex(fontHex); align = std::clamp(al, 0, 2); vertical = v != 0;
     return true;
+}
+
+// after PhotoCraft (crates/doc/src/lib.rs TextLayer::char_runs): runs always cover the text and
+// their boundaries are UTF-8 character boundaries; any missing tail inherits the layer style.
+std::vector<TextRun> Text::normalizedRuns() const {
+    TextStyle base; base.font=font; base.size=size; base.tracking=tracking; base.leading=leading;
+    std::vector<TextRun> out; size_t at=0;
+    auto boundary = [&](size_t n) { n=std::min(n,str.size()); while (n<str.size() && n && (static_cast<unsigned char>(str[n])&0xc0)==0x80) ++n; return n; };
+    for (const TextRun& run : runs) { const size_t end=boundary(at+run.bytes); if(end>at) out.push_back({end-at,run.style}); at=end; if(at==str.size()) break; }
+    if(at<str.size()) out.push_back({str.size()-at, out.empty()?base:out.back().style});
+    return out;
+}
+
+// after PhotoCraft (crates/doc/src/lib.rs TextLayer::paragraph_runs): paragraph runs cover text bytes.
+std::vector<ParagraphRun> Text::normalizedParagraphs() const {
+    std::vector<ParagraphRun> out; size_t at=0;
+    for(const ParagraphRun& run:paragraphs) { size_t end=std::min(str.size(),at+run.bytes); while(end<str.size() && end && (static_cast<unsigned char>(str[end])&0xc0)==0x80)++end; if(end>at)out.push_back({end-at,run.style}); at=end; if(at==str.size())break; }
+    if(at<str.size())out.push_back({str.size()-at,out.empty()?ParagraphStyle{}:out.back().style});
+    if(str.empty() && out.empty()) out.push_back({0,ParagraphStyle{}});
+    return out;
 }
 
 const std::vector<FontFile>& systemFonts() {
