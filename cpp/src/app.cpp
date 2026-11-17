@@ -55,7 +55,7 @@ static ImVec4 col4(ImU32 c) { return ImGui::ColorConvertU32ToFloat4(c); }
 // Script artifacts stay beside the executable so hooks work from any current folder.
 static std::filesystem::path scriptPath(const char* name) {
     char* base = SDL_GetBasePath();
-    const std::filesystem::path path = (base ? std::filesystem::path(base) : std::filesystem::current_path()) / name;
+    const std::filesystem::path path = (base ? std::filesystem::u8path(base) : std::filesystem::current_path()) / name;
     if (base) SDL_free(base);
     return path;
 }
