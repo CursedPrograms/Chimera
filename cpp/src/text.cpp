@@ -22,7 +22,7 @@ std::string Text::save() const {
     Shape pathShape; pathShape.kind = SHAPE_PATH; pathShape.path = path;
     const std::string pathData = pathText ? pathShape.save() : std::string();
     char b[256];
-    snprintf(b, sizeof b, " %g %g %g %d %d %g %g %g %g %g %g %g %g %d %d", size, x, y, align, vertical ? 1 : 0, tracking, leading, boxWidth, boxHeight, scaleX, scaleY, rotation, pathStart, pathText ? 1 : 0, pathFlip ? 1 : 0);
+    snprintf(b, sizeof b, " %g %g %g %d %d %g %g %g %g %g %g %g %g %d %d %g", size, x, y, align, vertical ? 1 : 0, tracking, leading, boxWidth, boxHeight, scaleX, scaleY, rotation, pathStart, pathText ? 1 : 0, pathFlip ? 1 : 0, pathEnd);
     return "text2 " + hex(str) + " " + hex(font) + " " + hex(pathData) + b;
 }
 bool Text::load(const std::string& blob) {
@@ -32,6 +32,7 @@ bool Text::load(const std::string& blob) {
         std::string pathHex; int onPath = 0, flipped = 0;
         std::istringstream in(blob);
         if (!(in >> version >> textHex >> fontHex >> pathHex >> size >> x >> y >> al >> v >> tracking >> leading >> boxWidth >> boxHeight >> scaleX >> scaleY >> rotation >> pathStart >> onPath >> flipped)) return false;
+        if (!(in >> pathEnd)) pathEnd = -1;
         pathText = onPath != 0; pathFlip = flipped != 0; path.clear();
         const std::string pathData = unhex(pathHex);
         if (!pathData.empty()) { Shape shape; if (!shape.load(pathData) || shape.kind != SHAPE_PATH) return false; path = std::move(shape.path); }
@@ -42,12 +43,13 @@ bool Text::load(const std::string& blob) {
         textHex = s1; fontHex = s2;
         if (fields == 9) boxWidth = boxHeight = 0;
         if (fields != 14) scaleX = scaleY = 1, rotation = 0;
-        path.clear(); pathText = pathFlip = false; pathStart = 0;
+        path.clear(); pathText = pathFlip = false; pathStart = 0; pathEnd = -1;
     }
     boxWidth = std::max(0.0f, boxWidth); boxHeight = std::max(0.0f, boxHeight);
     scaleX = std::clamp(scaleX, 0.01f, 100.0f); scaleY = std::clamp(scaleY, 0.01f, 100.0f);
     if (!std::isfinite(rotation)) rotation = 0;
     if (!std::isfinite(pathStart)) pathStart = 0;
+    if (!std::isfinite(pathEnd)) pathEnd = -1;
     str = unhex(textHex); font = unhex(fontHex); align = std::clamp(al, 0, 2); vertical = v != 0;
     return true;
 }
@@ -209,6 +211,22 @@ static TextPathMetric pathMetric(const Text& t) {
     return metric;
 }
 
+float textAdvance(const Text& t) {
+    Loaded* loaded = fontFor(t.font.empty() ? defaultFont() : t.font);
+    if (!loaded) return 0;
+    const float scale = stbtt_ScaleForPixelHeight(&loaded->info, std::max(1.0f, t.size));
+    const float tracking = t.tracking / 1000.0f * t.size;
+    const auto lines = linesOf(t.str);
+    if (lines.empty() || t.vertical) return 0;
+    const auto& line = lines.front(); float width = 0;
+    for (size_t i = 0; i < line.size(); ++i) {
+        int advance = 0, bearing = 0;
+        stbtt_GetCodepointHMetrics(&loaded->info, line[i], &advance, &bearing);
+        width += advance * scale + (i + 1 < line.size() ? stbtt_GetCodepointKernAdvance(&loaded->info, line[i], line[i + 1]) * scale : 0) + tracking;
+    }
+    return std::max(0.0f, width);
+}
+
 bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float box[4]) {
     cov.assign((size_t)w * h, 0.0f);
     box[0] = t.x; box[1] = t.y; box[2] = t.x; box[3] = t.y;
@@ -241,6 +259,9 @@ bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float bo
             return std::pair<float, float>(t.x + cs * dx - sn * dy, t.y + sn * dx + cs * dy);
         };
         if (pathOn && std::isfinite(pathCenter)) {
+            const float naturalSpan = path.closed ? path.length : std::max(0.0f, path.length - t.pathStart);
+            const float allowedSpan = t.pathEnd >= 0 ? std::min(naturalSpan, t.pathEnd - t.pathStart) : naturalSpan;
+            if (pathCenter < 0 || pathCenter > allowedSpan) return;
             float cx = 0, cy = 0, tx = 0, ty = 0;
             if (!path.sample(t.pathStart + pathCenter, cx, cy, tx, ty)) return;
             const float nx = -ty, ny = tx, centerX = (ox + ox + bw) * 0.5f;

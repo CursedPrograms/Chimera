@@ -18,7 +18,7 @@ struct Text {
     float boxWidth = 0, boxHeight = 0; // paragraph frame in pixels; zero width means point text
     float scaleX = 1, scaleY = 1, rotation = 0; // text transform, rotation in degrees
     BezierPath path;                  // optional path the type follows, in canvas coordinates
-    float pathStart = 0;              // starting distance along the path, in pixels
+    float pathStart = 0, pathEnd = -1; // path placement interval; a negative end follows the text length
     bool pathText = false, pathFlip = false;
     float box[4] = {0, 0, 0, 0};     // where it was last drawn (canvas), for clicking on it (not saved)
     bool active() const { return !str.empty() || !font.empty(); }
@@ -33,3 +33,4 @@ std::string defaultFont();
 
 // coverage (0..1) of the text over a w x h canvas; box: where it is (x0, y0, x1, y1), for picking and outlines
 bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float box[4]);
+float textAdvance(const Text& t);     // the first line's advance in pixels, for path placement markers

@@ -2465,6 +2465,64 @@ static float typePathLength(const BezierPath& path) {
     }
     return longest;
 }
+// after PhotoCraft (crates/ui-egui/src/tools/type_path_placement.rs): sample an arc distance on the text's path.
+static bool typePathPointAt(const Text& t, float arc, ImVec2& point, bool reverse = false) {
+    const auto flat = flattenPath(t.path);
+    if (flat.empty() || flat[0].size() < 4) return false;
+    const auto& p = flat[0]; const size_t n = p.size() / 2;
+    std::vector<float> cumulative(n + (t.path[0].closed ? 1 : 0), 0);
+    for (size_t i = 1; i < n; ++i) cumulative[i] = cumulative[i - 1] + std::hypot(p[i*2] - p[(i-1)*2], p[i*2+1] - p[(i-1)*2+1]);
+    if (t.path[0].closed) cumulative[n] = cumulative[n-1] + std::hypot(p[0] - p[(n-1)*2], p[1] - p[(n-1)*2+1]);
+    const float length = cumulative.back(); if (length <= 0) return false;
+    if (t.path[0].closed) { arc = std::fmod(arc, length); if (arc < 0) arc += length; }
+    else arc = std::clamp(arc, 0.0f, length);
+    if (reverse) arc = length - arc;
+    size_t i = 1; while (i < cumulative.size() && cumulative[i] < arc) ++i;
+    if (i >= cumulative.size()) i = cumulative.size() - 1;
+    const size_t a = i - 1, b = i == n ? 0 : i; const float seg = cumulative[i] - cumulative[a];
+    const float u = seg > 0 ? (arc - cumulative[a]) / seg : 0;
+    float x = p[a*2] + (p[b*2] - p[a*2]) * u, y = p[a*2+1] + (p[b*2+1] - p[a*2+1]) * u;
+    const float dx = (x - t.x) * t.scaleX, dy = (y - t.y) * t.scaleY, angle = t.rotation * 0.017453292519943295f;
+    point = ImVec2(t.x + std::cos(angle)*dx - std::sin(angle)*dy, t.y + std::sin(angle)*dx + std::cos(angle)*dy);
+    return true;
+}
+static int typePathDragPart = -1; // 0 start, 1 end, 2 move the whole range
+static int typePathDragLayer = -1;
+static float typePathDragStart = 0, typePathDragEnd = 0, typePathDragPointer = 0;
+// Project a pointer to the text path and update its captured interval without changing its span unexpectedly.
+static void typePathDragTo(ImVec2 c) {
+    if (typePathDragLayer < 0 || typePathDragLayer >= (int)doc.layers.size()) return;
+    Text& t = doc.layers[typePathDragLayer].text;
+    const ImVec2 local = typeToTextPoint(t, c);
+    float distance = 0; float along = typePathNearest(t.path, local.x, local.y, &distance);
+    const float length = typePathLength(t.path); if (length <= 0) return;
+    if (t.pathFlip) along = length - along;
+    float delta = along - typePathDragPointer;
+    const bool closed = !t.path.empty() && t.path[0].closed;
+    if (closed) delta = std::remainder(delta, length);
+    if (typePathDragPart == 0) t.pathStart = std::clamp(typePathDragStart + delta, closed ? typePathDragEnd - length : 0.0f, typePathDragEnd);
+    else if (typePathDragPart == 1) t.pathEnd = std::clamp(typePathDragEnd + delta, typePathDragStart, closed ? typePathDragStart + length : length);
+    else { t.pathStart = typePathDragStart + delta; t.pathEnd = typePathDragEnd + delta; }
+    renderFill(doc, doc.layers[typePathDragLayer]); changed();
+}
+// Capture one of the visible path placement markers or the text range itself.
+static bool typePathMarkerPress(ImVec2 c) {
+    if (doc.active < 0 || doc.active >= (int)doc.layers.size() || !doc.cur().visible || !doc.cur().isText() || !doc.cur().text.pathText || groupLocked(doc, doc.cur().groupId)) return false;
+    Text& tx = doc.cur().text; const float len = typePathLength(tx.path);
+    const bool closed = !tx.path.empty() && tx.path[0].closed;
+    const float end = tx.pathEnd >= 0 ? tx.pathEnd : tx.pathStart + std::min(textAdvance(tx), closed ? len : std::max(0.0f, len - tx.pathStart));
+    ImVec2 ps, pe;
+    if (len <= 0 || !typePathPointAt(tx, tx.pathStart, ps, tx.pathFlip) || !typePathPointAt(tx, end, pe, tx.pathFlip)) return false;
+    int part = std::hypot(c.x-ps.x,c.y-ps.y)*zoom <= 8 ? 0 : (std::hypot(c.x-pe.x,c.y-pe.y)*zoom <= 8 ? 1 : -1);
+    const ImVec2 local = typeToTextPoint(tx, c); float dist = 0;
+    float along = typePathNearest(tx.path, local.x, local.y, &dist);
+    if (tx.pathFlip) along = len - along;
+    if (part < 0 && dist*zoom <= 8) part = 2;
+    if (part < 0) return false;
+    remember("Move Text Path"); typePathDragLayer = doc.active; typePathDragPart = part;
+    typePathDragStart = tx.pathStart; typePathDragEnd = end; typePathDragPointer = along;
+    return true;
+}
 static void typeBegin(ImVec2 c) {
     // on a text layer's letters: edit it again; else new text where clicked (its first line's top a little above)
     for (int i = (int)doc.layers.size() - 1; i >= 0; --i) {
@@ -2986,8 +3044,9 @@ static void canvasInput() {
                 }
                 break;
             }
-            if (pm == PN_DIRECT) { if (penHit(c, 8, sb, kn, part, true)) { remember("Move Point"); penGrabSub = sb; penGrabKnot = kn; penGrabPart = part; } break; }
+            if (pm == PN_DIRECT) { if (typePathMarkerPress(c)) break; if (penHit(c, 8, sb, kn, part, true)) { remember("Move Point"); penGrabSub = sb; penGrabKnot = kn; penGrabPart = part; } break; }
             if (pm == PN_PATHSEL) {
+                if (typePathMarkerPress(c)) break;
                 int seg; float t;
                 if (penHit(c, 8, sb, kn, part, false) || penNearSegment(c, 8, sb, seg, t)) { remember("Move Path"); penGrabSub = sb; penGrabPart = 3; }
                 break;
@@ -3149,6 +3208,7 @@ static void canvasInput() {
         case T_PENCIL: if (stroke.on) changed(pencilTo(doc, stroke, c.x, c.y, pencilSize, pencilOpacity, brushColour(), false, false)); break;
         case T_RETOUCH: if (stroke.on) changed(retouchTo(doc, stroke, c.x, c.y, rtSize, rtHard, retouchOpts(), false)); break;
         case T_PEN: {
+            if (typePathDragPart >= 0) { typePathDragTo(c); break; }
             if (penMode() == PN_FREE) { if (penFree.size() >= 2 && std::hypot(c.x - penFree[penFree.size() - 2], c.y - penFree.back()) * zoom > 3) { penFree.push_back(c.x); penFree.push_back(c.y); } break; }
             if (penGrabSub < 0 || penGrabSub >= (int)doc.workPath.size()) break;
             Subpath& sp = doc.workPath[penGrabSub];
@@ -3252,6 +3312,7 @@ static void canvasInput() {
             break;
         case T_QUICK: quickSelectStroke(); break;
         case T_PEN:
+            typePathDragPart = -1; typePathDragLayer = -1;
             if (penMode() == PN_FREE && penFree.size() >= 6) {   // the dragged line as a smooth path (a point every few pixels)
                 remember("Freeform Pen");
                 Subpath sp;
@@ -3392,6 +3453,17 @@ static void drawCanvas() {
                 dl->AddRectFilled(ImVec2(a.x - 3.5f, a.y - 3.5f), ImVec2(a.x + 3.5f, a.y + 3.5f), IM_COL32(255, 255, 255, 255));
                 dl->AddRect(ImVec2(a.x - 3.5f, a.y - 3.5f), ImVec2(a.x + 3.5f, a.y + 3.5f), C_PINK);
             }
+        if ((penMode() == PN_PATHSEL || penMode() == PN_DIRECT) && doc.active >= 0 && doc.active < (int)doc.layers.size()
+            && doc.cur().isText() && doc.cur().text.pathText) {
+            const Text& tx = doc.cur().text; const float len = typePathLength(tx.path);
+            const float end = tx.pathEnd >= 0 ? tx.pathEnd : tx.pathStart + std::min(textAdvance(tx), !tx.path.empty() && tx.path[0].closed ? len : std::max(0.0f, len - tx.pathStart));
+            ImVec2 a, b;
+            if (typePathPointAt(tx, tx.pathStart, a, tx.pathFlip) && typePathPointAt(tx, end, b, tx.pathFlip)) {
+                a = toScreen(a.x, a.y); b = toScreen(b.x, b.y);
+                dl->AddLine(ImVec2(a.x-5,a.y-5),ImVec2(a.x+5,a.y+5),C_PINK,2); dl->AddLine(ImVec2(a.x-5,a.y+5),ImVec2(a.x+5,a.y-5),C_PINK,2);
+                dl->AddCircleFilled(b, 5, IM_COL32(255,255,255,255)); dl->AddCircle(b, 5, C_PINK, 16, 2);
+            }
+        }
         if (penFree.size() >= 4) { std::vector<ImVec2> pts; for (size_t k = 0; k + 1 < penFree.size(); k += 2) pts.push_back(toScreen(penFree[k], penFree[k + 1])); dl->AddPolyline(pts.data(), (int)pts.size(), C_PINK, 0, 1.5f); }
         // the Pen's next segment, to the mouse
         if ((penMode() == PN_PEN || penMode() == PN_CURVE) && penSub >= 0 && penSub < (int)doc.workPath.size() && !doc.workPath[penSub].knots.empty() && ImGui::IsWindowHovered() && !dragging) {
@@ -5298,7 +5370,25 @@ void script(const std::string& what) {
         doc.cur().text.str = "Text follows a curved path"; snprintf(typeBuf, sizeof typeBuf, "%s", doc.cur().text.str.c_str()); renderFill(doc, doc.cur()); changed();
         std::vector<float> pathCoverage; float pathBox[4]; const bool pathRendered = textCoverage(doc.cur().text, doc.w, doc.h, pathCoverage, pathBox);
         const bool pathOk = pathRendered && std::count_if(pathCoverage.begin(), pathCoverage.end(), [](float a) { return a > 0.1f; }) > 100;
-        fprintf(stderr, "text-move: %s; paragraph %d, point scale %d, path text %d\n", paragraphOk && pointOk && pathOk ? "passed" : "type transform check failed", paragraphOk ? 1 : 0, pointOk ? 1 : 0, pathOk ? 1 : 0);
+        const float startBefore = doc.cur().text.pathStart;
+        const bool markerPicked = typePathMarkerPress(ImVec2(p0.ax, p0.ay));
+        if (markerPicked) typePathDragTo(ImVec2(p0.ax + (p1.ax - p0.ax) * 0.2f, p0.ay + (p1.ay - p0.ay) * 0.2f));
+        typePathDragPart = -1; typePathDragLayer = -1;
+        const bool startMarkerOk = markerPicked && doc.cur().text.pathStart > startBefore + 20;
+        doc.cur().text.pathEnd = doc.cur().text.pathStart + 100;
+        ImVec2 endMarker; typePathPointAt(doc.cur().text, doc.cur().text.pathEnd, endMarker, doc.cur().text.pathFlip);
+        const bool endPicked = typePathMarkerPress(endMarker);
+        if (endPicked) { ImVec2 target; typePathPointAt(doc.cur().text, doc.cur().text.pathEnd + 35, target, doc.cur().text.pathFlip); typePathDragTo(target); }
+        typePathDragPart = -1; typePathDragLayer = -1;
+        const bool endMarkerOk = endPicked && doc.cur().text.pathEnd > doc.cur().text.pathStart + 120;
+        ImVec2 bodyStart; typePathPointAt(doc.cur().text, doc.cur().text.pathStart + 40, bodyStart, doc.cur().text.pathFlip);
+        const float bodyBefore = doc.cur().text.pathStart;
+        const bool bodyPicked = typePathMarkerPress(bodyStart);
+        if (bodyPicked) { ImVec2 target; typePathPointAt(doc.cur().text, doc.cur().text.pathStart + 60, target, doc.cur().text.pathFlip); typePathDragTo(target); }
+        typePathDragPart = -1; typePathDragLayer = -1;
+        const bool bodyMoveOk = bodyPicked && std::fabs(doc.cur().text.pathStart - bodyBefore - 20) < 12;
+        const bool markerOk = startMarkerOk && endMarkerOk && bodyMoveOk;
+        fprintf(stderr, "text-move: %s; paragraph %d, point scale %d, path text %d, start/end/body markers %d/%d/%d\n", paragraphOk && pointOk && pathOk && markerOk ? "passed" : "type transform check failed", paragraphOk ? 1 : 0, pointOk ? 1 : 0, pathOk ? 1 : 0, startMarkerOk ? 1 : 0, endMarkerOk ? 1 : 0, bodyMoveOk ? 1 : 0);
         return;
     }
     if (what == "artboard") {

@@ -197,8 +197,11 @@ static bool textFollowsBezierPathAndPersists() {
     if (!textCoverage(closed, 500, 300, closedCoverage, cb) || !textCoverage(open, 500, 300, openCoverage, ob)) return false;
     const float closedInk = std::accumulate(closedCoverage.begin(), closedCoverage.end(), 0.0f);
     const float openInk = std::accumulate(openCoverage.begin(), openCoverage.end(), 0.0f);
-    Text decoded;
-    if (!decoded.load(text.save())) return false;
+    Text bounded = text; bounded.pathEnd = 180;
+    Text decoded, oldText2;
+    const std::string encoded = bounded.save();
+    const size_t finalSpace = encoded.find_last_of(' ');
+    if (!decoded.load(encoded) || finalSpace == std::string::npos || !oldText2.load(encoded.substr(0, finalSpace)) || oldText2.pathEnd != -1) return false;
     Doc project = newDoc(500, 300, false); Fill fill; fill.kind = FILL_SOLID; addTextLayer(project, text, fill);
     const std::filesystem::path path = std::filesystem::temp_directory_path() / "chimera-text-path-selftest.chimera";
     std::string error; Doc loaded;
@@ -206,7 +209,28 @@ static bool textFollowsBezierPathAndPersists() {
     std::error_code ec; std::filesystem::remove(path, ec);
     const auto layer = std::find_if(loaded.layers.begin(), loaded.layers.end(), [](const Layer& l) { return l.isText(); });
     return ink > 100 && box[3] < 180 && closedInk > openInk * 1.4f && decoded.pathText && decoded.path.size() == 1 && decoded.path[0].knots.size() == 2 &&
-           saved && layer != loaded.layers.end() && layer->text.pathText && layer->text.path.size() == 1 && layer->text.pathStart == text.pathStart;
+           decoded.pathEnd == bounded.pathEnd && saved && layer != loaded.layers.end() && layer->text.pathText && layer->text.path.size() == 1 && layer->text.pathStart == text.pathStart;
+}
+
+// after PhotoCraft (crates/ui-egui/src/tools/type_path_placement.rs effective_range): explicit
+// end markers clip open paths, while a closed path interval can pass through its start seam.
+static bool textPathPlacementRangeBehaves() {
+    Subpath line; Knot a; a.ax = 16; a.ay = 80; a.ox = 76; a.oy = 80; Knot b; b.ax = 184; b.ay = 80; b.ix = 124; b.iy = 80; line.knots = {a, b};
+    Text text; text.str = "Path range"; text.size = 30; text.path = {line}; text.pathText = true; text.pathStart = 115; text.pathEnd = 170;
+    std::vector<float> full, shortRange; float box[4], shortBox[4];
+    if (!textCoverage(text, 220, 140, full, box)) return false;
+    Text shortText = text; shortText.pathEnd = 130;
+    if (!textCoverage(shortText, 220, 140, shortRange, shortBox)) return false;
+    const float fullInk = std::accumulate(full.begin(), full.end(), 0.0f), shortInk = std::accumulate(shortRange.begin(), shortRange.end(), 0.0f);
+    Subpath loop; Knot p0; p0.ax=20;p0.ay=20;p0.ox=180;p0.oy=20; Knot p1;p1.ax=180;p1.ay=20;p1.ix=20;p1.iy=20;
+    Knot p2;p2.ax=180;p2.ay=180;p2.ix=180;p2.iy=20; Knot p3;p3.ax=20;p3.ay=180;p3.ix=180;p3.iy=180;
+    p0.ix=20;p0.iy=180; loop.knots={p0,p1,p2,p3}; loop.closed=true;
+    Text seam=text; seam.path={loop}; seam.pathStart=615; seam.pathEnd=675;
+    Text beforeSeam=seam; beforeSeam.pathStart=615; beforeSeam.pathEnd=635;
+    std::vector<float> seamInk, beforeInk; float seamBox[4], beforeBox[4];
+    if (!textCoverage(seam,220,220,seamInk,seamBox) || !textCoverage(beforeSeam,220,220,beforeInk,beforeBox)) return false;
+    const float wrapInk=std::accumulate(seamInk.begin(),seamInk.end(),0.0f), clippedInk=std::accumulate(beforeInk.begin(),beforeInk.end(),0.0f);
+    return fullInk > shortInk && shortInk > 0 && wrapInk > clippedInk && clippedInk > 0;
 }
 
 int runSelfTests() {
@@ -224,6 +248,7 @@ int runSelfTests() {
         {"group knockout uses composite shape", groupKnockoutUsesItsCompositeShape},
         {"paragraph text wraps and keeps legacy projects readable", paragraphTextWrapsAndPersists},
         {"type follows and saves a Bezier path", textFollowsBezierPathAndPersists},
+        {"text path placement respects open ends and closed seams", textPathPlacementRangeBehaves},
     };
     int failed = 0;
     for (const Test& test : tests) {
