@@ -134,7 +134,7 @@ Mimic is installed, or in a Mimic folder nearby; otherwise use **Filter > Mimic 
 
 ### 8. Workspace
 The usual layout: menus, a contextual tool options bar, the tools down the left, the canvas in the middle, the
-Layers panel on the right and a status bar, in the Cursed dark theme (solid greys with the Cursed pink). The usual
+Layers panel on the right and a status bar, in the Cursed dark theme (solid greys with the Atelier blue). The usual
 shortcuts: V M L W B E G I H, [ and ] for brush size (Shift for hardness), X swaps colours, D resets them, Ctrl+Z,
 Ctrl+J, Ctrl+E, Ctrl+T, Ctrl+M, Ctrl+L, Ctrl+U, Ctrl+I, Ctrl+A, Ctrl+D, Ctrl+Shift+I, Ctrl+0, Ctrl+1.
 
