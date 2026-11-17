@@ -183,6 +183,7 @@ static float zoom = 1.0f, viewRotation = 0.0f; static ImVec2 origin(0, 0); stati
 static bool dragging = false, panning = false; static ImVec2 dragStart, dragNow, panStart, originStart;
 static float rotateStartAngle = 0.0f, rotateStartPointer = 0.0f;
 static int moveStartX = 0, moveStartY = 0;
+static int moveGroupId = 0;
 static std::vector<float> lasso, poly;
 // the shape tools: new shapes take these (and the foreground colour); with a shape layer active, the options bar
 // changes that layer's shape instead
@@ -2114,13 +2115,27 @@ static bool createFrame(Rect rect) {
     changed();
     return true;
 }
-// Add an artboard rectangle to the document; its metadata is saved separately from image pixels.
+// Create an artboard as a regular group with a rectangle fill at its base.
 static bool createArtboard(Rect rect) {
     if (rect.empty()) return false;
     int number = 1;
     for (const Artboard& a : doc.artboards) if (a.name.rfind("Artboard ", 0) == 0) ++number;
     remember("New Artboard");
-    doc.artboards.push_back({rect, "Artboard " + std::to_string(number), artboardBackground});
+    int id = 1; for (const LayerGroup& g : doc.groups) id = std::max(id, g.id + 1);
+    LayerGroup group; group.id = id; group.name = "Artboard " + std::to_string(number); group.expanded = true;
+    doc.groups.push_back(group);
+    Artboard board; board.rect = rect; board.name = group.name; board.background = artboardBackground; board.groupId = id;
+    doc.artboards.push_back(board);
+    Layer bg = emptyLayer(doc, "Background"); bg.groupId = id;
+    bg.fill.kind = FILL_SOLID;
+    if (artboardBackground == 0) bg.fill.colour[0] = bg.fill.colour[1] = bg.fill.colour[2] = 1;
+    else if (artboardBackground == 1) bg.fill.colour[0] = bg.fill.colour[1] = bg.fill.colour[2] = 0;
+    else if (artboardBackground == 2) { bg.fill.colour[0] = 0; bg.fill.colour[1] = 123.0f / 255.0f; bg.fill.colour[2] = 183.0f / 255.0f; }
+    bg.shape.kind = SHAPE_RECT; bg.shape.x0 = (float)rect.x0; bg.shape.y0 = (float)rect.y0; bg.shape.x1 = (float)rect.x1; bg.shape.y1 = (float)rect.y1;
+    if (!doc.layers.empty() && doc.cur().groupId) bg.groupId = doc.cur().groupId;
+    renderFill(doc, bg);
+    doc.layers.push_back(std::move(bg)); doc.active = (int)doc.layers.size() - 1;
+    doc.layers.back().groupId = id;
     artboardActive = (int)doc.artboards.size() - 1;
     changed();
     return true;
@@ -2217,6 +2232,29 @@ static void exportSlices() {
     std::string err;
     if (!writeSlices(folder, written, err)) { say(err); return; }
     say("Exported " + std::to_string(written) + " slices");
+}
+// Export each artboard group into a sibling folder as its own PNG.
+static void exportArtboards() {
+    if (noDoc || doc.artboards.empty()) return;
+    const std::string start = doc.path.empty() ? "artboards.png" : doc.path;
+    const std::string chosen = fileDialog(true, "PNG|*.png|", "png", start);
+    if (chosen.empty()) return;
+    const std::filesystem::path selected = std::filesystem::u8path(chosen);
+    const std::filesystem::path folder = selected.parent_path() / (selected.stem().string() + "_artboards");
+    std::error_code ec; std::filesystem::create_directories(folder, ec);
+    if (ec) { say("Could not create the artboard export folder"); return; }
+    std::vector<std::string> used;
+    for (const Artboard& board : doc.artboards) {
+        Image pixels;
+        if (!renderArtboard(doc, board.groupId, pixels)) { say("An artboard has no layer group to export"); return; }
+        std::string name = safeSliceFilename(board.name), base = name;
+        for (unsigned suffix = 2; std::find(used.begin(), used.end(), name) != used.end(); ++suffix) name = base + "_" + std::to_string(suffix);
+        used.push_back(name);
+        Doc output = newDoc(pixels.w, pixels.h, false); output.layers[0].img = std::move(pixels);
+        std::string err;
+        if (!saveImage(output, (folder / std::filesystem::u8path(name + ".png")).u8string(), err)) { say(err); return; }
+    }
+    say("Exported " + std::to_string(doc.artboards.size()) + " artboards");
 }
 // ---------- the Pen tools (PhotoCraft's paths): Pen, Freeform Pen, Curvature Pen, Add / Delete Anchor, Convert
 // Point, Path Selection and Direct Selection, on the document's work path ----------
@@ -2575,7 +2613,7 @@ static void canvasInput() {
             rotateStartAngle = viewRotation;
             break;
         }
-        case T_MOVE: remember("Move"); moveStartX = doc.cur().x; moveStartY = doc.cur().y; break;
+        case T_MOVE: remember("Move"); moveStartX = doc.cur().x; moveStartY = doc.cur().y; moveGroupId = doc.cur().groupId; break;
         case T_LASSO: lasso = {c.x, c.y}; break;
         case T_MAGNETIC:
             magneticClick({c.x, c.y}, ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left));
@@ -2766,7 +2804,12 @@ static void canvasInput() {
         case T_MOVE: {
             Layer& l = doc.cur();
             const int nx = moveStartX + (int)std::lround(c.x - dragStart.x), ny = moveStartY + (int)std::lround(c.y - dragStart.y);
-            if (nx != l.x || ny != l.y) { l.x = nx; l.y = ny; changed(); }
+            const int dx = nx - l.x, dy = ny - l.y;
+            if (moveGroupId && (dx || dy)) {
+                for (Layer& child : doc.layers) if (child.groupId == moveGroupId) { child.x += dx; child.y += dy; }
+                for (Artboard& board : doc.artboards) if (board.groupId == moveGroupId) { board.rect.x0 += dx; board.rect.x1 += dx; board.rect.y0 += dy; board.rect.y1 += dy; }
+                changed();
+            } else if (nx != l.x || ny != l.y) { l.x = nx; l.y = ny; changed(); }
             break;
         }
         case T_LASSO: if (std::hypot(c.x - lasso[lasso.size() - 2], c.y - lasso.back()) * zoom > 2) { lasso.push_back(c.x); lasso.push_back(c.y); } break;
@@ -3702,13 +3745,12 @@ static void optionsBar() {
                     ImGui::PushID(i);
                     ImGui::Button("##shape", ImVec2(72, 70));
                     const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
-                    const auto& source = CUSTOM_SHAPE_POINTS[i];
-                    float loX = 100, loY = 100, hiX = 0, hiY = 0;
-                    for (const ImVec2& p : source) { loX = std::min(loX, p.x); loY = std::min(loY, p.y); hiX = std::max(hiX, p.x); hiY = std::max(hiY, p.y); }
-                    const float scale = std::min(38.0f / std::max(1.0f, hiX - loX), 38.0f / std::max(1.0f, hiY - loY));
+                    const int previousPick = customShapePick; customShapePick = i;
+                    const std::vector<float> outline = shapeOutline(customShapeFromDrag(ImVec2(18, 4), ImVec2(54, 42)));
+                    customShapePick = previousPick;
                     std::vector<ImVec2> icon;
-                    for (const ImVec2& p : source) icon.push_back(ImVec2(a.x + 36 + (p.x - (loX + hiX) * 0.5f) * scale, a.y + 24 + (p.y - (loY + hiY) * 0.5f) * scale));
-                    ImGui::GetWindowDrawList()->AddPolyline(icon.data(), (int)icon.size(), C_PINK, ImDrawFlags_Closed, 1.5f);
+                    for (size_t p = 0; p + 1 < outline.size(); p += 2) icon.push_back(ImVec2(a.x + 9 + outline[p], a.y + 4 + outline[p + 1]));
+                    if (icon.size() > 1) ImGui::GetWindowDrawList()->AddPolyline(icon.data(), (int)icon.size(), C_PINK, ImDrawFlags_Closed, 1.5f);
                     const ImVec2 text = ImGui::CalcTextSize(CUSTOM_SHAPE_NAMES[i]);
                     ImGui::GetWindowDrawList()->AddText(ImVec2(a.x + (72 - text.x) * 0.5f, b.y - text.y - 4), C_TEXT, CUSTOM_SHAPE_NAMES[i]);
                     if (ImGui::IsItemClicked()) customShapePick = i;
@@ -4189,6 +4231,7 @@ static void menus() {
         if (item("Save Project As...", nullptr, !noDoc)) saveAs(true);
         if (item("Export PNG / JPG...", "Ctrl+Shift+S", !noDoc)) saveAs(false);
         if (item("Export Slices as Images...", nullptr, !noDoc)) exportSlices();
+        if (item("Export Artboards to Files...", nullptr, !noDoc && !doc.artboards.empty())) exportArtboards();
         if (item("Export ICO...", nullptr, !noDoc)) saveAs(false, true);
         if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", "A Windows icon: the picture at 16, 24, 32, 48, 64, 128 and 256 px in one .ico (not square: fitted, transparent round it)");
         if (item("Save with Inoculant...", nullptr, !noDoc && inoculantHave())) inoculantSave();
@@ -4831,8 +4874,11 @@ void script(const std::string& what) {
         const std::string project = scriptPath("artboards-roundtrip.chimera").u8string();
         Doc roundTrip;
         const bool saved = saveProject(doc, project, err) && openDoc(project, roundTrip, err);
-        const bool ok = saved && roundTrip.artboards.size() == 2 && roundTrip.artboards[0].name == "Artboard 1" && roundTrip.artboards[1].background == 1;
-        fprintf(stderr, "artboard: %s; two named regions, background and project round trip=%d\n", ok ? "passed" : err.c_str(), saved);
+        Image boardImage; const bool rendered = saved && renderArtboard(roundTrip, roundTrip.artboards[0].groupId, boardImage);
+        const uint8_t* boardPixel = rendered ? boardImage.at(boardImage.w / 2, boardImage.h / 2) : nullptr;
+        const bool ok = saved && rendered && boardPixel && boardPixel[0] > 245 && boardPixel[1] > 245 && boardPixel[2] > 245 && roundTrip.artboards.size() == 2 && roundTrip.artboards[0].name == "Artboard 1" && roundTrip.artboards[1].background == 1 &&
+                        roundTrip.artboards[0].groupId != 0 && roundTrip.layers.back().groupId == roundTrip.artboards[1].groupId;
+        fprintf(stderr, "artboard: %s; grouped backgrounds, export render and project round trip=%d\n", ok ? "passed" : err.c_str(), saved);
         changed();
         return;
     }

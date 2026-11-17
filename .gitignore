@@ -161,3 +161,4 @@ cython_debug/
 cpp/build/
 cpp/dist/
 cpp/external/
+cpp/build-fresh/

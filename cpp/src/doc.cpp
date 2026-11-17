@@ -8,7 +8,6 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
-#include <unordered_set>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -54,8 +53,10 @@ void addLayer(Doc& d, Layer l) {
     if (!d.layers.empty() && d.layers[d.active].groupId) {
         const int id = d.layers[d.active].groupId;
         for (int i = 0; i < (int)d.layers.size(); ++i) if (d.layers[i].groupId == id) at = std::max(at, i + 1);
+        for (const LayerGroup& g : d.groups) if (g.parentId == id) at = std::max(at, g.stackIndex + 1);
         l.groupId = id;
     }
+    for (LayerGroup& g : d.groups) if (g.stackIndex >= at) ++g.stackIndex;
     d.layers.insert(d.layers.begin() + at, std::move(l));
     d.active = at;
     d.editMask = false;
@@ -64,10 +65,21 @@ void addLayer(Doc& d, Layer l) {
 
 void deleteLayer(Doc& d) {
     if (d.layers.size() <= 1) return;
-    d.layers.erase(d.layers.begin() + d.active);
-    d.groups.erase(std::remove_if(d.groups.begin(), d.groups.end(), [&](const LayerGroup& g) {
-        return std::none_of(d.layers.begin(), d.layers.end(), [&](const Layer& l) { return l.groupId == g.id; });
-    }), d.groups.end());
+    const int removed = d.active;
+    d.layers.erase(d.layers.begin() + removed);
+    for (LayerGroup& g : d.groups) if (g.stackIndex > removed) --g.stackIndex;
+    for (;;) {
+        std::vector<int> empty;
+        for (const LayerGroup& g : d.groups) {
+            const bool hasLayers = std::any_of(d.layers.begin(), d.layers.end(), [&](const Layer& l) { return l.groupId == g.id; });
+            const bool hasGroups = std::any_of(d.groups.begin(), d.groups.end(), [&](const LayerGroup& child) { return child.parentId == g.id; });
+            if (!hasLayers && !hasGroups) empty.push_back(g.id);
+        }
+        if (empty.empty()) break;
+        d.groups.erase(std::remove_if(d.groups.begin(), d.groups.end(), [&](const LayerGroup& g) {
+            return std::find(empty.begin(), empty.end(), g.id) != empty.end();
+        }), d.groups.end());
+    }
     d.active = std::max(0, d.active - 1);
     d.editMask = false;
     d.dirty = true;
@@ -88,17 +100,21 @@ void moveLayer(Doc& d, int dir) {
     d.dirty = true;
 }
 
-// Wrap a contiguous selection so group compositing has one well-defined stack position.
+// after PhotoCraft (crates/doc/src/lib.rs Layer::group): wrap direct sibling layers at the same tree level.
 bool groupLayers(Doc& d, const std::vector<int>& selected) {
     if (selected.empty()) return false;
     std::vector<int> ids = selected;
     std::sort(ids.begin(), ids.end());
     ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
     if (ids.back() >= (int)d.layers.size() || ids.front() < 0 || ids.back() - ids.front() + 1 != (int)ids.size()) return false;
-    for (int i : ids) if (d.layers[i].groupId) return false;
-    int id = 1;
-    for (const LayerGroup& g : d.groups) id = std::max(id, g.id + 1);
-    LayerGroup group; group.id = id; group.name = "Group " + std::to_string(id);
+    const int parent = d.layers[ids.front()].groupId;
+    for (int i : ids) if (d.layers[i].groupId != parent) return false;
+    for (int i = ids.front(); i <= ids.back(); ++i) if (d.layers[i].groupId != parent) return false;
+    int64_t nextId = 1;
+    for (const LayerGroup& g : d.groups) nextId = std::max(nextId, (int64_t)g.id + 1);
+    if (nextId > INT32_MAX) return false;
+    const int id = (int)nextId;
+    LayerGroup group; group.id = id; group.parentId = parent; group.stackIndex = ids.front(); group.name = "Group " + std::to_string(id);
     for (int i : ids) d.layers[i].groupId = id;
     d.groups.push_back(std::move(group));
     d.active = ids.back();
@@ -109,10 +125,74 @@ bool groupLayers(Doc& d, const std::vector<int>& selected) {
 bool ungroupActiveLayer(Doc& d) {
     if (d.active < 0 || d.active >= (int)d.layers.size() || !d.layers[d.active].groupId) return false;
     const int id = d.layers[d.active].groupId;
-    for (Layer& l : d.layers) if (l.groupId == id) l.groupId = 0;
+    auto group = std::find_if(d.groups.begin(), d.groups.end(), [id](const LayerGroup& g) { return g.id == id; });
+    if (group == d.groups.end()) return false;
+    const int parent = group->parentId;
+    for (Layer& l : d.layers) if (l.groupId == id) l.groupId = parent;
+    for (LayerGroup& g : d.groups) if (g.parentId == id) g.parentId = parent;
     d.groups.erase(std::remove_if(d.groups.begin(), d.groups.end(), [id](const LayerGroup& g) { return g.id == id; }), d.groups.end());
     d.dirty = true;
     return true;
+}
+
+// after PhotoCraft (crates/doc/src/lib.rs Document::walk): list the tree bottom-to-top in depth-first order.
+std::vector<LayerTreeEntry> layerTreeWalk(const Doc& d) {
+    struct Node { bool group; int id, order; };
+    std::vector<LayerTreeEntry> out;
+    std::vector<int> prefix;
+    auto visit = [&](auto&& self, int parent, int depth) -> void {
+        std::vector<Node> nodes;
+        for (int i = 0; i < (int)d.layers.size(); ++i) if (d.layers[i].groupId == parent) nodes.push_back({false, i, i});
+        for (const LayerGroup& g : d.groups) if (g.parentId == parent) nodes.push_back({true, g.id, g.stackIndex});
+        std::stable_sort(nodes.begin(), nodes.end(), [](const Node& a, const Node& b) { return a.order < b.order; });
+        for (int i = 0; i < (int)nodes.size(); ++i) {
+            const Node& n = nodes[i];
+            prefix.push_back(i);
+            out.push_back({n.group, n.id, n.group ? -1 : n.id, depth, prefix});
+            if (n.group) self(self, n.id, depth + 1);
+            prefix.pop_back();
+        }
+    };
+    visit(visit, 0, 0);
+    return out;
+}
+
+std::vector<int> layerPath(const Doc& d, int index) {
+    for (const LayerTreeEntry& entry : layerTreeWalk(d)) if (!entry.group && entry.layerIndex == index) return entry.path;
+    return {};
+}
+
+std::vector<int> groupPath(const Doc& d, int id) {
+    for (const LayerTreeEntry& entry : layerTreeWalk(d)) if (entry.group && entry.id == id) return entry.path;
+    return {};
+}
+
+// after PhotoCraft (crates/doc/src/lib.rs Document::max_group_depth): count nonempty nesting without recursion.
+int maxGroupDepth(const Doc& d) {
+    int maximum = 0;
+    std::vector<std::pair<int, int>> pending{{0, 0}};
+    while (!pending.empty()) {
+        const auto [parent, depth] = pending.back(); pending.pop_back();
+        for (const LayerGroup& group : d.groups) if (group.parentId == parent) {
+            const bool hasLayers = std::any_of(d.layers.begin(), d.layers.end(), [&](const Layer& l) { return l.groupId == group.id; });
+            const bool hasGroups = std::any_of(d.groups.begin(), d.groups.end(), [&](const LayerGroup& g) { return g.parentId == group.id; });
+            if (!hasLayers && !hasGroups) continue;
+            maximum = std::max(maximum, depth + 1);
+            pending.push_back({group.id, depth + 1});
+        }
+    }
+    return maximum;
+}
+
+// after PhotoCraft (crates/doc/src/lib.rs Document::effective_locks): apply each ancestor group's lock.
+bool groupLocked(const Doc& d, int id) {
+    while (id) {
+        auto it = std::find_if(d.groups.begin(), d.groups.end(), [id](const LayerGroup& g) { return g.id == id; });
+        if (it == d.groups.end()) return false;
+        if (it->locked) return true;
+        id = it->parentId;
+    }
+    return false;
 }
 
 // ---- fill layers
@@ -295,7 +375,7 @@ static void drawAdjust(const Layer& l, std::vector<float>& buf, Rect r, int mode
     adjFree(prep);
 }
 
-void composite(const Doc& d, Image& out, Rect r, bool showMask) {
+static void compositeFlat(const Doc& d, Image& out, Rect r, bool showMask, bool isolated = false) {
     if (out.w != d.w || out.h != d.h) out = Image(d.w, d.h);
     r = r.clip(d.w, d.h);
     if (r.empty()) return;
@@ -314,38 +394,16 @@ void composite(const Doc& d, Image& out, Rect r, bool showMask) {
     const int rw = r.x1 - r.x0;
     std::vector<float> buf((size_t)rw * (r.y1 - r.y0) * 4, 0.0f);
     std::vector<float> cov;   // the current base's coverage (alpha x mask), for the layers clipped to it
+    std::vector<float> floor(buf.size(), 0.0f), clipFloor;
     bool baseShown = true;
-    std::unordered_set<int> handledGroups;
     for (size_t i = 0; i < d.layers.size(); ++i) {
         const Layer& l = d.layers[i];
-        if (l.groupId) {
-            if (!handledGroups.insert(l.groupId).second) continue;
-            const auto found = std::find_if(d.groups.begin(), d.groups.end(), [&](const LayerGroup& g) { return g.id == l.groupId; });
-            if (found == d.groups.end()) continue;
-            Doc grouped = d;
-            grouped.layers.clear(); grouped.groups.clear(); grouped.active = 0;
-            for (const Layer& child : d.layers) if (child.groupId == l.groupId) { grouped.layers.push_back(child); grouped.layers.back().groupId = 0; }
-            if (grouped.layers.empty()) continue;
-            grouped.layers.front().clip = false;
-            Image pixels(d.w, d.h);
-            composite(grouped, pixels, r, false);
-            Layer merged; merged.name = found->name; merged.img = std::move(pixels); merged.visible = found->visible;
-            merged.opacity = found->opacity; merged.blend = found->blend;
-            merged.hasMask = found->hasMask; merged.maskOn = found->maskOn; merged.mask = found->mask;
-            if (i == 0 || !l.clip) baseShown = merged.visible && merged.opacity > 0;
-            if (baseShown) drawLayer(merged, buf, r, merged.blend, merged.opacity);
-            const bool clippedAbove = i + 1 < d.layers.size() && d.layers[i + 1].clip && d.layers[i + 1].groupId != l.groupId;
-            if (clippedAbove && baseShown) {
-                cov.assign((size_t)rw * (r.y1 - r.y0), 0.0f);
-                for (int y = r.y0; y < r.y1; ++y) for (int x = r.x0; x < r.x1; ++x)
-                    cov[(size_t)(y - r.y0) * rw + x - r.x0] = merged.img.at(x, y)[3] / 255.0f * merged.maskAt(x, y) / 255.0f;
-            }
-            continue;
-        }
+        bool startsClipBase = false;
         if (!l.clip) {
             baseShown = l.visible && l.opacity > 0.0f;
             const bool clippedAbove = i + 1 < d.layers.size() && d.layers[i + 1].clip;
             if (clippedAbove && baseShown) {   // where the base shows: its pixels' alpha (an adjustment's: its mask)
+                startsClipBase = true;
                 cov.assign((size_t)rw * (r.y1 - r.y0), 0.0f);
                 const int lx0 = std::max(r.x0, l.x), ly0 = std::max(r.y0, l.y), lx1 = std::min(r.x1, l.x + l.img.w), ly1 = std::min(r.y1, l.y + l.img.h);
                 for (int y = ly0; y < ly1; ++y)
@@ -356,14 +414,116 @@ void composite(const Doc& d, Image& out, Rect r, bool showMask) {
         if (!l.visible || l.opacity <= 0.0f) continue;
         if (l.clip && (!baseShown || i == 0)) continue;   // a hidden base hides what's clipped to it
         const float* c = l.clip && i > 0 ? cov.data() : nullptr;
+        if (l.knockout != KNOCKOUT_NONE && !l.isAdjust()) {
+            const int lx0 = std::max(r.x0, l.x), ly0 = std::max(r.y0, l.y), lx1 = std::min(r.x1, l.x + l.img.w), ly1 = std::min(r.y1, l.y + l.img.h);
+            const std::vector<float>& target = l.clip && !clipFloor.empty() ? clipFloor : floor;
+            for (int y = ly0; y < ly1; ++y) for (int x = lx0; x < lx1; ++x) {
+                const int lx = x - l.x, ly = y - l.y;
+                float coverage = l.img.at(lx, ly)[3] / 255.0f * l.maskAt(lx, ly) / 255.0f;
+                if (c) coverage *= c[(size_t)(y - r.y0) * rw + x - r.x0];
+                if (coverage <= 0) continue;
+                float* p = &buf[((size_t)(y - r.y0) * rw + x - r.x0) * 4];
+                const float* q = &target[((size_t)(y - r.y0) * rw + x - r.x0) * 4];
+                const float alpha = p[3] + (q[3] - p[3]) * coverage;
+                if (alpha <= 0) { p[0] = p[1] = p[2] = p[3] = 0; continue; }
+                for (int k = 0; k < 3; ++k) p[k] = (p[k] * p[3] + (q[k] * q[3] - p[k] * p[3]) * coverage) / alpha;
+                p[3] = alpha;
+            }
+        }
         if (l.isAdjust()) drawAdjust(l, buf, r, l.blend, l.opacity, c);
         else drawLayer(l, buf, r, l.blend, l.opacity, c);
+        if (startsClipBase) clipFloor = buf;
+        if (i == 0 && !isolated) floor = buf;
     }
     for (int y = r.y0; y < r.y1; ++y) {
         const float* b = &buf[(size_t)(y - r.y0) * rw * 4];
         uint8_t* o = out.at(r.x0, y);
         for (int i = 0; i < rw * 4; ++i) o[i] = to8(b[i]);
     }
+}
+
+// after PhotoCraft (crates/compose/src/tests.rs isolated_group_differs_from_pass_through): flatten pass-through stacks and isolate groups with group-level settings.
+static void appendTreeLayers(const Doc& source, int parent, std::vector<Layer>& output, Rect r);
+
+static Layer renderGroupLayer(const Doc& source, const LayerGroup& group, Rect r) {
+    Doc children; children.w = source.w; children.h = source.h; children.active = 0;
+    appendTreeLayers(source, group.id, children.layers, r);
+    if (children.layers.empty()) children.layers.push_back(emptyLayer(source, group.name));
+    children.layers.front().clip = false;
+    Image pixels(source.w, source.h);
+    compositeFlat(children, pixels, r, false, true);
+    Layer merged; merged.name = group.name; merged.img = std::move(pixels); merged.visible = group.visible;
+    merged.opacity = group.opacity; merged.blend = group.blend;
+    merged.knockout = group.knockout;
+    merged.hasMask = group.hasMask; merged.maskOn = group.maskOn; merged.mask = group.mask;
+    return merged;
+}
+
+static void appendTreeLayers(const Doc& source, int parent, std::vector<Layer>& output, Rect r) {
+    // The tree walk paths make each direct child's sibling index explicit; gather those nodes in order.
+    std::vector<LayerTreeEntry> all = layerTreeWalk(source);
+    int parentDepth = -1;
+    std::vector<int> parentPath;
+    if (parent) for (const LayerTreeEntry& e : all) if (e.group && e.id == parent) { parentDepth = e.depth; parentPath = e.path; break; }
+    std::vector<const LayerTreeEntry*> direct;
+    for (const LayerTreeEntry& entry : all) {
+        if (entry.depth != parentDepth + 1 || entry.path.size() != parentPath.size() + 1) continue;
+        if (parent && !std::equal(parentPath.begin(), parentPath.end(), entry.path.begin())) continue;
+        if (!parent && entry.depth != 0) continue;
+        direct.push_back(&entry);
+    }
+    for (size_t i = 0; i < direct.size(); ++i) {
+        const LayerTreeEntry& entry = *direct[i];
+        if (!entry.group) { output.push_back(source.layers[entry.layerIndex]); output.back().groupId = 0; continue; }
+        auto it = std::find_if(source.groups.begin(), source.groups.end(), [&](const LayerGroup& g) { return g.id == entry.id; });
+        if (it == source.groups.end() || !it->visible) continue;
+        const bool clipBase = i + 1 < direct.size() && !direct[i + 1]->group && source.layers[direct[i + 1]->layerIndex].clip;
+        if (it->passThrough && !clipBase && it->opacity >= 1.0f && !it->hasMask && it->blend == BM_Normal && it->knockout == 0) {
+            appendTreeLayers(source, it->id, output, r);
+        } else {
+            output.push_back(renderGroupLayer(source, *it, r));
+        }
+    }
+}
+
+void composite(const Doc& d, Image& out, Rect r, bool showMask) {
+    if (out.w != d.w || out.h != d.h) out = Image(d.w, d.h);
+    r = r.clip(d.w, d.h);
+    if (r.empty()) return;
+    if (showMask && d.active >= 0 && d.active < (int)d.layers.size() && d.layers[d.active].hasMask) {
+        const Layer& l = d.layers[d.active];
+        for (int y = r.y0; y < r.y1; ++y) for (int x = r.x0; x < r.x1; ++x) {
+            const int lx = x - l.x, ly = y - l.y;
+            const uint8_t v = (lx >= 0 && ly >= 0 && lx < l.img.w && ly < l.img.h) ? l.mask[(size_t)ly * l.img.w + lx] : 0;
+            uint8_t* p = out.at(x, y); p[0] = p[1] = p[2] = v; p[3] = 255;
+        }
+        return;
+    }
+    Doc flat; flat.w = d.w; flat.h = d.h; flat.active = 0;
+    appendTreeLayers(d, 0, flat.layers, r);
+    if (flat.layers.empty()) flat.layers.push_back(emptyLayer(d, "Empty"));
+    flat.layers.front().clip = false;
+    compositeFlat(flat, out, r, false);
+}
+
+// Render one artboard group and crop its transparent canvas to the board bounds.
+bool renderArtboard(const Doc& d, int groupId, Image& out) {
+    auto board = std::find_if(d.artboards.begin(), d.artboards.end(), [groupId](const Artboard& a) { return a.groupId == groupId; });
+    if (board == d.artboards.end() || board->rect.empty()) return false;
+    Doc content = d;
+    content.layers.clear(); content.groups.clear(); content.active = 0;
+    for (const Layer& layer : d.layers) if (layer.groupId == groupId) { content.layers.push_back(layer); content.layers.back().groupId = 0; }
+    if (content.layers.empty()) return false;
+    content.layers.front().clip = false;
+    Image canvas;
+    composite(content, canvas, {0, 0, d.w, d.h}, false);
+    const Rect rect = board->rect;
+    out = Image(rect.x1 - rect.x0, rect.y1 - rect.y0);
+    for (int y = 0; y < out.h; ++y) for (int x = 0; x < out.w; ++x) {
+        const int cx = rect.x0 + x, cy = rect.y0 + y;
+        if (cx >= 0 && cy >= 0 && cx < d.w && cy < d.h) memcpy(out.at(x, y), canvas.at(cx, cy), 4);
+    }
+    return true;
 }
 
 // merge layer `top` into `bottom` (both canvas-covering), keeping bottom's blend
@@ -565,6 +725,7 @@ bool openDoc(const std::string& path, Doc& d, std::string& err) {
             }
             l.clip = (flags & (1u << 13)) != 0;
             l.frame = (flags & (1u << 17)) != 0;
+            l.knockout = (flags >> 18) & 3;
             if (flags & (1u << 14)) {   // a fill layer's settings
                 auto fb = r.bytes();
                 if (!l.fill.load(std::string(fb.begin(), fb.end()))) { err = "A fill layer in the project is damaged"; return false; }
@@ -617,6 +778,8 @@ bool openDoc(const std::string& path, Doc& d, std::string& err) {
                 if (groups > 100000) { err = "The project has too many layer groups"; return false; }
                 for (uint32_t i = 0; i < groups && r.ok; ++i) {
                     LayerGroup g; g.id = r.i32(); g.opacity = r.f(); g.blend = r.i32();
+                    if (g.id <= 0 || std::any_of(n.groups.begin(), n.groups.end(), [&](const LayerGroup& q) { return q.id == g.id; })) { r.ok = false; break; }
+                    g.passThrough = false;   // GRP1 groups were always isolated.
                     const uint32_t flags = r.u32(); g.visible = flags & 1; g.expanded = flags & 2; g.hasMask = flags & 4; g.maskOn = flags & 8;
                     auto name = r.bytes(); g.name.assign(name.begin(), name.end());
                     if (g.hasMask) { g.mask = r.bytes(); if (g.mask.size() != (size_t)n.w * n.h) r.ok = false; }
@@ -626,10 +789,45 @@ bool openDoc(const std::string& path, Doc& d, std::string& err) {
                         const uint32_t index = r.u32();
                         if (index >= n.layers.size() || n.layers[index].groupId) { r.ok = false; break; }
                         n.layers[index].groupId = g.id;
+                        if (j == 0) g.stackIndex = (int)index;
+                        else g.stackIndex = std::min(g.stackIndex, (int)index);
                     }
                     n.groups.push_back(std::move(g));
                 }
             }
+            if (r.ok && r.i < b.size()) {
+                if (r.i + 8 <= b.size() && !memcmp(b.data() + r.i, "GTR1", 4)) {
+                    r.i += 4;
+                    const uint32_t count = r.u32();
+                    if (count != n.groups.size()) r.ok = false;
+                    for (uint32_t i = 0; i < count && r.ok; ++i) {
+                        const int id = r.i32();
+                        auto g = std::find_if(n.groups.begin(), n.groups.end(), [id](const LayerGroup& q) { return q.id == id; });
+                        if (g == n.groups.end()) { r.ok = false; break; }
+                        g->parentId = r.i32(); g->stackIndex = r.i32();
+                        const uint32_t flags = r.u32(); g->passThrough = flags & 1; g->locked = flags & 2; g->knockout = (int)(flags >> 2);
+                    }
+                }
+            }
+            if (r.ok && r.i < b.size()) {
+                if (r.i + 8 > b.size() || memcmp(b.data() + r.i, "ABG1", 4)) { err = "The project has an unknown extension"; return false; }
+                r.i += 4;
+                const uint32_t boards = r.u32();
+                if (boards != n.artboards.size()) { r.ok = false; }
+                for (uint32_t i = 0; i < boards && r.ok; ++i) n.artboards[i].groupId = r.i32();
+            }
+            for (const LayerGroup& g : n.groups) {
+                if (g.stackIndex < 0 || g.stackIndex > (int)n.layers.size()) { r.ok = false; break; }
+                int parent = g.parentId;
+                for (size_t depth = 0; parent && depth <= n.groups.size(); ++depth) {
+                    if (parent == g.id) { r.ok = false; break; }
+                    auto ancestor = std::find_if(n.groups.begin(), n.groups.end(), [parent](const LayerGroup& q) { return q.id == parent; });
+                    if (ancestor == n.groups.end()) { r.ok = false; break; }
+                    parent = ancestor->parentId;
+                }
+                if (parent) { r.ok = false; break; }
+            }
+            for (const Layer& l : n.layers) if (l.groupId && std::none_of(n.groups.begin(), n.groups.end(), [&](const LayerGroup& g) { return g.id == l.groupId; })) r.ok = false;
         }
         if (!r.ok || n.layers.empty()) { err = "The project is damaged"; return false; }
         n.active = std::clamp(n.active, 0, (int)n.layers.size() - 1);
@@ -726,7 +924,7 @@ bool saveProject(const Doc& d, const std::string& path, std::string& err) {
         putBytes(o, (const uint8_t*)l.name.data(), l.name.size());
         putU32(o, (uint32_t)l.x); putU32(o, (uint32_t)l.y);
         putF(o, l.opacity); putU32(o, l.blend);
-        putU32(o, (l.visible ? 1 : 0) | (l.hasMask ? 2 : 0) | (l.maskOn ? 4 : 0) | ((uint32_t)(l.label & 15) << 8) | (l.isAdjust() ? 1u << 12 : 0) | (l.clip ? 1u << 13 : 0) | (l.isFill() ? 1u << 14 : 0) | (l.isShape() ? 1u << 15 : 0) | (l.isText() ? 1u << 16 : 0) | (l.frame ? 1u << 17 : 0));
+        putU32(o, (l.visible ? 1 : 0) | (l.hasMask ? 2 : 0) | (l.maskOn ? 4 : 0) | ((uint32_t)(l.label & 15) << 8) | (l.isAdjust() ? 1u << 12 : 0) | (l.clip ? 1u << 13 : 0) | (l.isFill() ? 1u << 14 : 0) | (l.isShape() ? 1u << 15 : 0) | (l.isText() ? 1u << 16 : 0) | (l.frame ? 1u << 17 : 0) | ((uint32_t)(l.knockout & 3) << 18));
         std::vector<uint8_t> png;
         stbi_write_png_to_func(toVec, &png, l.img.w, l.img.h, 4, l.img.px.data(), l.img.w * 4);
         putBytes(o, png.data(), png.size());
@@ -766,6 +964,15 @@ bool saveProject(const Doc& d, const std::string& path, std::string& err) {
         putU32(o, count);
         for (uint32_t i = 0; i < d.layers.size(); ++i) if (d.layers[i].groupId == g.id) putU32(o, i);
     }
+    o.insert(o.end(), {'G', 'T', 'R', '1'});
+    putU32(o, (uint32_t)d.groups.size());
+    for (const LayerGroup& g : d.groups) {
+        putU32(o, (uint32_t)g.id); putU32(o, (uint32_t)g.parentId); putU32(o, (uint32_t)g.stackIndex);
+        putU32(o, (g.passThrough ? 1u : 0u) | (g.locked ? 2u : 0u) | ((uint32_t)g.knockout << 2));
+    }
+    o.insert(o.end(), {'A', 'B', 'G', '1'});
+    putU32(o, (uint32_t)d.artboards.size());
+    for (const Artboard& a : d.artboards) putU32(o, (uint32_t)a.groupId);
     if (!writeFile(path, o)) { err = "Can't write " + path; return false; }
     return true;
 }

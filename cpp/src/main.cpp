@@ -84,12 +84,16 @@ static void splashSay(const char* status, float progress) {
 
 int main(int argc, char** argv) {
     std::string file, capture, scriptName;
+    bool selftest = false;
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--capture" && i + 1 < argc) capture = argv[++i];
         else if (a == "--script" && i + 1 < argc) scriptName = argv[++i];
+        else if (a == "--selftest") selftest = true;
         else file = a;
     }
+
+    if (selftest) return runSelfTests();
 
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_TIMER) != 0) return 1;
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);

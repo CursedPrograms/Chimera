@@ -27,9 +27,19 @@ struct Slice {
     std::string name;
 };
 
-// An artboard is a named canvas region that the Artboard tool can select and resize.
-struct Artboard { Rect rect; std::string name; int background = 0; };
-struct LayerGroup { int id = 0; std::string name = "Group"; float opacity = 1.0f; int blend = 0; bool visible = true, expanded = false, hasMask = false, maskOn = true; std::vector<uint8_t> mask; };
+// An artboard is a named region owned by a layer group.
+struct Artboard { Rect rect; std::string name; int background = 0; int groupId = 0; };
+struct LayerGroup {
+    int id = 0, parentId = 0, stackIndex = 0;
+    std::string name = "Group";
+    float opacity = 1.0f;
+    int blend = 0;
+    bool visible = true, expanded = false, hasMask = false, maskOn = true, passThrough = true, locked = false;
+    int knockout = 0;
+    std::vector<uint8_t> mask;
+};
+
+struct LayerTreeEntry { bool group = false; int id = 0, layerIndex = -1, depth = 0; std::vector<int> path; };
 
 struct Image {
     int w = 0, h = 0;
@@ -44,6 +54,7 @@ struct Image {
 // It has no pixels of its own to paint: they're drawn from these settings (renderFill) over the whole canvas, and its
 // mask says where it shows
 enum FillKind { FILL_NONE, FILL_SOLID, FILL_GRADIENT };
+enum KnockoutKind { KNOCKOUT_NONE, KNOCKOUT_SHALLOW, KNOCKOUT_DEEP };
 enum GradStyle { GRAD_LINEAR, GRAD_RADIAL, GRAD_ANGLE, GRAD_REFLECTED, GRAD_DIAMOND, GRAD_COUNT };
 struct Fill {
     int kind = FILL_NONE;
@@ -67,12 +78,13 @@ struct Layer {
     bool visible = true;
     float opacity = 1.0f;
     int blend = 0;                               // a BlendMode
+    int knockout = KNOCKOUT_NONE;                // Photoshop Advanced Blending knockout depth
     int label = 0;                               // its colour tag, PhotoCraft's set (0 = none; see labelName)
     Adjustment adj;                              // an adjustment layer: no pixels of its own, it changes what's below
     bool isAdjust() const { return adj.kind != ADJ_NONE; }
     bool clip = false;                           // a clipping mask: it only shows where the layer below it (its base) does
     bool frame = false;                           // a shape layer used as an image placeholder and clip base
-    int groupId = 0;                              // membership in a top-level LayerGroup, zero means ungrouped
+    int groupId = 0;                              // direct parent group; zero means a root layer
     Fill fill;                                   // a fill layer (Solid Colour, Gradient): its pixels come from these
     bool isFill() const { return fill.kind != FILL_NONE; }
     Shape shape;                                 // a shape layer (a fill layer only inside its shape, and its stroke)
@@ -89,8 +101,8 @@ struct Doc {
     bool editMask = false;                       // painting / filters go to the active layer's mask
     std::vector<uint8_t> sel;                    // canvas-sized; empty() = nothing selected (everything is fair game)
     std::vector<Slice> slices;                   // user slices used by the Slice tools and image export
-    std::vector<Artboard> artboards;             // named design regions, independent of the pixel layers
-    std::vector<LayerGroup> groups;               // groups refer to flat contiguous ranges of child layers
+    std::vector<Artboard> artboards;             // named regions attached to layer groups
+    std::vector<LayerGroup> groups;               // group nodes; parentId and stackIndex place them in the layer tree
     std::string path;                            // where it was opened from / saved to
     // the marks on it (PhotoCraft's Color Sampler, Count, Note and Ruler tools): not part of the picture
     struct Mark { float x = 0, y = 0; std::string text; };
@@ -122,6 +134,12 @@ void duplicateLayer(Doc& d);
 void moveLayer(Doc& d, int dir);                 // +1 up, -1 down
 bool groupLayers(Doc& d, const std::vector<int>& layers);
 bool ungroupActiveLayer(Doc& d);
+std::vector<LayerTreeEntry> layerTreeWalk(const Doc& d);
+std::vector<int> layerPath(const Doc& d, int layerIndex);
+std::vector<int> groupPath(const Doc& d, int groupId);
+int maxGroupDepth(const Doc& d);
+bool groupLocked(const Doc& d, int groupId);
+bool renderArtboard(const Doc& d, int groupId, Image& out);
 void mergeDown(Doc& d);
 void mergeVisible(Doc& d);
 void flatten(Doc& d);
@@ -145,6 +163,7 @@ bool loadImage(const std::string& path, Image& out, std::string& err);
 bool openDoc(const std::string& path, Doc& d, std::string& err);       // a picture or a .chimera project
 bool saveImage(const Doc& d, const std::string& path, std::string& err); // .png or .jpg: the flattened picture
 bool saveProject(const Doc& d, const std::string& path, std::string& err);
+int runSelfTests();
 
 // ---- undo: whole-document snapshots
 struct History {
