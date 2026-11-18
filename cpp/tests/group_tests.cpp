@@ -5,6 +5,7 @@
 #include "imgui_internal.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -21,6 +22,15 @@ bool typeToggleCharacterStyle(Text& text, size_t start, size_t end, int styleInd
 bool typeApplyEditorText(Text& text, const std::string& updated);
 bool typeSetCharacterSize(Text& text, size_t start, size_t end, float size);
 bool typeSetCharacterTracking(Text& text, size_t start, size_t end, float tracking);
+bool typeSetCharacterFont(Text& text, size_t start, size_t end, const std::string& font);
+bool typeSetCharacterMetricValue(Text& text, size_t start, size_t end, int metric, float value, float dpi, float layerScaleY);
+int cropOptionKeyAction(bool pending, bool defaultFrame, bool dragging, bool shift, bool alt, bool ctrl, bool superKey, int key, bool& classicMode, bool& showArea);
+bool cropShieldShowsOutside(bool showArea, bool classicMode);
+bool cropHistoryRecord(std::vector<std::array<float,6>>& undo, std::vector<std::array<float,6>>& redo, const std::array<float,6>& before, const std::array<float,6>& after);
+bool cropHistoryStep(std::vector<std::array<float,6>>& undo, std::vector<std::array<float,6>>& redo, bool isRedo, std::array<float,6>& current);
+std::array<std::string,3> cropFrontImageFields(int width, int height, float dpi, bool resolutionCm);
+bool cropFrontImageKeyAllowed(bool cropTool, bool dragging, bool textInput, bool shift, bool alt, bool ctrl, bool superKey);
+bool cropRestoreFrameState(bool& pending, bool& dismissed, std::array<float,4>& rect, float width, float height);
 bool typeMoveWordCaret(ImGuiInputTextState* state, const std::string& text, int cursor, int anchor, bool hadSelection, bool forward, bool extend);
 bool typeWordNavigationShortcut(bool ctrl, bool alt, bool shift, bool mac, bool super);
 bool typeDocumentNavigationShortcut(bool ctrl, bool alt, bool mac, bool super);
@@ -444,6 +454,104 @@ static bool typeCharacterMetricsStepPerRun() {
     Text empty;empty.size=48;
     return App::typeStepCharacterMetric(empty,0,0,0,2,72,1)&&std::fabs(empty.normalizedRuns()[0].style.leading-(1.2f+2.0f/48))<0.001f;
 }
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/panel.rs): leading is stored as a
+// per-character point value after accounting for font size, resolution, and text transforms.
+static bool typeLeadingPanelEditsSelectedRun() {
+    Text text;text.str="AÃ©Z";text.size=20;TextStyle a;a.size=20;TextStyle b;b.size=40;b.leading=1.5f;text.runs={{1,a},{3,b}};
+    if(!App::typeSetCharacterMetricValue(text,1,3,0,44,144,1))return false;
+    const auto styles=text.characterStyles();
+    return std::fabs(styles[0].leading-1.2f)<.001f&&std::fabs(styles[1].leading-2.2f)<.001f&&std::fabs(styles[2].leading-2.2f)<.001f;
+}
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/panel.rs): baseline shift is a
+// selection-scoped point value with the source's +/-5000 point limits.
+static bool typeBaselinePanelEditsSelectedRun() {
+    Text text;text.str="abc";TextStyle a,b;b.baselineShift=7;text.runs={{1,a},{2,b}};
+    if(!App::typeSetCharacterMetricValue(text,1,2,1,-9000,72,1))return false;
+    const auto styles=text.characterStyles();return styles[0].baselineShift==0&&styles[1].baselineShift==-5000&&styles[2].baselineShift==7;
+}
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/panel.rs): horizontal scaling uses
+// percentages while the document stores a ratio on each character run.
+static bool typeHorizontalScalePanelEditsSelectedRun() {
+    Text text;text.str="abc";TextStyle a,b;b.horizontalScale=1.2f;text.runs={{1,a},{2,b}};
+    if(!App::typeSetCharacterMetricValue(text,1,2,2,150,72,1))return false;
+    const auto styles=text.characterStyles();return styles[0].horizontalScale==1&&styles[1].horizontalScale==1.5f&&styles[2].horizontalScale==1.2f;
+}
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/panel.rs): vertical scaling uses
+// percentages and preserves neighboring character styles.
+static bool typeVerticalScalePanelEditsSelectedRun() {
+    Text text;text.str="abc";TextStyle a,b;b.verticalScale=.8f;text.runs={{1,a},{2,b}};
+    if(!App::typeSetCharacterMetricValue(text,1,2,3,150,72,1))return false;
+    const auto styles=text.characterStyles();return styles[0].verticalScale==1&&styles[1].verticalScale==1.5f&&styles[2].verticalScale==.8f;
+}
+// after PhotoCraft (crates/ui-egui/src/tools/crop_shield.rs keys and hides_outside): Classic
+// Mode keeps the stored Show Cropped Area choice but behaves as if it were on; H is consumed.
+static bool cropClassicModeKeepsShowAreaAndShortcutRules() {
+    bool classic=false,show=false;
+    const int h=(int)ImGuiKey_H,p=(int)ImGuiKey_P;
+    if(App::cropOptionKeyAction(true,false,false,false,false,false,false,h,classic,show)!=1||!show)return false;
+    show=false;classic=true;
+    if(!App::cropShieldShowsOutside(show,classic))return false;
+    if(App::cropOptionKeyAction(true,false,false,false,false,false,false,h,classic,show)!=1||show)return false;
+    if(App::cropOptionKeyAction(true,false,false,false,false,false,false,p,classic,show)!=2||classic)return false;
+    if(App::cropShieldShowsOutside(show,classic))return false;
+    for(const auto [shift,alt,ctrl,superKey,pending,defaultFrame,dragging]:{
+            std::array<bool,7>{true,false,false,false,true,false,false},
+            std::array<bool,7>{false,true,false,false,true,false,false},
+            std::array<bool,7>{false,false,true,false,true,false,false},
+            std::array<bool,7>{false,false,false,true,true,false,false},
+            std::array<bool,7>{false,false,false,false,false,false,false},
+            std::array<bool,7>{false,false,false,false,true,true,false},
+            std::array<bool,7>{false,false,false,false,true,false,true}})
+        if(App::cropOptionKeyAction(pending,defaultFrame,dragging,shift,alt,ctrl,superKey,h,classic,show)!=0)return false;
+    return true;
+}
+// after PhotoCraft (crates/ui-egui/src/tools/crop_ui.rs push_press_step and step): undo and redo
+// restore the crop frame snapshot while keeping the document history outside this state machine.
+static bool cropFrameUndoRedoUsesItsOwnHistory() {
+    using Step=std::array<float,6>;
+    std::vector<Step> undo,redo;
+    const Step before{40,30,100,70,0,1},moved{60,30,120,70,0,1};
+    if(!App::cropHistoryRecord(undo,redo,before,moved)||undo.size()!=1||!redo.empty())return false;
+    Step current=moved;
+    if(!App::cropHistoryStep(undo,redo,false,current)||current!=before||!undo.empty()||redo.size()!=1)return false;
+    if(App::cropHistoryStep(undo,redo,false,current)||current!=before)return false;
+    if(!App::cropHistoryStep(undo,redo,true,current)||current!=moved||undo.size()!=1||!redo.empty())return false;
+    const Step resized{60,30,130,70,0,1};
+    if(!App::cropHistoryRecord(undo,redo,current,resized)||undo.size()!=2||!redo.empty())return false;
+    return App::cropHistoryStep(undo,redo,false,current)&&current==moved;
+}
+// after PhotoCraft (crates/ui-egui/src/tools/crop_size.rs front_image): Front Image uses the
+// document dimensions and preserves the selected px/in or px/cm resolution unit.
+static bool cropFrontImageUsesCurrentDocumentAndUnits() {
+    const auto inch=App::cropFrontImageFields(400,300,72,false);
+    const auto centimetre=App::cropFrontImageFields(400,300,72,true);
+    const auto invalid=App::cropFrontImageFields(0,300,72,false);
+    return inch==std::array<std::string,3>{"400 px","300 px","72"}&&
+        centimetre==std::array<std::string,3>{"400 px","300 px","28.35"}&&
+        invalid==std::array<std::string,3>{"","",""};
+}
+// after PhotoCraft (crates/ui-egui/src/tools/crop_size.rs keys): I is Front Image only when
+// Crop owns keyboard input, a gesture is idle, and no modifier or text editor takes the key.
+static bool cropFrontImageShortcutUsesUnmodifiedCropInput() {
+    if(!App::cropFrontImageKeyAllowed(true,false,false,false,false,false,false))return false;
+    return !App::cropFrontImageKeyAllowed(false,false,false,false,false,false,false)&&
+        !App::cropFrontImageKeyAllowed(true,true,false,false,false,false,false)&&
+        !App::cropFrontImageKeyAllowed(true,false,true,false,false,false,false)&&
+        !App::cropFrontImageKeyAllowed(true,false,false,true,false,false,false)&&
+        !App::cropFrontImageKeyAllowed(true,false,false,false,true,false,false)&&
+        !App::cropFrontImageKeyAllowed(true,false,false,false,false,true,false)&&
+        !App::cropFrontImageKeyAllowed(true,false,false,false,false,false,true);
+}
+// after PhotoCraft (crates/ui-egui/src/tools/crop_ui.rs show_frame/apply_ratio): a committed or
+// cancelled hidden frame returns to the canvas bounds when a fresh press or ratio needs it.
+static bool cropHiddenFrameRestoresOnlyOnDemand() {
+    bool pending=false,dismissed=true;std::array<float,4> rect={8,9,18,19};
+    if(!App::cropRestoreFrameState(pending,dismissed,rect,200,100)||!pending||dismissed||rect!=std::array<float,4>{0,0,200,100})return false;
+    dismissed=true;pending=false;
+    if(!App::cropRestoreFrameState(pending,dismissed,rect,200,100)||!pending||dismissed||rect!=std::array<float,4>{0,0,200,100})return false;
+    pending=false;dismissed=true;
+    return !App::cropRestoreFrameState(pending,dismissed,rect,0,100)&&!pending&&dismissed;
+}
 // after PhotoCraft (crates/ui-egui/src/tools/type_tool/editing.rs toggle_char_style): mixed
 // selected characters toggle on together, a fully styled selection toggles off, and caret-only text is unchanged.
 static bool typeCharacterStyleShortcutsToggleSelections() {
@@ -532,6 +640,19 @@ static bool typeTrackingEditsRespectSelectionScope() {
     if(!App::typeSetCharacterTracking(text,3,3,20000))return false;
     styles=text.characterStyles();for(const TextStyle& style:styles)if(style.tracking!=10000)return false;
     return true;
+}
+// after PhotoCraft (crates/engine/src/cmd/type_cmds.rs style_range): font changes split and merge
+// per-character runs without moving UTF-8 character boundaries.
+static bool typeFontEditsRespectSelectionScope() {
+    Text text;text.str="A\xc3\xa9" "BC";TextStyle first,second,last;first.font="Base Face";second.font="Old Face";last.font="Base Face";
+    text.runs={{1,first},{2,second},{2,last}};
+    if(!App::typeSetCharacterFont(text,1,3,"Selected Face"))return false;
+    auto styles=text.characterStyles();if(styles.size()!=4||styles[0].font!="Base Face"||styles[1].font!="Selected Face"||styles[2].font!="Selected Face"||styles[3].font!="Base Face")return false;
+    Text decoded;if(!decoded.load(text.save()))return false;styles=decoded.characterStyles();if(styles.size()!=4||styles[1].font!="Selected Face"||styles[2].font!="Selected Face")return false;
+    if(!App::typeSetCharacterFont(text,0,0,"Whole Layer Face"))return false;
+    styles=text.characterStyles();for(const TextStyle& style:styles)if(style.font!="Whole Layer Face")return false;
+    Text empty;if(!App::typeSetCharacterFont(empty,0,0,"Empty Style Face"))return false;
+    return empty.font=="Empty Style Face"&&empty.normalizedRuns().front().style.font=="Empty Style Face";
 }
 // after PhotoCraft (crates/engine/src/cmd/type_cmds.rs type.edit kernPair): manual kerning starts
 // at the font's current pair spacing, persists per character, and rejects line edges.
@@ -732,12 +853,22 @@ int runSelfTests() {
         {"vertical Type arrow keys follow columns", verticalTypeArrowsFollowTextColumns},
         {"Type Home and End follow visual editor rows", typeEditorHomeEndFollowVisualRows},
         {"Type metric shortcuts step each selected character", typeCharacterMetricsStepPerRun},
+        {"Type Character panel leading edits selected runs", typeLeadingPanelEditsSelectedRun},
+        {"Type Character panel baseline shift edits selected runs", typeBaselinePanelEditsSelectedRun},
+        {"Type Character panel horizontal scale edits selected runs", typeHorizontalScalePanelEditsSelectedRun},
+        {"Type Character panel vertical scale edits selected runs", typeVerticalScalePanelEditsSelectedRun},
+        {"Crop Classic Mode keeps Show Cropped Area on and guards H/P", cropClassicModeKeepsShowAreaAndShortcutRules},
+        {"Crop frame Undo and Redo use crop history", cropFrameUndoRedoUsesItsOwnHistory},
+        {"Crop Front Image preserves resolution units", cropFrontImageUsesCurrentDocumentAndUnits},
+        {"Crop Front Image shortcut respects input modifiers", cropFrontImageShortcutUsesUnmodifiedCropInput},
+        {"Crop hidden frame returns on demand", cropHiddenFrameRestoresOnlyOnDemand},
         {"Type style shortcuts toggle selected character runs", typeCharacterStyleShortcutsToggleSelections},
         {"rich text all caps changes rasterized glyphs and persists", richTextAllCapsRendersAndPersists},
         {"Type edits preserve character and paragraph runs", typeEditingPreservesCharacterAndParagraphRuns},
         {"Type tabs use PhotoCraft tab stops and wrap widths", typeTabsUsePhotoCraftStops},
         {"Type size edits respect selection scope", typeSizeEditsRespectSelectionScope},
         {"Type tracking edits respect selection scope", typeTrackingEditsRespectSelectionScope},
+        {"Type font edits respect selection scope", typeFontEditsRespectSelectionScope},
         {"manual Type pair kerning starts from font metrics", typeManualPairKerningStartsFromMetrics},
         {"type modified deletion uses PhotoCraft boundaries", typeModifiedDeletionMatchesPhotoCraft},
         {"type multi-click count cycle matches PhotoCraft", typeMultiClickCountsMatchPhotoCraft},

@@ -22,6 +22,7 @@
 #include <imgui_internal.h>
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cctype>
 #include <cmath>
@@ -156,6 +157,7 @@ static bool cropResolutionCm = false;
 static bool straightenArmed=false, straightenLine=false, straightenFit=false;
 static bool cropClassicMode=false, cropAutoCenter=true;
 static bool cropMoveImage=false;
+static int cropConsumedShortcutKey=0;
 static ImVec2 cropMoveScreenStart,cropMoveOrigin;
 static ImVec2 cropResizeCenterScreen;
 static float cropMoveRotation=0;
@@ -172,6 +174,10 @@ static int cropDeleteChoice=-1;
 static void cropSizeTarget(int& w,int& h,float& ppi);
 static int cropDragPart = -1; static float cropBase[4] = {}; static ImVec2 cropDragStart;
 static float cropAngle = 0, cropRotateStart = 0;
+static bool cropFrameDismissed=false;
+using CropSnapshot=std::array<float,6>;
+static std::vector<CropSnapshot> cropUndo,cropRedo;
+static CropSnapshot cropPressSnapshot{};static bool cropPressSnapshotValid=false;
 // after PhotoCraft (crates/ui-egui/src/tools/crop_overlay.rs CropOverlay)
 static int cropOverlay = 0, cropOverlayOrientation = 0, cropOverlayShow = 1;
 static void pcropSet(const float q[8]);
@@ -218,6 +224,55 @@ static int tolerance = 32; static bool contiguous = true, sampleAll = false; sta
 // view: canvas pixel (x, y) is at screen origin + (x, y) * zoom
 static float zoom = 1.0f, viewRotation = 0.0f; static ImVec2 origin(0, 0); static ImVec2 canvasPos, canvasSize; static bool fitNext = true;
 static void syncCropView(){if(tool==T_CROP&&cropPending)viewRotation=cropClassicMode?0.0f:-cropAngle*57.2957795f;}
+// after PhotoCraft (crates/ui-egui/src/tools/crop_shield.rs keys): H and P belong to the
+// crop only for an edited frame outside a drag and without tool/menu modifiers.
+int cropOptionKeyAction(bool pending,bool defaultFrame,bool dragging,bool shift,bool alt,bool ctrl,bool superKey,int key,bool& classicMode,bool& showArea){
+    if(!pending||defaultFrame||dragging||shift||alt||ctrl||superKey)return 0;
+    if(key==(int)ImGuiKey_H){if(!classicMode)showArea=!showArea;return 1;}
+    if(key==(int)ImGuiKey_P){classicMode=!classicMode;return 2;}
+    return 0;
+}
+bool cropShieldShowsOutside(bool showArea,bool classicMode){return showArea||classicMode;}
+std::array<std::string,3> cropFrontImageFields(int width,int height,float dpi,bool resolutionCm){
+    auto number=[](float value){char text[40];snprintf(text,sizeof(text),"%.2f",value);std::string out=text;
+        while(!out.empty()&&out.back()=='0')out.pop_back();if(!out.empty()&&out.back()=='.')out.pop_back();return out;};
+    if(width<=0||height<=0||!std::isfinite(dpi)||dpi<=0)return {"","",""};
+    return {std::to_string(width)+" px",std::to_string(height)+" px",number(resolutionCm?dpi/2.54f:dpi)};
+}
+bool cropFrontImageKeyAllowed(bool cropTool,bool dragging,bool textInput,bool shift,bool alt,bool ctrl,bool superKey){
+    return cropTool&&!dragging&&!textInput&&!shift&&!alt&&!ctrl&&!superKey;
+}
+bool cropRestoreFrameState(bool& pending,bool& dismissed,std::array<float,4>& rect,float width,float height){
+    if(pending||!std::isfinite(width)||!std::isfinite(height)||width<=0||height<=0)return false;
+    rect={0,0,width,height};pending=true;dismissed=false;return true;
+}
+// after PhotoCraft (crates/ui-egui/src/tools/crop_ui.rs push_press_step and step): a completed
+// frame gesture owns its own Undo/Redo step and never changes the document history.
+bool cropHistoryRecord(std::vector<CropSnapshot>& undo,std::vector<CropSnapshot>& redo,const CropSnapshot& before,const CropSnapshot& after){
+    if(before==after)return false;undo.push_back(before);redo.clear();return true;
+}
+bool cropHistoryStep(std::vector<CropSnapshot>& undo,std::vector<CropSnapshot>& redo,bool isRedo,CropSnapshot& current){
+    auto& from=isRedo?redo:undo;auto& to=isRedo?undo:redo;if(from.empty())return false;
+    const CropSnapshot next=from.back();from.pop_back();to.push_back(current);current=next;return true;
+}
+static CropSnapshot cropSnapshot(){return {cropR[0],cropR[1],cropR[2],cropR[3],cropAngle,cropPending?1.0f:0.0f};}
+static ImVec2 toScreen(float x,float y);
+static void centerCropAtScreen(ImVec2 screen);
+static void cropApplyHistorySnapshot(const CropSnapshot& s){
+    const ImVec2 boxScreen=toScreen((cropR[0]+cropR[2])*.5f,(cropR[1]+cropR[3])*.5f);
+    std::copy(s.begin(),s.begin()+4,cropR);cropAngle=s[4];cropPending=s[5]!=0;straightenLine=false;cropMoveImage=false;cropDragPart=-1;syncCropView();
+    if(!cropClassicMode&&s[5]!=0)centerCropAtScreen(boxScreen);fitNext=true;
+}
+static bool cropHistoryActive(){return tool==T_CROP&&cropPending&&(!cropUndo.empty()||!cropRedo.empty());}
+static bool cropHistoryMove(bool redo){
+    CropSnapshot current=cropSnapshot();if(!cropHistoryStep(cropUndo,cropRedo,redo,current))return false;
+    cropApplyHistorySnapshot(current);return true;
+}
+static void cropClearHistory(){cropUndo.clear();cropRedo.clear();cropPressSnapshotValid=false;}
+static bool cropRestoreFrame(){std::array<float,4> rect={cropR[0],cropR[1],cropR[2],cropR[3]};
+    if(!cropRestoreFrameState(cropPending,cropFrameDismissed,rect,(float)doc.w,(float)doc.h))return false;
+    std::copy(rect.begin(),rect.end(),cropR);cropAngle=0;syncCropView();return true;
+}
 static void centerCropAtScreen(ImVec2 screen){
     const float cx=(cropR[0]+cropR[2])*.5f,cy=(cropR[1]+cropR[3])*.5f;
     const float dx=screen.x-canvasPos.x-canvasSize.x*.5f,dy=screen.y-canvasPos.y-canvasSize.y*.5f;
@@ -474,6 +529,8 @@ static void setTitle() {
 
 static void fresh() {
     noDoc = false;
+    cropFrameDismissed=false;cropClearHistory();cropAngle=0;viewRotation=0;
+    cropPending=tool==T_CROP;if(cropPending){cropR[0]=cropR[1]=0;cropR[2]=(float)doc.w;cropR[3]=(float)doc.h;}
     layerSelection.clear(); layerRangeAnchor = -1; activeGroupId = 0;
     hist = History();
     showMask = false; dirty = {0, 0, doc.w, doc.h}; texW = -1;
@@ -1786,6 +1843,8 @@ static void objectSelect(float ax, float ay, float bx, float by) {
 }
 static void applyCrop() {
     if (!cropPending) return;
+    cropFrameDismissed=true;
+    cropClearHistory();
     if(std::fabs(cropAngle)>0.001f) {
         const float cx=(cropR[0]+cropR[2])*.5f,cy=(cropR[1]+cropR[3])*.5f,cs=std::cos(cropAngle),sn=std::sin(cropAngle);
         const float x0=std::min(cropR[0],cropR[2]),x1=std::max(cropR[0],cropR[2]),y0=std::min(cropR[1],cropR[3]),y1=std::max(cropR[1],cropR[3]);
@@ -1815,7 +1874,8 @@ static void applyCrop() {
 // a fixed screen size, the interior moves the frame, and a press outside starts a new frame.
 static void cropBegin(ImVec2 p) {
     cropSpacePanning=false;
-    if(!cropPending) { cropPending=true; cropR[0]=cropR[1]=0; cropR[2]=(float)doc.w; cropR[3]=(float)doc.h; }
+    if(!cropPending)cropRestoreFrame();
+    cropPressSnapshot=cropSnapshot();cropPressSnapshotValid=true;
     const float x0=std::min(cropR[0],cropR[2]), x1=std::max(cropR[0],cropR[2]);
     const float y0=std::min(cropR[1],cropR[3]), y1=std::max(cropR[1],cropR[3]);
     const float cx=(x0+x1)*.5f, cy=(y0+y1)*.5f, cs=std::cos(cropAngle), sn=std::sin(cropAngle);
@@ -1901,12 +1961,19 @@ static float cropAspect() {
     return 0;
 }
 static void fitCropAspect() {
+    if(!cropPending)cropRestoreFrame();
     const float a=cropAspect(); if(a<=0||!cropPending)return;
     const float cx=(cropR[0]+cropR[2])*.5f,cy=(cropR[1]+cropR[3])*.5f;
     float w=std::fabs(cropR[2]-cropR[0]),h=std::fabs(cropR[3]-cropR[1]);
     if(w/std::max(1.0f,h)>a)w=h*a;else h=w/a;
     if(w>doc.w){w=(float)doc.w;h=w/a;}if(h>doc.h){h=(float)doc.h;w=h*a;}
     cropR[0]=std::clamp(cx-w*.5f,0.0f,std::max(0.0f,(float)doc.w-w));cropR[1]=std::clamp(cy-h*.5f,0.0f,std::max(0.0f,(float)doc.h-h));cropR[2]=cropR[0]+w;cropR[3]=cropR[1]+h;
+}
+// after PhotoCraft (crates/ui-egui/src/tools/crop_size.rs front_image): use the active
+// document's pixel dimensions and express resolution in the unit the user already chose.
+static void cropFrontImage(){
+    const auto fields=cropFrontImageFields(doc.w,doc.h,doc.dpi,cropResolutionCm);
+    if(fields[0].empty())return;cropPreset=1;strcpy_s(cropWidth,fields[0].c_str());strcpy_s(cropHeight,fields[1].c_str());strcpy_s(cropResolution,fields[2].c_str());fitCropAspect();
 }
 static void cropSizeTarget(int& w,int& h,float& ppi) {
     w=h=0; ppi=doc.dpi;
@@ -3172,6 +3239,51 @@ bool typeSetCharacterTracking(Text& text,size_t start,size_t end,float tracking)
         if(!text.runs.empty()&&text.runs.back().style==style)text.runs.back().bytes+=n;else text.runs.push_back({n,style});byte=std::min(text.str.size(),byte+n);}
     text.syncSummary();return true;
 }
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/panel.rs Character metrics): slider
+// edits change only the selected run and keep all its other character settings intact.
+bool typeSetCharacterMetricValue(Text& text,size_t start,size_t end,int metric,float value,float dpi,float layerScaleY){
+    if(!std::isfinite(value)||metric<0||metric>3)return false;
+    auto set=[&](TextStyle& style){
+        if(metric==0){const float size=std::max(1.0f,std::isfinite(style.size)?style.size:text.size);
+            const float vs=std::isfinite(style.verticalScale)&&style.verticalScale>0?style.verticalScale:1.0f;
+            const float ys=std::isfinite(layerScaleY)&&layerScaleY>0?layerScaleY:1.0f;
+            const float res=std::isfinite(dpi)&&dpi>0?dpi/72.0f:1.0f;
+            style.leading=std::clamp(value,.01f,5000.0f)*res/(size*vs*ys);
+        }else if(metric==1)style.baselineShift=std::clamp(value,-5000.0f,5000.0f);
+        else if(metric==2)style.horizontalScale=std::clamp(value/100.0f,.01f,10.0f);
+        else style.verticalScale=std::clamp(value/100.0f,.01f,10.0f);
+    };
+    auto runs=text.normalizedRuns();if(runs.empty())return false;
+    if(text.str.empty()){
+        if(start||end)return false;const TextStyle old=runs.front().style;set(runs.front().style);
+        if(old==runs.front().style)return false;text.runs={{0,runs.front().style}};text.syncSummary();return true;
+    }
+    auto styles=text.characterStyles();start=std::min(start,styles.size());end=std::min(end,styles.size());
+    if(start>=end){start=0;end=styles.size();}if(start>=end)return false;
+    bool changed=false;for(size_t i=start;i<end;++i){TextStyle old=styles[i];set(styles[i]);changed|=!(old==styles[i]);}
+    if(!changed)return false;text.runs.clear();size_t byte=0;
+    for(const TextStyle& style:styles){const unsigned char c=(unsigned char)text.str[byte];const size_t n=c<0x80?1:c<0xe0?2:c<0xf0?3:4;
+        if(!text.runs.empty()&&text.runs.back().style==style)text.runs.back().bytes+=n;else text.runs.push_back({n,style});byte=std::min(text.str.size(),byte+n);}
+    text.syncSummary();return true;
+}
+// after PhotoCraft (crates/engine/src/cmd/type_cmds.rs style_range): the font family is
+// stored on the same selected character runs that layout uses to choose each glyph's face.
+bool typeSetCharacterFont(Text& text,size_t start,size_t end,const std::string& font){
+    if(font.empty())return false;
+    if(text.str.empty()){
+        auto runs=text.normalizedRuns();if(runs.empty())return false;
+        if(runs.front().style.font==font&&text.font==font)return false;
+        runs.front().style.font=font;text.runs={{0,runs.front().style}};text.syncSummary();return true;
+    }
+    auto styles=text.characterStyles();if(styles.empty())return false;
+    start=std::min(start,styles.size());end=std::min(end,styles.size());if(start>=end){start=0;end=styles.size();}
+    bool changed=false;for(size_t i=start;i<end;++i){changed|=styles[i].font!=font;styles[i].font=font;}
+    if(!changed)return false;
+    text.runs.clear();size_t byte=0;
+    for(const TextStyle& style:styles){const unsigned char c=(unsigned char)text.str[byte];const size_t n=c<0x80?1:c<0xe0?2:c<0xf0?3:4;
+        if(!text.runs.empty()&&text.runs.back().style==style)text.runs.back().bytes+=n;else text.runs.push_back({n,style});byte=std::min(text.str.size(),byte+n);}
+    text.syncSummary();return true;
+}
 // after PhotoCraft (crates/ui-egui/src/tools/type_tool/editing.rs step_char_metric): selected
 // characters move from their own metric value, and a collapsed range in non-empty text is inert.
 bool typeStepCharacterMetric(Text& text,size_t start,size_t end,int metric,float by,float dpi,float layerScaleY){
@@ -3669,6 +3781,7 @@ static bool insideSel(ImVec2 c) {
 }
 static void canvasInput() {
     ImGuiIO& io = ImGui::GetIO();
+    cropConsumedShortcutKey=0;
     const bool hovered = ImGui::IsItemHovered();
     const ImVec2 m = io.MousePos;
     const ImVec2 c = toCanvas(m);
@@ -4106,6 +4219,7 @@ static void canvasInput() {
             if(straightenLine){straightenCrop(straightenStart,c,straightenFit);straightenLine=false;if(straightenFit)straightenArmed=false;}
             else if (std::fabs(cropR[2] - cropR[0]) < 2 || std::fabs(cropR[3] - cropR[1]) < 2) cropPending = false;
             else if(cropDragPart==9&&!cropClassicMode&&cropAutoCenter)centerCropAtScreen(ImVec2(canvasPos.x+canvasSize.x*.5f,canvasPos.y+canvasSize.y*.5f));
+            if(cropPressSnapshotValid){if(cropPending)cropHistoryRecord(cropUndo,cropRedo,cropPressSnapshot,cropSnapshot());cropPressSnapshotValid=false;}
             cropMoveImage=false;cropDragPart=-1;cropSpacePanning=false; break;
         case T_PCROP:
             if (pcropDragPart == -1) {
@@ -4211,22 +4325,31 @@ static void canvasInput() {
     }
     if (t == T_CROP && cropPending && !dragging && dlg == D_NONE) {   // Enter crops, Escape lets it go
         if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) applyCrop();
-        else if (ImGui::IsKeyPressed(ImGuiKey_Escape)) { cropPending = false;straightenArmed=false;straightenLine=false; }
-        else if (ImGui::IsKeyPressed(ImGuiKey_H) && (cropR[0]!=0 || cropR[1]!=0 || cropR[2]!=doc.w || cropR[3]!=doc.h)) cropShowArea=!cropShowArea;
-        else if (ImGui::IsKeyPressed(ImGuiKey_P) && (cropR[0]!=0 || cropR[1]!=0 || cropR[2]!=doc.w || cropR[3]!=doc.h || std::fabs(cropAngle)>.001f)) toggleCropMode();
-        else if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow,true)) nudgeCrop(-1,0,ImGui::GetIO().KeyShift);
-        else if (ImGui::IsKeyPressed(ImGuiKey_RightArrow,true)) nudgeCrop(1,0,ImGui::GetIO().KeyShift);
-        else if (ImGui::IsKeyPressed(ImGuiKey_UpArrow,true)) nudgeCrop(0,-1,ImGui::GetIO().KeyShift);
-        else if (ImGui::IsKeyPressed(ImGuiKey_DownArrow,true)) nudgeCrop(0,1,ImGui::GetIO().KeyShift);
-        else if (ImGui::IsKeyPressed(ImGuiKey_X)) swapCropOrientation();
-        else if (ImGui::IsKeyPressed(ImGuiKey_O)) {
-            if (ImGui::GetIO().KeyShift) cropOverlayOrientation = (cropOverlayOrientation + 1) % (cropOverlay == 3 ? 2 : cropOverlay == 5 ? 4 : 1);
-            else { cropOverlay = (cropOverlay + 1) % 6; cropOverlayOrientation = 0; }
+        else if (ImGui::IsKeyPressed(ImGuiKey_Escape)) { cropPending = false;cropFrameDismissed=true;cropClearHistory();straightenArmed=false;straightenLine=false; }
+        else {
+            const bool defaultFrame=cropR[0]==0&&cropR[1]==0&&cropR[2]==doc.w&&cropR[3]==doc.h&&std::fabs(cropAngle)<.001f;
+            const int key=ImGui::IsKeyPressed(ImGuiKey_H)?(int)ImGuiKey_H:ImGui::IsKeyPressed(ImGuiKey_P)?(int)ImGuiKey_P:0;
+            const int cropOption=cropOptionKeyAction(cropPending,defaultFrame,dragging,io.KeyShift,io.KeyAlt,io.KeyCtrl,io.KeySuper,key,cropClassicMode,cropShowArea);
+            if(cropOption)cropConsumedShortcutKey=key;
+            if(cropOption==2)syncCropView();
+            else if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow,true)) {nudgeCrop(-1,0,ImGui::GetIO().KeyShift);cropConsumedShortcutKey=(int)ImGuiKey_LeftArrow;}
+            else if (ImGui::IsKeyPressed(ImGuiKey_RightArrow,true)) {nudgeCrop(1,0,ImGui::GetIO().KeyShift);cropConsumedShortcutKey=(int)ImGuiKey_RightArrow;}
+            else if (ImGui::IsKeyPressed(ImGuiKey_UpArrow,true)) {nudgeCrop(0,-1,ImGui::GetIO().KeyShift);cropConsumedShortcutKey=(int)ImGuiKey_UpArrow;}
+            else if (ImGui::IsKeyPressed(ImGuiKey_DownArrow,true)) {nudgeCrop(0,1,ImGui::GetIO().KeyShift);cropConsumedShortcutKey=(int)ImGuiKey_DownArrow;}
+            else if (ImGui::IsKeyPressed(ImGuiKey_X)) {swapCropOrientation();cropConsumedShortcutKey=(int)ImGuiKey_X;}
+            else if (ImGui::IsKeyPressed(ImGuiKey_O)) {
+                cropConsumedShortcutKey=(int)ImGuiKey_O;
+                if (ImGui::GetIO().KeyShift) cropOverlayOrientation = (cropOverlayOrientation + 1) % (cropOverlay == 3 ? 2 : cropOverlay == 5 ? 4 : 1);
+                else { cropOverlay = (cropOverlay + 1) % 6; cropOverlayOrientation = 0; }
+            }
         }
     }
     if (t == T_PCROP && !dragging && dlg == D_NONE) {
         if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) applyPerspectiveCrop();
         else if (ImGui::IsKeyPressed(ImGuiKey_Escape)) pcropCancel();
+    }
+    if(cropFrontImageKeyAllowed(t==T_CROP,dragging,io.WantTextInput,io.KeyShift,io.KeyAlt,io.KeyCtrl,io.KeySuper)&&dlg==D_NONE&&ImGui::IsKeyPressed(ImGuiKey_I)){
+        cropFrontImage();cropConsumedShortcutKey=(int)ImGuiKey_I;
     }
     if (!ImGui::IsMouseDown(ImGuiMouseButton_Left) && t != T_HAND && !ImGui::IsMouseDown(ImGuiMouseButton_Middle)) panning = false;
     if (!ImGui::IsMouseDown(ImGuiMouseButton_Left)) moveTextLayer = false;
@@ -4458,9 +4581,10 @@ static void drawCanvas() {
         const float cx=(x0+x1)*.5f,cy=(y0+y1)*.5f,cs=std::cos(cropAngle),sn=std::sin(cropAngle);
         auto turnCrop=[&](float x,float y){const float dx=x-cx,dy=y-cy;return toScreen(cx+cs*dx-sn*dy,cy+sn*dx+cs*dy);};
         const ImVec2 q0 = turnCrop(x0,y0), q1 = turnCrop(x1,y0), q2 = turnCrop(x1,y1), q3 = turnCrop(x0,y1);
-        if(!cropShowArea||cropShieldEnabled) {
-            const int alpha=cropShowArea?(int)std::lround(cropShieldOpacity*2.55f*(cropShieldAuto&&dragging?.5f:1.0f)):255;
-            const ImU32 dim=cropShowArea?IM_COL32((int)std::lround(cropShieldColor[0]*255),(int)std::lround(cropShieldColor[1]*255),(int)std::lround(cropShieldColor[2]*255),std::clamp(alpha,0,255)):C_BG;
+        const bool showCroppedArea=cropShieldShowsOutside(cropShowArea,cropClassicMode);
+        if(!showCroppedArea||cropShieldEnabled) {
+            const int alpha=showCroppedArea?(int)std::lround(cropShieldOpacity*2.55f*(cropShieldAuto&&dragging?.5f:1.0f)):255;
+            const ImU32 dim=showCroppedArea?IM_COL32((int)std::lround(cropShieldColor[0]*255),(int)std::lround(cropShieldColor[1]*255),(int)std::lround(cropShieldColor[2]*255),std::clamp(alpha,0,255)):C_BG;
             const ImVec2 canvasQuad[4]={d0,d1,d2,d3};
             dl->AddConvexPolyFilled(canvasQuad,4,dim);
             struct CropShieldVertex{ImVec2 pos;float x,y;};
@@ -4679,9 +4803,9 @@ static void syncTool() {
         if (tool == T_TYPE) typeCommit();
         if (tool == T_MAGNETIC) magneticClear();
         tool = t; poly.clear();
-        // after PhotoCraft (crates/ui-egui/src/tools/crop_ui.rs): selecting Crop opens a full-canvas frame.
-        if (tool == T_CROP) { cropPending=true; cropR[0]=cropR[1]=0; cropR[2]=(float)doc.w; cropR[3]=(float)doc.h; }
-        else if (tool != T_CROP) cropPending=false;
+        // after PhotoCraft (crates/ui-egui/src/tools/crop_ui.rs): an undismissed Crop starts with a frame.
+        if (tool == T_CROP && !cropFrameDismissed) { cropPending=true; cropR[0]=cropR[1]=0; cropR[2]=(float)doc.w; cropR[3]=(float)doc.h; }
+        else if (tool != T_CROP) {cropPending=false;cropClearHistory();}
     }
 }
 static bool toolbarToolWorks(int id) { return ltTool(id) != T_NONE; }
@@ -4844,7 +4968,7 @@ static void optionsBar() {
             static const char* hs[]={"5 in","11 in","768 px","800 px","768 px","6 in","7 in","10 in"};
             static const char* rs[]={"300","300","92","113","135","300","300","300"};
             if(cropPreset>=8&&cropPreset<=15){strcpy_s(cropWidth,ws[cropPreset-8]);strcpy_s(cropHeight,hs[cropPreset-8]);strcpy_s(cropResolution,rs[cropPreset-8]);cropResolutionCm=false;}
-            if(cropPreset==16){cropPreset=1;snprintf(cropWidth,sizeof(cropWidth),"%d px",doc.w);snprintf(cropHeight,sizeof(cropHeight),"%d px",doc.h);snprintf(cropResolution,sizeof(cropResolution),"%.2f",doc.dpi);cropResolutionCm=false;}
+            if(cropPreset==16)cropFrontImage();
             if(cropPreset==1||cropPreset>=8)fitCropAspect();
             else {cropWidth[0]=cropHeight[0]=cropResolution[0]=0;fitCropAspect();}
         }
@@ -4860,7 +4984,7 @@ static void optionsBar() {
         ImGui::SetNextItemWidth(145); ImGui::Combo("##cropOverlay",&cropOverlay,overlays,6); ImGui::SameLine(0,8);
         static const char* shows[]={"Auto","Always","Never"}; ImGui::SetNextItemWidth(90); ImGui::Combo("##cropOverlayShow",&cropOverlayShow,shows,3); ImGui::SameLine(0,8);
         if(cropOverlay==3 || cropOverlay==5) { if(ImGui::SmallButton("Orientation")) cropOverlayOrientation=(cropOverlayOrientation+1)%(cropOverlay==3?2:4); ImGui::SameLine(0,8); }
-        ImGui::Checkbox("Show Cropped Area", &cropShowArea); ImGui::SameLine(0,8);
+        ImGui::BeginDisabled(cropClassicMode);if(cropClassicMode){bool show=true;ImGui::Checkbox("Show Cropped Area",&show);}else ImGui::Checkbox("Show Cropped Area", &cropShowArea);ImGui::EndDisabled(); ImGui::SameLine(0,8);
         ImGui::Checkbox("Shield", &cropShieldEnabled); ImGui::SameLine(0,8);
         ImGui::Checkbox("Match Canvas",&cropShieldMatchCanvas); ImGui::SameLine(0,4);
         ImGui::BeginDisabled(cropShieldMatchCanvas); ImGui::ColorEdit3("##cropShieldColor",cropShieldColor,ImGuiColorEditFlags_NoInputs|ImGuiColorEditFlags_NoLabel|ImGuiColorEditFlags_NoSidePreview); ImGui::EndDisabled(); ImGui::SameLine(0,8);
@@ -4869,7 +4993,7 @@ static void optionsBar() {
         ImGui::Checkbox("Delete cropped pixels", &cropDelete); ImGui::SameLine(0, 14);
         ImGui::Checkbox("Content-Aware Corners",&cropContentAware); ImGui::SameLine(0,8);
         if (ImGui::Button("Crop", ImVec2(70, 0))) applyCrop(); ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(70, 0))) cropPending = false; ImGui::SameLine(0, 14);
+        if (ImGui::Button("Cancel", ImVec2(70, 0))) {cropPending = false;cropFrameDismissed=true;cropClearHistory();} ImGui::SameLine(0, 14);
         ImGui::TextDisabled("Drag what to keep; O cycles guides, Shift+O changes orientation"); }
         break;
     case T_PCROP: {
@@ -5014,10 +5138,15 @@ static void optionsBar() {
         const bool live = L.isText() && !typeIsMask();
         Text& t = live ? L.text : (typeMaskEditing ? typeMask : typeNext);
         bool ch = false;
+        const auto characterStyles=t.characterStyles();
+        const bool hasCharacterSelection=live&&typeStyleSelectionValid&&typeStyleSelectionLayer==typeLayer&&typeStyleSelectionStart<typeStyleSelectionEnd&&!characterStyles.empty();
+        const size_t characterStart=hasCharacterSelection?std::min(typeStyleSelectionStart,characterStyles.size()):0;
+        const size_t characterEnd=hasCharacterSelection?std::min(typeStyleSelectionEnd,characterStyles.size()):0;
+        const std::string selectedFont=hasCharacterSelection?(characterStyles[characterStart].font.empty()?t.font:characterStyles[characterStart].font):t.font;
         auto edited = [&](bool c) { if (live && ImGui::IsItemActivated()) typeRemember("Text"); ch |= c; };
         // the font: the fonts on this PC, by name
         const auto& fonts = systemFonts();
-        const std::string cur = t.font.empty() ? defaultFont() : t.font;
+        const std::string cur = selectedFont.empty() ? defaultFont() : selectedFont;
         std::string curName = "Segoe UI";
         for (const auto& f : fonts) if (f.path == cur) curName = f.name;
         ImGui::SetNextItemWidth(200);
@@ -5032,7 +5161,7 @@ static void optionsBar() {
                 for (const std::string& path : recent) {
                     auto it=std::find_if(fonts.begin(),fonts.end(),[&](const FontFile& f){return f.path==path;});
                     if(it!=fonts.end() && ImGui::Selectable(it->name.c_str(),path==cur)) {
-                        if(live) typeRemember("Font"); t.font=path; ch=true;
+                        if(live) typeRemember("Font");Text updated=t;if(typeSetCharacterFont(updated,characterStart,characterEnd,path)){t=std::move(updated);ch=true;}
                         noteRecentFont(recentTypeFonts,path,(size_t)recentTypeFontCap);saveTypePreferences();
                     }
                 }
@@ -5042,7 +5171,7 @@ static void optionsBar() {
                 std::string n = f.name; for (auto& c : n) c = (char)tolower((unsigned char)c);
                 if (!q.empty() && n.find(q) == std::string::npos) continue;
                 if (!q.empty() && std::find(recentTypeFonts.begin(),recentTypeFonts.end(),f.path)!=recentTypeFonts.end()) continue;
-                if (ImGui::Selectable(f.name.c_str(), f.path == cur)) { if (live) typeRemember("Font"); t.font = f.path; ch = true; noteRecentFont(recentTypeFonts,f.path,(size_t)recentTypeFontCap); saveTypePreferences(); }
+                if (ImGui::Selectable(f.name.c_str(), f.path == cur)) { if (live) typeRemember("Font");Text updated=t;if(typeSetCharacterFont(updated,characterStart,characterEnd,f.path)){t=std::move(updated);ch=true;}noteRecentFont(recentTypeFonts,f.path,(size_t)recentTypeFontCap);saveTypePreferences(); }
             }
             ImGui::EndCombo();
         }
@@ -5067,13 +5196,9 @@ static void optionsBar() {
         }
         ImGui::SameLine(0, 10);
         const float rawScale=std::sqrt(std::abs(t.scaleX*t.scaleY));const float sizeScale=std::isfinite(rawScale)&&rawScale>1e-3f?rawScale:1.0f;
-        const auto sizeStyles=t.characterStyles();
-        const bool hasSizeSelection=live&&typeStyleSelectionValid&&typeStyleSelectionLayer==typeLayer&&typeStyleSelectionStart<typeStyleSelectionEnd&&!sizeStyles.empty();
-        const size_t sizeStart=hasSizeSelection?std::min(typeStyleSelectionStart,sizeStyles.size()):0;
-        const size_t sizeEnd=hasSizeSelection?std::min(typeStyleSelectionEnd,sizeStyles.size()):0;
-        float shownSize=(hasSizeSelection?sizeStyles[sizeStart].size:t.size)*sizeScale;
+        float shownSize=(hasCharacterSelection?characterStyles[characterStart].size:t.size)*sizeScale;
         if(sliderF("Size",&shownSize,4,1000,"%.0f px",ImGuiSliderFlags_Logarithmic)){
-            Text updated=t;const bool sizeChanged=typeSetCharacterSize(updated,sizeStart,sizeEnd,shownSize/sizeScale);
+            Text updated=t;const bool sizeChanged=typeSetCharacterSize(updated,characterStart,characterEnd,shownSize/sizeScale);
             if(sizeChanged)t=std::move(updated);edited(sizeChanged);
         }else edited(false);
         if (live && L.fill.kind == FILL_SOLID) { ImGui::SameLine(0, 10); edited(ImGui::ColorEdit3("##tc", L.fill.colour, ImGuiColorEditFlags_NoInputs)); }
@@ -5087,12 +5212,13 @@ static void optionsBar() {
             if (on) ImGui::PopStyleColor();
         }
         ImGui::SameLine(0, 14);
-        float shownTracking=hasSizeSelection?sizeStyles[sizeStart].tracking:t.tracking;
+        float shownTracking=hasCharacterSelection?characterStyles[characterStart].tracking:t.tracking;
         if(sliderF("Tracking",&shownTracking,-1000,10000,"%.0f")){
-            Text updated=t;const bool trackingChanged=typeSetCharacterTracking(updated,sizeStart,sizeEnd,shownTracking);
+            Text updated=t;const bool trackingChanged=typeSetCharacterTracking(updated,characterStart,characterEnd,shownTracking);
             if(trackingChanged)t=std::move(updated);edited(trackingChanged);
         }else edited(false);
-        ImGui::SameLine(0, 14); edited(sliderF("Leading", &t.leading, 0.5f, 3.0f, "%.2f"));
+        ImGui::SameLine(0, 14); float shownLeading=hasCharacterSelection?characterStyles[characterStart].leading:t.leading;
+        if(sliderF("Leading",&shownLeading,.01f,10.0f,"%.2f")){Text updated=t;const bool metricChanged=typeSetCharacterMetricValue(updated,characterStart,characterEnd,0,shownLeading*std::max(1.0f,hasCharacterSelection?characterStyles[characterStart].size:t.size)*72.0f/std::max(1.0f,doc.dpi)*std::max(.01f,hasCharacterSelection?characterStyles[characterStart].verticalScale:1.0f)*std::max(.01f,t.scaleY),doc.dpi,t.scaleY);if(metricChanged)t=std::move(updated);edited(metricChanged);}else edited(false);
         ImGui::SameLine(0, 14); edited(sliderF("Rotate", &t.rotation, -180, 180, "%.1f°"));
         ImGui::SameLine(0, 14); edited(sliderF("Scale X", &t.scaleX, 0.1f, 10, "%.2f", ImGuiSliderFlags_Logarithmic));
         ImGui::SameLine(0, 14); edited(sliderF("Scale Y", &t.scaleY, 0.1f, 10, "%.2f", ImGuiSliderFlags_Logarithmic));
@@ -5471,6 +5597,22 @@ static void fillPanel() {
     if(l.isText()){
         Text& text=l.text;const auto styles=text.characterStyles();size_t start=0,end=styles.size();
         if(typeLayer==doc.active&&typeStyleSelectionValid&&typeStyleSelectionLayer==typeLayer){start=std::min(typeStyleSelectionStart,styles.size());end=std::min(typeStyleSelectionEnd,styles.size());}
+        const size_t metricAt=start<end?start:(start?start-1:0);const auto runs=text.normalizedRuns();
+        if(!styles.empty()||!runs.empty()){
+            const TextStyle& shownStyle=styles.empty()?runs.front().style:styles[std::min(metricAt,styles.size()-1)];
+            const float metricSize=std::max(1.0f,shownStyle.size);
+            const float metricVScale=std::max(.01f,shownStyle.verticalScale);
+            const float metricLayerScale=std::max(.01f,text.scaleY);
+            const float metricDpi=std::max(1.0f,doc.dpi);
+            float leading=shownStyle.leading*metricSize*metricVScale*metricLayerScale*72.0f/metricDpi;
+            if(adjSlider("Leading",&leading,.1f,5000,"%.1f pt")){Text updated=text;if(typeSetCharacterMetricValue(updated,start,end,0,leading,doc.dpi,text.scaleY)){typeRememberDiscrete("Leading");text=std::move(updated);ch=true;}}
+            float baseline=shownStyle.baselineShift;
+            if(adjSlider("Baseline Shift",&baseline,-1296,1296,"%.1f pt")){Text updated=text;if(typeSetCharacterMetricValue(updated,start,end,1,baseline,doc.dpi,text.scaleY)){typeRememberDiscrete("Baseline Shift");text=std::move(updated);ch=true;}}
+            float hscale=shownStyle.horizontalScale*100;
+            if(adjSlider("Horizontal Scale",&hscale,1,1000,"%.0f%%")){Text updated=text;if(typeSetCharacterMetricValue(updated,start,end,2,hscale,doc.dpi,text.scaleY)){typeRememberDiscrete("Horizontal Scale");text=std::move(updated);ch=true;}}
+            float vscale=shownStyle.verticalScale*100;
+            if(adjSlider("Vertical Scale",&vscale,1,1000,"%.0f%%")){Text updated=text;if(typeSetCharacterMetricValue(updated,start,end,3,vscale,doc.dpi,text.scaleY)){typeRememberDiscrete("Vertical Scale");text=std::move(updated);ch=true;}}
+        }
         auto shown=[&](TextCaps caps){
             if(styles.empty()){const auto runs=text.normalizedRuns();return !runs.empty()&&runs.front().style.caps==caps;}
             if(start<end){for(size_t i=start;i<end;++i)if(styles[i].caps!=caps)return false;return true;}
@@ -5704,8 +5846,10 @@ static void menus() {
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Edit", !noDoc)) {
-        if (item(hist.canUndo() ? ("Undo " + hist.undoNames.back()).c_str() : "Undo", "Ctrl+Z", hist.canUndo())) { hist.doUndo(doc); changed(); selChanged(); }
-        if (item(hist.canRedo() ? ("Redo " + hist.redoNames.back()).c_str() : "Redo", "Ctrl+Shift+Z", hist.canRedo())) { hist.doRedo(doc); changed(); selChanged(); }
+        const bool boxHistory=cropHistoryActive();
+        const bool canUndo=boxHistory?!cropUndo.empty():hist.canUndo(),canRedo=boxHistory?!cropRedo.empty():hist.canRedo();
+        if (item(boxHistory?(canUndo?"Undo Crop":"Undo"):hist.canUndo() ? ("Undo " + hist.undoNames.back()).c_str() : "Undo", "Ctrl+Z", canUndo)) { if(boxHistory)cropHistoryMove(false);else {hist.doUndo(doc); changed(); selChanged();} }
+        if (item(boxHistory?(canRedo?"Redo Crop":"Redo"):hist.canRedo() ? ("Redo " + hist.redoNames.back()).c_str() : "Redo", "Ctrl+Shift+Z", canRedo)) { if(boxHistory)cropHistoryMove(true);else {hist.doRedo(doc); changed(); selChanged();} }
         ImGui::Separator();
         if (item("Fill with Foreground", "Alt+Backspace")) fillWith(fg, "Fill");
         if (item("Fill with Background", "Ctrl+Backspace")) fillWith(bgc, "Fill");
@@ -5906,8 +6050,8 @@ static void keys() {
         return;
     }
     if (ctrl) {
-        if (k(ImGuiKey_Z)) { if (shift) hist.doRedo(doc); else hist.doUndo(doc); changed(); selChanged(); }
-        else if (k(ImGuiKey_Y)) { hist.doRedo(doc); changed(); selChanged(); }
+        if (k(ImGuiKey_Z)) { if(cropHistoryActive())cropHistoryMove(shift);else {if (shift) hist.doRedo(doc); else hist.doUndo(doc); changed(); selChanged();} }
+        else if (k(ImGuiKey_Y)) { if(cropHistoryActive())cropHistoryMove(true);else {hist.doRedo(doc); changed(); selChanged();} }
         else if (k(ImGuiKey_N)) { if (shift) { remember("New Layer"); addLayer(doc, emptyLayer(doc, "Layer " + std::to_string(doc.layers.size()))); changed(); } else openDlg(D_NEW); }
         else if (k(ImGuiKey_O)) { const std::string p = fileDialog(false, OPEN_FILTER, nullptr, ""); if (!p.empty()) { if (shift) placeAsLayer(p); else open(p); } }
         else if (k(ImGuiKey_S)) { if (shift) saveAs(false); else save(); }
@@ -5955,8 +6099,8 @@ static void keys() {
     if (k(ImGuiKey_Enter) && poly.size() >= 6) { finishShape(shapePolygon(doc, poly), selMode, "Polygonal Lasso"); poly.clear(); return; }
     if (k(ImGuiKey_Escape)) { if (typePathDragPart >= 0) { typePathDragCancel(); return; } poly.clear(); lasso.clear(); magneticClear(); return; }
     // the tool letters, PhotoCraft's way: a letter picks its group's tool, Shift+letter steps through the group
-    if (Toolbar::keys(shift, ctrl, alt)) syncTool();
-    if (k(ImGuiKey_X)) { uint8_t t[4]; memcpy(t, fg, 4); memcpy(fg, bgc, 4); memcpy(bgc, t, 4); }
+    if (!cropConsumedShortcutKey && Toolbar::keys(shift, ctrl, alt)) syncTool();
+    if (k(ImGuiKey_X)&&cropConsumedShortcutKey!=(int)ImGuiKey_X) { uint8_t t[4]; memcpy(t, fg, 4); memcpy(fg, bgc, 4); memcpy(bgc, t, 4); }
     if (k(ImGuiKey_D)) { memset(fg, 0, 3); memset(bgc, 255, 3); }
     // [ and ]: size; with Shift: hardness
     float& sz = tool == T_ERASER ? eraserSize : brushSize;
@@ -6206,6 +6350,20 @@ void script(const std::string& what) {
         const bool ok=idle==191 && edit==96 && std::lround(cropShieldColor[0]*255)==204 && std::lround(cropShieldColor[1]*255)==31 && std::lround(cropShieldColor[2]*255)==56;
         fprintf(stderr,"crop-shield: %s; canvas/custom colors, opacity, auto-adjust and visibility\n",ok?"passed":"failed");return;
     }
+    if (what == "crop-shield-classic") {
+        Toolbar::select(Toolbar::CROP);syncTool();cropR[0]=doc.w*.2f;cropR[1]=doc.h*.2f;cropR[2]=doc.w*.8f;cropR[3]=doc.h*.8f;
+        cropClassicMode=true;cropShowArea=false;cropShieldEnabled=true;cropShieldMatchCanvas=false;cropShieldColor[0]=.12f;cropShieldColor[1]=.38f;cropShieldColor[2]=.72f;syncCropView();fitNext=true;
+        const bool ok=cropPending&&cropShieldShowsOutside(cropShowArea,cropClassicMode);
+        fprintf(stderr,"crop-shield-classic: %s; Classic Mode shows the cropped area while preserving its stored preference\n",ok?"passed":"failed");return;
+    }
+    if (what == "crop-frame-undo") {
+        Toolbar::select(Toolbar::CROP);syncTool();cropR[0]=doc.w*.2f;cropR[1]=doc.h*.2f;cropR[2]=doc.w*.8f;cropR[3]=doc.h*.8f;
+        const size_t documentUndo=hist.undo.size();const CropSnapshot before=cropSnapshot();cropR[0]+=doc.w*.08f;cropR[2]+=doc.w*.08f;const CropSnapshot moved=cropSnapshot();cropHistoryRecord(cropUndo,cropRedo,before,moved);
+        const ImVec2 screenCenter=toScreen((cropR[0]+cropR[2])*.5f,(cropR[1]+cropR[3])*.5f);
+        const bool undone=cropHistoryMove(false)&&cropR[0]==before[0]&&std::hypot(toScreen((cropR[0]+cropR[2])*.5f,(cropR[1]+cropR[3])*.5f).x-screenCenter.x,toScreen((cropR[0]+cropR[2])*.5f,(cropR[1]+cropR[3])*.5f).y-screenCenter.y)<.1f&&hist.undo.size()==documentUndo;
+        const bool redone=cropHistoryMove(true)&&cropR[0]==moved[0]&&hist.undo.size()==documentUndo;
+        fitNext=true;fprintf(stderr,"crop-frame-undo: %s; undo/redo restore the pending frame without touching document history\n",undone&&redone?"passed":"failed");return;
+    }
     if (what == "crop-shield-rotated") {
         Toolbar::select(Toolbar::CROP);syncTool();cropR[0]=doc.w*.2f;cropR[1]=doc.h*.18f;cropR[2]=doc.w*.8f;cropR[3]=doc.h*.82f;cropAngle=.31f;cropShowArea=true;cropShieldEnabled=true;cropShieldAuto=false;cropShieldMatchCanvas=false;cropShieldOpacity=70;cropShieldColor[0]=.1f;cropShieldColor[1]=.3f;cropShieldColor[2]=.6f;cropClassicMode=false;syncCropView();
         const bool ok=std::fabs(viewRotation+cropAngle*57.2957795f)<.01f&&cropPending;
@@ -6217,6 +6375,18 @@ void script(const std::string& what) {
         applyCrop();Doc roundtrip;std::string err;const std::string p=(std::filesystem::temp_directory_path()/"chimera-crop-preset.chimera").string();
         const bool persisted=doc.w==1200&&doc.h==1500&&doc.dpi==300&&saveProject(doc,p,err)&&openDoc(p,roundtrip,err)&&roundtrip.dpi==300;
         fprintf(stderr,"crop-preset: %s; 4 x 5 inch at 300 ppi gives 1200 x 1500 px and saves resolution\n",target&&persisted?"passed":"failed");return;
+    }
+    if (what == "crop-front-image") {
+        Toolbar::select(Toolbar::CROP);syncTool();cropResolutionCm=true;cropFrontImage();
+        const auto fields=cropFrontImageFields(doc.w,doc.h,doc.dpi,true);
+        const bool ok=cropPreset==1&&std::string(cropWidth)==fields[0]&&std::string(cropHeight)==fields[1]&&std::string(cropResolution)==fields[2]&&cropPending;
+        fitNext=true;fprintf(stderr,"crop-front-image: %s; I and Front Image fill document dimensions in the selected resolution unit\n",ok?"passed":"failed");return;
+    }
+    if (what == "crop-hidden-frame") {
+        Toolbar::select(Toolbar::CROP);syncTool();cropPending=false;cropFrameDismissed=true;
+        Toolbar::select(Toolbar::MOVE);syncTool();Toolbar::select(Toolbar::CROP);syncTool();const bool staysHidden=!cropPending;
+        cropPreset=3;fitCropAspect();const bool restored=cropPending&&!cropFrameDismissed&&std::fabs((cropR[2]-cropR[0])-(cropR[3]-cropR[1]))<.1f;
+        fitNext=true;fprintf(stderr,"crop-hidden-frame: %s; reselect stays hidden and choosing a ratio restores/fits the frame\n",staysHidden&&restored?"passed":"failed");return;
     }
     if (what == "crop-user-presets") {
         const auto saved=cropUserPresets;cropUserPresets.push_back({"__script crop preset","640 px","480 px","96",false});cropSaveUserPresets();cropUserPresets.clear();cropLoadUserPresets();
@@ -6895,6 +7065,18 @@ void script(const std::string& what) {
         const auto styles=doc.cur().text.characterStyles();std::vector<float> coverage;float box[4];const bool rendered=textCoverage(doc.cur().text,doc.w,doc.h,coverage,box,doc.dpi);
         const bool selected=styles.size()==11&&styles[0].tracking==-10&&styles[5].tracking==-10&&styles[6].tracking==160&&styles[10].tracking==160;
         fitNext=true;fprintf(stderr,"type-tracking-selection: %s; selected tracking changes while the leading run stays intact\n",applied&&selected&&rendered?"passed":"failed");return;
+    }
+    if (what == "type-font-selection") {
+        doc=newDoc(520,320,false);hist=History();const std::string base=defaultFont();std::string alternate=base;
+        for(const FontFile& font:systemFonts())if(font.path!=base){alternate=font.path;break;}
+        Text sample;sample.str="Hello world";sample.font=base;sample.size=32;sample.x=36;sample.y=70;
+        TextStyle first;first.font=base;first.size=32;TextStyle second=first;sample.runs={{6,first},{5,second}};
+        Fill fill;fill.kind=FILL_SOLID;for(int i=0;i<3;++i)fill.colour[i]=fg[i]/255.0f;addTextLayer(doc,sample,fill);
+        Toolbar::select(Toolbar::TYPE_H);syncTool();typeLayer=doc.active;typeMaskEditing=false;typeStyleSelectionStart=6;typeStyleSelectionEnd=11;typeStyleSelectionLayer=typeLayer;typeStyleSelectionValid=true;
+        Text updated=doc.cur().text;const bool applied=alternate!=base&&typeSetCharacterFont(updated,6,11,alternate);if(applied){doc.cur().text=std::move(updated);renderFill(doc,doc.cur());changed();}
+        const auto styles=doc.cur().text.characterStyles();std::vector<float> coverage;float box[4];const bool rendered=textCoverage(doc.cur().text,doc.w,doc.h,coverage,box,doc.dpi);
+        const bool selected=styles.size()==11&&styles[0].font==base&&styles[5].font==base&&styles[6].font==alternate&&styles[10].font==alternate;
+        fitNext=true;fprintf(stderr,"type-font-selection: %s; selected font changes while the other run stays intact\n",applied&&selected&&rendered?"passed":"failed");return;
     }
     if (what == "text") {   // tests: horizontal and vertical text layers, centred, a Type Mask selection
         Toolbar::select(Toolbar::TYPE_H); syncTool();
