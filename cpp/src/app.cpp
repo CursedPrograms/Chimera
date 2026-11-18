@@ -3037,6 +3037,42 @@ static int typeWcharIndex(const ImGuiInputTextState* state,size_t codepoints){
     while(i<state->CurLenW&&count<codepoints){const uint32_t c=state->TextW[i++];if(c>=0xd800&&c<=0xdbff&&i<state->CurLenW&&state->TextW[i]>=0xdc00&&state->TextW[i]<=0xdfff)++i;++count;}
     return i;
 }
+static size_t typeCodepointsBeforeByte(const std::string& text,size_t bytes);
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/keys.rs flow_key and handle_move_key):
+// vertical arrows follow the text flow, and column moves keep the same character position.
+bool typeMoveVerticalCaret(ImGuiInputTextState* state,const std::string& text,int cursor,int selectionStart,int selectionEnd,int selectionAnchor,bool hadSelection,int direction,bool extend){
+    if(!state||direction==0)return false;
+    const size_t count=typeCodepointIndex(state,state->CurLenW);
+    size_t caret=typeCodepointIndex(state,std::clamp(cursor,0,state->CurLenW));
+    caret=std::min(caret,count);
+    size_t destination=caret;
+    if(direction==-1||direction==1){
+        if(hadSelection&&!extend)destination=typeCodepointIndex(state,direction<0?selectionStart:selectionEnd);
+        else destination=direction<0?(caret?caret-1:0):std::min(caret+1,count);
+    }else{
+        size_t byte=0,cp=0;
+        while(byte<text.size()&&cp<caret){const unsigned char c=(unsigned char)text[byte];byte+=c<0x80?1:c<0xe0?2:c<0xf0?3:4;++cp;}
+        const size_t startByte=byte?text.rfind('\n',byte-1)==std::string::npos?0:text.rfind('\n',byte-1)+1:0;
+        const size_t endByte=text.find('\n',byte)==std::string::npos?text.size():text.find('\n',byte);
+        const size_t column=typeCodepointsBeforeByte(text,startByte),columnEnd=typeCodepointsBeforeByte(text,endByte);
+        const size_t offset=caret>=column?std::min(caret-column,columnEnd-column):0;
+        size_t targetByte=startByte;
+        if(direction>0){
+            if(endByte<text.size())targetByte=endByte+1;
+            else {destination=count;targetByte=text.size();}
+        }else if(startByte>0){const size_t priorBreak=startByte>=2?text.rfind('\n',startByte-2):std::string::npos;targetByte=priorBreak==std::string::npos?0:priorBreak+1;}
+        else {destination=0;targetByte=0;}
+        if((direction>0&&endByte<text.size())||(direction<0&&startByte>0)){
+            const size_t targetLineEnd=text.find('\n',targetByte)==std::string::npos?text.size():text.find('\n',targetByte);
+            destination=typeCodepointsBeforeByte(text,targetByte)+std::min(offset,typeCodepointsBeforeByte(text,targetLineEnd)-typeCodepointsBeforeByte(text,targetByte));
+        }
+    }
+    const int dest=typeWcharIndex(state,destination);
+    state->Stb.cursor=state->Stb.select_end=dest;
+    state->Stb.select_start=extend?(hadSelection?selectionAnchor:cursor):dest;
+    state->Stb.has_preferred_x=0;state->CursorFollow=true;state->CursorAnimReset();
+    return true;
+}
 static size_t typeByteOffset(const std::string& text,size_t codepoints){
     size_t at=0,count=0;
     while(at<text.size()&&count<codepoints){const unsigned char c=(unsigned char)text[at];at+=c<0x80?1:c<0xe0?2:c<0xf0?3:4;++count;}
@@ -3148,9 +3184,18 @@ static void typeEditor() {
     const bool moveWordRight=ImGui::IsWindowFocused()&&ImGui::IsKeyPressed(ImGuiKey_RightArrow)&&wordModifier;
     const bool moveDocumentStart=ImGui::IsWindowFocused()&&ImGui::IsKeyPressed(ImGuiKey_UpArrow)&&documentModifier;
     const bool moveDocumentEnd=ImGui::IsWindowFocused()&&ImGui::IsKeyPressed(ImGuiKey_DownArrow)&&documentModifier;
-    const int movementCursor=movementState?movementState->GetCursorPos():0,movementAnchor=movementState?movementState->GetSelectionStart():0;
-    const bool movementSelected=movementState&&movementState->HasSelection(),movementExtend=ImGui::GetIO().KeyShift;
     ImGuiIO& typeIo=ImGui::GetIO();
+    const int movementCursor=movementState?movementState->GetCursorPos():0,movementAnchor=movementState?movementState->GetSelectionStart():0;
+    const int movementSelectionEnd=movementState?movementState->GetSelectionEnd():0;
+    const int movementSelectionAnchor=movementState?movementState->Stb.select_start:0;
+    const bool movementSelected=movementState&&movementState->HasSelection(),movementExtend=ImGui::GetIO().KeyShift;
+    int verticalDirection=0;
+    if(t.vertical&&ImGui::IsWindowFocused()&&!typeIo.KeyCtrl&&!typeIo.KeyAlt&&!typeIo.KeySuper){
+        if(ImGui::IsKeyPressed(ImGuiKey_UpArrow,true))verticalDirection=-1;
+        else if(ImGui::IsKeyPressed(ImGuiKey_DownArrow,true))verticalDirection=1;
+        else if(ImGui::IsKeyPressed(ImGuiKey_LeftArrow,true))verticalDirection=2;
+        else if(ImGui::IsKeyPressed(ImGuiKey_RightArrow,true))verticalDirection=-2;
+    }
     const bool modifiedDelete=ImGui::IsWindowFocused()&&(ImGui::IsKeyPressed(ImGuiKey_Backspace)||ImGui::IsKeyPressed(ImGuiKey_Delete))&&
         typePrepareModifiedDelete(movementState,typeBuf,ImGui::IsKeyPressed(ImGuiKey_Backspace),typeIo.KeyCtrl,typeIo.KeyAlt,typeIo.ConfigMacOSXBehaviors,typeIo.KeySuper);
     const bool savedCtrl=typeIo.KeyCtrl,savedAlt=typeIo.KeyAlt,savedSuper=typeIo.KeySuper;
@@ -3163,6 +3208,7 @@ static void typeEditor() {
         else typeMask.str = typeBuf;
     }
     if(modifiedDelete){typeIo.KeyCtrl=savedCtrl;typeIo.KeyAlt=savedAlt;typeIo.KeySuper=savedSuper;}
+    if(verticalDirection)typeMoveVerticalCaret(ImGui::GetInputTextState(typeInputId),typeBuf,movementCursor,movementAnchor,movementSelectionEnd,movementSelectionAnchor,movementSelected,verticalDirection,movementExtend);
     if(ImGui::IsItemHovered()&&ImGui::IsMouseClicked(ImGuiMouseButton_Left)){
         const int owner=typeMaskEditing?-2:typeLayer;
         const unsigned previous=typeClickOwner==owner?typeClickRun:0;
@@ -6003,6 +6049,15 @@ void script(const std::string& what) {
         typeCancel();Toolbar::select(Toolbar::MOVE);syncTool();doc.active=0;
         const bool moveEditShown=moveEditTextAt(point)&&typeLayer==1&&Toolbar::current()==Toolbar::TYPE_H&&typeReturnToolbar==Toolbar::MOVE;
         fprintf(stderr,"type-hidden-groups: %s; hidden sibling/nested groups, hidden variants above/below, Type/Move edit shown layer=%d/%d/%d/%d/%d/%d\n",hiddenSiblings&&hiddenNested&&hiddenAbove&&hiddenBelow&&editShown&&moveEditShown?"passed":"failed",hiddenSiblings,hiddenNested,hiddenAbove,hiddenBelow,editShown,moveEditShown);return;
+    }
+    if (what == "type-vertical-arrows") {
+        doc=newDoc(480,320,false);hist=History();Text vertical;vertical.str="HOHOHO\nHOHO";vertical.x=90;vertical.y=52;vertical.size=42;vertical.vertical=true;
+        Fill fill;fill.kind=FILL_SOLID;for(int i=0;i<3;++i)fill.colour[i]=fg[i]/255.0f;addTextLayer(doc,vertical,fill);doc.active=0;
+        ImGuiInputTextState state;const std::string text="ABCD\nxyz";for(char c:text)state.TextW.push_back((ImWchar)c);state.CurLenW=(int)text.size();state.Stb.cursor=state.Stb.select_start=state.Stb.select_end=1;
+        const bool forward=typeMoveVerticalCaret(&state,text,1,1,1,1,false,2,false)&&state.GetCursorPos()==6;
+        const bool back=typeMoveVerticalCaret(&state,text,6,6,6,6,false,-2,false)&&state.GetCursorPos()==1;
+        Toolbar::select(Toolbar::TYPE_V);syncTool();typeLayer=0;typeMaskEditing=false;snprintf(typeBuf,sizeof(typeBuf),"%s",vertical.str.c_str());typeFocus=true;fitNext=true;
+        fprintf(stderr,"type-vertical-arrows: %s; column moves preserve the inline character offset and return to the prior column\n",forward&&back?"passed":"failed");return;
     }
     if (what == "type-shift-click") {
         doc=newDoc(480,320,false);hist=History();Text existing;existing.str="Existing words";existing.x=60;existing.y=140;existing.size=52;Fill fill;fill.kind=FILL_SOLID;for(int i=0;i<3;++i)fill.colour[i]=fg[i]/255.0f;addTextLayer(doc,existing,fill);

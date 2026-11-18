@@ -14,6 +14,7 @@
 
 namespace App {
 bool typeMoveDocumentEdge(ImGuiInputTextState* state, bool end, int cursor, int anchor, bool hadSelection, bool extend);
+bool typeMoveVerticalCaret(ImGuiInputTextState* state, const std::string& text, int cursor, int selectionStart, int selectionEnd, int selectionAnchor, bool hadSelection, int direction, bool extend);
 bool typeMoveWordCaret(ImGuiInputTextState* state, const std::string& text, int cursor, int anchor, bool hadSelection, bool forward, bool extend);
 bool typeWordNavigationShortcut(bool ctrl, bool alt, bool shift, bool mac, bool super);
 bool typeDocumentNavigationShortcut(bool ctrl, bool alt, bool mac, bool super);
@@ -388,6 +389,22 @@ static bool typeNavigationShortcutsMatchPhotoCraft() {
         typeDocumentNavigationShortcut(false,false,true,true) &&
         !typeDocumentNavigationShortcut(true,true,false,false);
 }
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/canvas_tests.rs vertical_type_caret_selection_and_arrows_follow_the_columns).
+static bool verticalTypeArrowsFollowTextColumns() {
+    ImGuiInputTextState state; const std::string text="ABCD\nxyz";
+    for(char c:text)state.TextW.push_back((ImWchar)c);state.CurLenW=(int)text.size();
+    state.Stb.cursor=state.Stb.select_start=state.Stb.select_end=1;
+    if(!App::typeMoveVerticalCaret(&state,text,1,1,1,1,false,2,false)||state.GetCursorPos()!=6)return false;
+    if(!App::typeMoveVerticalCaret(&state,text,6,6,6,6,false,-2,false)||state.GetCursorPos()!=1)return false;
+    if(!App::typeMoveVerticalCaret(&state,text,1,1,1,1,false,1,false)||state.GetCursorPos()!=2)return false;
+    if(!App::typeMoveVerticalCaret(&state,text,2,2,2,2,false,-1,false)||state.GetCursorPos()!=1)return false;
+    state.Stb.cursor=4;state.Stb.select_start=1;state.Stb.select_end=4;
+    if(!App::typeMoveVerticalCaret(&state,text,4,1,4,1,true,-1,false)||state.GetCursorPos()!=1||state.HasSelection())return false;
+    state.Stb.cursor=2;state.Stb.select_start=state.Stb.select_end=2;
+    if(!App::typeMoveVerticalCaret(&state,text,2,2,2,2,false,1,true)||state.GetCursorPos()!=3||state.GetSelectionStart()!=2)return false;
+    state.Stb.cursor=1;state.Stb.select_start=4;state.Stb.select_end=1;
+    return App::typeMoveVerticalCaret(&state,text,1,1,4,4,true,1,true)&&state.GetCursorPos()==2&&state.Stb.select_start==4;
+}
 static bool typeModifiedDeletionMatchesPhotoCraft() {
     ImGuiInputTextState state; const std::string text="ab, cd";
     for(char c:text)state.TextW.push_back((ImWchar)c);state.CurLenW=(int)text.size();
@@ -570,6 +587,7 @@ int runSelfTests() {
         {"type double-click word selection uses Unicode alphanumeric runs", typeDoubleClickWordRangesMatchPhotoCraft},
         {"type document-edge movement preserves Shift anchor", typeDocumentEdgeMovementMatchesPhotoCraft},
         {"type navigation shortcuts respect spacing modifiers", typeNavigationShortcutsMatchPhotoCraft},
+        {"vertical Type arrow keys follow columns", verticalTypeArrowsFollowTextColumns},
         {"type modified deletion uses PhotoCraft boundaries", typeModifiedDeletionMatchesPhotoCraft},
         {"type multi-click count cycle matches PhotoCraft", typeMultiClickCountsMatchPhotoCraft},
         {"type multi-click selects word, line, paragraph and all", typeMultiClickRangesMatchPhotoCraft},
