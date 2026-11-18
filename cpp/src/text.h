@@ -65,3 +65,6 @@ std::string textSmartQuotes(const std::string& text);
 struct TextUnit { float scale; const char* label; };
 // after PhotoCraft (crates/ui-egui/src/tools/type_tool/defaults.rs type_unit).
 TextUnit textUnit(int units, float dpi);
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool.rs note_recent_font/sync_recent_fonts).
+void noteRecentFont(std::vector<std::string>& recent, const std::string& font, size_t cap);
+void trimRecentFonts(std::vector<std::string>& recent, size_t cap);

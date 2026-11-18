@@ -64,6 +64,18 @@ TextUnit textUnit(int units, float dpi) {
     return {1.0f,"pt"};
 }
 
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool.rs note_recent_font): the newest selection
+// leads, duplicates are removed, and a zero cap disables the history list.
+void trimRecentFonts(std::vector<std::string>& recent, size_t cap) {
+    if(recent.size()>cap) recent.resize(cap);
+}
+void noteRecentFont(std::vector<std::string>& recent, const std::string& font, size_t cap) {
+    recent.erase(std::remove(recent.begin(),recent.end(),font),recent.end());
+    if(cap==0) { recent.clear(); return; }
+    recent.insert(recent.begin(),font);
+    trimRecentFonts(recent,cap);
+}
+
 std::string Text::save() const {
     // Text settings and a path's editable Bezier knots live together in the project layer.
     auto hex = [](const std::string& s) { std::string o; char b[3]; for (unsigned char c : s) { snprintf(b, sizeof b, "%02x", c); o += b; } return o.empty() ? std::string("-") : o; };

@@ -322,6 +322,21 @@ static bool trailingEmptyParagraphKeepsItsStyle() {
         runs[1].bytes==0 && runs[1].style.align==2;
 }
 
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/tests.rs recent font cap tests).
+static bool recentFontsMoveForwardAndRespectCaps() {
+    std::vector<std::string> recent;
+    for(const char* f:{"A","B","C"}) noteRecentFont(recent,f,8);
+    if(recent!=std::vector<std::string>({"C","B","A"})) return false;
+    noteRecentFont(recent,"D",2);
+    if(recent!=std::vector<std::string>({"D","C"})) return false;
+    noteRecentFont(recent,"C",2);
+    if(recent!=std::vector<std::string>({"C","D"})) return false;
+    trimRecentFonts(recent,1);
+    if(recent!=std::vector<std::string>({"C"})) return false;
+    noteRecentFont(recent,"E",0);
+    return recent.empty();
+}
+
 int runSelfTests() {
     struct Test { const char* name; bool (*run)(); };
     static const Test tests[] = {
@@ -346,6 +361,7 @@ int runSelfTests() {
         {"text summary follows first character run", textSummaryFollowsFirstStyleRun},
         {"rich text runs survive project round trip", richTextRunsSurviveProjectRoundTrip},
         {"trailing empty paragraph keeps its character style", trailingEmptyParagraphKeepsItsStyle},
+        {"recent font history de-duplicates and trims", recentFontsMoveForwardAndRespectCaps},
     };
     int failed = 0;
     for (const Test& test : tests) {
