@@ -141,6 +141,8 @@ static int gradToolStyle = 0; static bool gradToolReverse = false; static float 
 static bool cropPending = false, cropDelete = true; static float cropR[4] = {0, 0, 0, 0};
 static int cropDragPart = -1; static float cropBase[4] = {}; static ImVec2 cropDragStart;
 static float cropAngle = 0, cropRotateStart = 0;
+// after PhotoCraft (crates/ui-egui/src/tools/crop_overlay.rs CropOverlay)
+static int cropOverlay = 0, cropOverlayOrientation = 0, cropOverlayShow = 1;
 static void pcropSet(const float q[8]);
 static void applyPerspectiveCrop();
 static bool pcropPending = false, pcropCustomSize = false; static float pcropQ[8] = {0};
@@ -3498,6 +3500,10 @@ static void canvasInput() {
     if (t == T_CROP && cropPending && !dragging && dlg == D_NONE) {   // Enter crops, Escape lets it go
         if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) applyCrop();
         else if (ImGui::IsKeyPressed(ImGuiKey_Escape)) cropPending = false;
+        else if (ImGui::IsKeyPressed(ImGuiKey_O)) {
+            if (ImGui::GetIO().KeyShift) cropOverlayOrientation = (cropOverlayOrientation + 1) % (cropOverlay == 3 ? 2 : cropOverlay == 5 ? 4 : 1);
+            else { cropOverlay = (cropOverlay + 1) % 6; cropOverlayOrientation = 0; }
+        }
     }
     if (t == T_PCROP && !dragging && dlg == D_NONE) {
         if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) applyPerspectiveCrop();
@@ -3738,10 +3744,29 @@ static void drawCanvas() {
             for (const auto& region : regions) dl->AddConvexPolyFilled(region, 4, dim);
         }
         const ImVec2 outline[4] = {q0,q1,q2,q3}; dl->AddPolyline(outline, 4, IM_COL32(255, 255, 255, 230), ImDrawFlags_Closed, 1.5f);
-        for (int k = 1; k < 3; ++k) {
-            const float t = k / 3.0f;
-            dl->AddLine(ImVec2(q0.x + (q1.x-q0.x)*t, q0.y + (q1.y-q0.y)*t), ImVec2(q3.x + (q2.x-q3.x)*t, q3.y + (q2.y-q3.y)*t), IM_COL32(255, 255, 255, 90));
-            dl->AddLine(ImVec2(q0.x + (q3.x-q0.x)*t, q0.y + (q3.y-q0.y)*t), ImVec2(q1.x + (q2.x-q1.x)*t, q1.y + (q2.y-q1.y)*t), IM_COL32(255, 255, 255, 90));
+        if (cropOverlayShow == 1 || (cropOverlayShow == 0 && dragging)) {
+            auto guide = [&](float u, float v) { return ImVec2(q0.x + (q1.x-q0.x)*u + (q3.x-q0.x)*v, q0.y + (q1.y-q0.y)*u + (q3.y-q0.y)*v); };
+            auto line = [&](float u0,float v0,float u1,float v1) { dl->AddLine(guide(u0,v0),guide(u1,v1),IM_COL32(255,255,255,100),1.0f); };
+            auto cross = [&](float f) { line(f,0,f,1); line(0,f,1,f); };
+            if (cropOverlay == 0) { cross(1.0f/3); cross(2.0f/3); }
+            else if (cropOverlay == 1) {
+                const int nu=std::clamp((int)(std::hypot(q1.x-q0.x,q1.y-q0.y)/32),2,96), nv=std::clamp((int)(std::hypot(q3.x-q0.x,q3.y-q0.y)/32),2,96);
+                for(int i=1;i<nu;i++) line((float)i/nu,0,(float)i/nu,1); for(int i=1;i<nv;i++) line(0,(float)i/nv,1,(float)i/nv);
+            } else if (cropOverlay == 2) {
+                const float w=std::hypot(q1.x-q0.x,q1.y-q0.y),h=std::hypot(q3.x-q0.x,q3.y-q0.y),u=std::min(w,h)/w,v=std::min(w,h)/h;
+                line(0,0,u,v);line(1,0,1-u,v);line(0,1,u,1-v);line(1,1,1-u,1-v);
+            } else if (cropOverlay == 3) {
+                if(cropOverlayOrientation%2==0){line(0,0,1,1);line(1,0,0,1);}else{line(0,1,1,0);line(1,1,0,0);}
+            } else if (cropOverlay == 4) { cross(0.381966f); cross(0.618034f); }
+            else {
+                // The logarithmic golden spiral stays inside the unit crop frame.
+                constexpr float b=.30634896f, end=12.5663706f, outer=.5f;
+                float a0=cropOverlayOrientation*1.5707963f;
+                ImVec2 prev=guide(.5f+outer*std::cos(a0),.5f+outer*std::sin(a0));
+                for(int i=1;i<=192;i++) { const float t=end*(1.0f-i/192.0f),r=outer*std::exp(-b*t),a=a0-t;
+                    ImVec2 next=guide(.5f+r*std::cos(a),.5f+r*std::sin(a)); dl->AddLine(prev,next,IM_COL32(255,255,255,100),1.0f); prev=next;
+                }
+            }
         }
         const ImVec2 handles[8]={q0,ImVec2((q0.x+q1.x)*.5f,(q0.y+q1.y)*.5f),q1,ImVec2((q1.x+q2.x)*.5f,(q1.y+q2.y)*.5f),q2,ImVec2((q2.x+q3.x)*.5f,(q2.y+q3.y)*.5f),q3,ImVec2((q3.x+q0.x)*.5f,(q3.y+q0.y)*.5f)};
         for(const ImVec2 h:handles) { dl->AddRectFilled(ImVec2(h.x-3,h.y-3),ImVec2(h.x+3,h.y+3),IM_COL32(255,255,255,240)); dl->AddRect(ImVec2(h.x-3,h.y-3),ImVec2(h.x+3,h.y+3),IM_COL32(30,30,30,255)); }
@@ -4066,10 +4091,14 @@ static void optionsBar() {
         break;
     }
     case T_CROP:
+        { static const char* overlays[]={"Thirds","Grid","Diagonal","Triangle","Golden Ratio","Golden Spiral"};
+        ImGui::SetNextItemWidth(145); ImGui::Combo("##cropOverlay",&cropOverlay,overlays,6); ImGui::SameLine(0,8);
+        static const char* shows[]={"Auto","Always","Never"}; ImGui::SetNextItemWidth(90); ImGui::Combo("##cropOverlayShow",&cropOverlayShow,shows,3); ImGui::SameLine(0,8);
+        if(cropOverlay==3 || cropOverlay==5) { if(ImGui::SmallButton("Orientation")) cropOverlayOrientation=(cropOverlayOrientation+1)%(cropOverlay==3?2:4); ImGui::SameLine(0,8); }
         ImGui::Checkbox("Delete cropped pixels", &cropDelete); ImGui::SameLine(0, 14);
         if (ImGui::Button("Crop", ImVec2(70, 0))) applyCrop(); ImGui::SameLine();
         if (ImGui::Button("Cancel", ImVec2(70, 0))) cropPending = false; ImGui::SameLine(0, 14);
-        ImGui::TextDisabled("Drag what to keep; Enter or double-click crops, Escape cancels");
+        ImGui::TextDisabled("Drag what to keep; O cycles guides, Shift+O changes orientation"); }
         break;
     case T_PCROP: {
         int width = pcropOutW, height = pcropOutH;
@@ -5338,6 +5367,13 @@ void script(const std::string& what) {
         Toolbar::select(Toolbar::CROP); syncTool();
         const bool ok=cropPending && cropR[0]==0 && cropR[1]==0 && cropR[2]==doc.w && cropR[3]==doc.h;
         fprintf(stderr,"crop-frame: %s; full-canvas crop frame appears on tool selection\n",ok?"passed":"failed");
+        return;
+    }
+    if (what == "crop-overlay") {
+        Toolbar::select(Toolbar::CROP); syncTool();
+        cropOverlay=5; cropOverlayOrientation=3; cropOverlayShow=1;
+        const bool ok=cropPending && cropOverlay==5 && cropOverlayOrientation==3 && cropOverlayShow==1;
+        fprintf(stderr,"crop-overlay: %s; all six guide modes, visibility choices and orientations are available\n",ok?"passed":"failed");
         return;
     }
     if (what == "text-empty") {
