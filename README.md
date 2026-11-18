@@ -124,6 +124,46 @@ masked to the selection when there is one. It runs **[Mimic](https://github.com/
 face swapper) in the background: Chimera finds `mimic-cli` next to itself, in its `plugins\Mimic` folder, where
 Mimic is installed, or in a Mimic folder nearby; otherwise use **Filter > Mimic > Find Mimic...**
 
+### Layer groups
+- **Nested groups** (Ctrl+G), folded in the Layers panel, with their own opacity, blend mode and mask.
+- **Pass-through or isolated** blending, clipping onto groups and knockout, as in Photoshop.
+- **Group locks:** a locked group locks everything inside it.
+- **Clipping masks** (Alt+Ctrl+G) and **fill layers** (Solid Color, and Gradient: linear, radial, angle, reflected,
+  diamond).
+
+### Type
+- **Point text and paragraph text:** click to type, or drag a box; text wraps in the box, and resizing it from its
+  eight handles rewraps it. Move, rotate and scale the text while editing (Ctrl-drag scales point text).
+- **Text on a path:** click a Work Path to set text along it; drag the start and end markers or the text itself along
+  the path, flip it to the other side, on open or closed paths.
+- **Rich text:** character and paragraph styles in runs, so one layer can mix fonts, sizes and colours; the fonts on
+  this PC, with recent fonts first; smart quotes; points, pixels or millimetres; layers named from their first line.
+- The **Move tool** moves text layers exactly, without a jump when grabbed.
+
+### Crop, as Photoshop
+- A frame round the whole picture as soon as the tool is picked: drag inside to move it, the edges and corners to
+  resize it, outside it to rotate (Shift: 15 degree steps).
+- **Both modes:** the default, where the picture turns behind an upright box, and **Classic Mode** (P), where the
+  frame turns over a fixed picture.
+- **Overlays:** rule of thirds, grid, diagonal, triangle, golden ratio and golden spiral.
+- **The shield** outside the crop: opacity, Match Canvas or a custom colour, Auto Adjust Opacity, Show Cropped Area.
+- **Presets:** ratios and W x H x Resolution (for example 4 x 5 in at 300 ppi), and your own saved presets.
+- **Straighten:** draw a line along something that should be level; the frame turns to match.
+- **Delete Cropped Pixels** on or off, and **content-aware** filling of the corners a turned crop leaves.
+- **Perspective Crop:** four corners and a warp, keeping the document's layers.
+
+### Pen, shapes and more tools
+- **Pen, Freeform Pen and Curvature Pen** (PhotoCraft's paths); Make Selection, Fill Path and Stroke Path.
+- **Shape layers:** Rectangle (rounded), Ellipse, Triangle, Polygon, Star, Line and the **Custom Shape** library with
+  smooth presets and thumbnails.
+- **Healing:** Spot Healing, Remove, Healing Brush, Patch, Content-Aware Move and **Edit > Content-Aware Fill**
+  (PatchMatch, after PhotoCraft).
+- **Selections:** Quick Selection (min-cut, as Photoshop's brush) and **Magnetic Lasso** (the live wire).
+- **Slices** (export each as PNG), **Frames** for placed pictures, **Artboards**, **Rotate View**, the marking tools
+  (Color Sampler, Ruler, Note, Count), Pattern Stamp, History and Art History Brush, Gradient (5 styles), Magic
+  Eraser, Pencil, Zoom and the single row/column marquees.
+- **Document tabs:** every open picture in its own tab with its own undo; **File > Export ICO**.
+
 ### 7. Export and canvas utilities
 - **PNG:** 32-bit PNG with full transparency; JPG export (onto white).
 - **Projects:** `.chimera` files keep every layer, mask, blend mode and opacity.
