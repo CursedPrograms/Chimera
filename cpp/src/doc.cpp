@@ -854,6 +854,11 @@ bool openDoc(const std::string& path, Doc& d, std::string& err) {
                 if (boards != n.artboards.size()) { r.ok = false; }
                 for (uint32_t i = 0; i < boards && r.ok; ++i) n.artboards[i].groupId = r.i32();
             }
+            if (r.ok && r.i < b.size()) {
+                if (r.i + 8 > b.size() || memcmp(b.data() + r.i, "DPI1", 4)) { err = "The project has an unknown extension"; return false; }
+                r.i += 4; n.dpi = r.f();
+                if (!std::isfinite(n.dpi) || n.dpi < 1.0f || n.dpi > 30000.0f) r.ok = false;
+            }
             for (const LayerGroup& g : n.groups) {
                 if (g.stackIndex < 0 || g.stackIndex > (int)n.layers.size()) { r.ok = false; break; }
                 int parent = g.parentId;
@@ -1011,6 +1016,7 @@ bool saveProject(const Doc& d, const std::string& path, std::string& err) {
     o.insert(o.end(), {'A', 'B', 'G', '1'});
     putU32(o, (uint32_t)d.artboards.size());
     for (const Artboard& a : d.artboards) putU32(o, (uint32_t)a.groupId);
+    o.insert(o.end(), {'D', 'P', 'I', '1'}); putF(o, std::clamp(d.dpi, 1.0f, 30000.0f));
     if (!writeFile(path, o)) { err = "Can't write " + path; return false; }
     return true;
 }

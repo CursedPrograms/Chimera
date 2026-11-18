@@ -96,6 +96,7 @@ struct Layer {
 
 struct Doc {
     int w = 0, h = 0;
+    float dpi = 72.0f;                           // physical resolution for print-sized crop output
     std::vector<Layer> layers;                   // bottom first
     int active = 0;
     bool editMask = false;                       // painting / filters go to the active layer's mask

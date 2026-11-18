@@ -26,7 +26,9 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <functional>
+#include <iomanip>
 #include <string>
 #include <vector>
 
@@ -144,6 +146,18 @@ static bool cropShowArea = true, cropShieldEnabled = true, cropShieldAuto = true
 static bool cropShieldMatchCanvas = true;
 static float cropShieldColor[3] = {0.102f,0.102f,0.102f};
 static float cropShieldOpacity = 75.0f;
+// after PhotoCraft (crates/ui-egui/src/tools/crop_presets.rs and crop_size.rs)
+static int cropPreset = 0;
+static char cropWidth[40] = "", cropHeight[40] = "", cropResolution[40] = "";
+static bool cropResolutionCm = false;
+struct CropPreset { std::string name,width,height,resolution; bool cm=false; };
+static std::vector<CropPreset> cropUserPresets;
+static int cropPresetChoice=0;
+static int cropSavedChoice=0;
+static bool cropNewDialog=false,cropDeleteDialog=false;
+static char cropNewName[256]="";
+static int cropDeleteChoice=-1;
+static void cropSizeTarget(int& w,int& h,float& ppi);
 static int cropDragPart = -1; static float cropBase[4] = {}; static ImVec2 cropDragStart;
 static float cropAngle = 0, cropRotateStart = 0;
 // after PhotoCraft (crates/ui-egui/src/tools/crop_overlay.rs CropOverlay)
@@ -1718,12 +1732,15 @@ static void applyCrop() {
     cropPending = false;
     r = r.clip(doc.w, doc.h);
     if (r.empty()) return;
+    int outW=0,outH=0;float outPpi=doc.dpi;cropSizeTarget(outW,outH,outPpi);
     remember("Crop"); cropCanvas(doc, r, cropDelete);
     for (Slice& s : doc.slices) {
         s.rect = {std::max(s.rect.x0, r.x0) - r.x0, std::max(s.rect.y0, r.y0) - r.y0,
                   std::min(s.rect.x1, r.x1) - r.x0, std::min(s.rect.y1, r.y1) - r.y0};
     }
     doc.slices.erase(std::remove_if(doc.slices.begin(), doc.slices.end(), [](const Slice& s) { return s.rect.empty(); }), doc.slices.end());
+    if(outW>0&&outH>0){resizeImage(doc,outW,outH);doc.dpi=outPpi;}
+    else if(std::strtof(cropResolution,nullptr)>0)doc.dpi=outPpi;
     sliceActive = -1;
     changed(); selChanged(); fitNext = true;
 }
@@ -1772,6 +1789,41 @@ static void cropDragTo(ImVec2 p, bool snapAngle=false) {
     }
     cropR[0]=x0;cropR[1]=y0;cropR[2]=x1;cropR[3]=y1;
 }
+static float cropLengthPx(const char* text, float dpi) {
+    char* end=nullptr; const float v=std::strtof(text,&end); if(end==text||!std::isfinite(v)||v<=0)return 0;
+    while(*end==' ')++end;
+    if(!_stricmp(end,"in")||!_stricmp(end,"inch")||!_stricmp(end,"inches"))return v*dpi;
+    if(!_stricmp(end,"cm"))return v*dpi/2.54f;
+    if(!_stricmp(end,"mm"))return v*dpi/25.4f;
+    return v;
+}
+static float cropAspect() {
+    if(cropPreset==2)return doc.h>0?(float)doc.w/doc.h:0;
+    if(cropPreset==1||(cropPreset>=8&&cropPreset<=15)){float ppi=doc.dpi;char* e=nullptr;const float r=std::strtof(cropResolution,&e);if(e!=cropResolution&&r>0)ppi=r*(cropResolutionCm?2.54f:1.0f);return cropLengthPx(cropWidth,ppi)/std::max(1.0f,cropLengthPx(cropHeight,ppi));}
+    static const float ratios[]={0,0,0,1,4.0f/5,5.0f/7,2.0f/3,16.0f/9};
+    if(cropPreset>=3&&cropPreset<8)return ratios[cropPreset];
+    return 0;
+}
+static void fitCropAspect() {
+    const float a=cropAspect(); if(a<=0||!cropPending)return;
+    const float cx=(cropR[0]+cropR[2])*.5f,cy=(cropR[1]+cropR[3])*.5f;
+    float w=std::fabs(cropR[2]-cropR[0]),h=std::fabs(cropR[3]-cropR[1]);
+    if(w/std::max(1.0f,h)>a)w=h*a;else h=w/a;
+    if(w>doc.w){w=(float)doc.w;h=w/a;}if(h>doc.h){h=(float)doc.h;w=h*a;}
+    cropR[0]=std::clamp(cx-w*.5f,0.0f,std::max(0.0f,(float)doc.w-w));cropR[1]=std::clamp(cy-h*.5f,0.0f,std::max(0.0f,(float)doc.h-h));cropR[2]=cropR[0]+w;cropR[3]=cropR[1]+h;
+}
+static void cropSizeTarget(int& w,int& h,float& ppi) {
+    w=h=0; ppi=doc.dpi;
+    char* end=nullptr; const float rv=std::strtof(cropResolution,&end);
+    if(end!=cropResolution&&std::isfinite(rv)&&rv>0)ppi=rv*(cropResolutionCm?2.54f:1.0f);
+    if(cropPreset!=1 && (cropPreset<8||cropPreset>15))return;
+    const float tw=cropLengthPx(cropWidth,ppi),th=cropLengthPx(cropHeight,ppi);
+    if(tw>=1&&th>=1&&tw<=300000&&th<=300000){w=(int)std::lround(tw);h=(int)std::lround(th);}
+}
+static std::filesystem::path cropPresetFile(){return std::filesystem::path(prefs)/"crop-presets.txt";}
+static void cropLoadUserPresets(){cropUserPresets.clear();std::ifstream f(cropPresetFile());CropPreset p;while(f>>std::quoted(p.name)>>std::quoted(p.width)>>std::quoted(p.height)>>std::quoted(p.resolution)>>p.cm){if(!p.name.empty())cropUserPresets.push_back(p);p=CropPreset{};}}
+static void cropSaveUserPresets(){std::ofstream f(cropPresetFile(),std::ios::trunc);for(const auto&p:cropUserPresets)f<<std::quoted(p.name)<<' '<<std::quoted(p.width)<<' '<<std::quoted(p.height)<<' '<<std::quoted(p.resolution)<<' '<<p.cm<<'\n';}
+static void cropSelectUserPreset(int i){if(i<0||i>=(int)cropUserPresets.size())return;const CropPreset&p=cropUserPresets[i];strcpy_s(cropWidth,p.width.c_str());strcpy_s(cropHeight,p.height.c_str());strcpy_s(cropResolution,p.resolution.c_str());cropResolutionCm=p.cm;cropPreset=1;cropSavedChoice=i;fitCropAspect();}
 // Check that the four corners make a nondegenerate convex quadrilateral.
 static bool pcropValid(const float q[8]) {
     double area = 0;
@@ -4100,7 +4152,23 @@ static void optionsBar() {
         break;
     }
     case T_CROP:
-        { static const char* overlays[]={"Thirds","Grid","Diagonal","Triangle","Golden Ratio","Golden Spiral"};
+        { static const char* presets[]={"Ratio","W x H x Resolution","Original Ratio","1 : 1 (Square)","4 : 5 (8 : 10)","5 : 7","2 : 3 (4 : 6)","16 : 9","4 x 5 in 300 ppi","8.5 x 11 in 300 ppi","1024 x 768 px 92 ppi","1280 x 800 px 113 ppi","1366 x 768 px 135 ppi","4 x 6 in 300 ppi","5 x 7 in 300 ppi","8 x 10 in 300 ppi","Front Image"};
+        ImGui::SetNextItemWidth(150); if(ImGui::Combo("##cropPreset",&cropPreset,presets,17)) {
+            static const char* ws[]={"4 in","8.5 in","1024 px","1280 px","1366 px","4 in","5 in","8 in"};
+            static const char* hs[]={"5 in","11 in","768 px","800 px","768 px","6 in","7 in","10 in"};
+            static const char* rs[]={"300","300","92","113","135","300","300","300"};
+            if(cropPreset>=8&&cropPreset<=15){strcpy_s(cropWidth,ws[cropPreset-8]);strcpy_s(cropHeight,hs[cropPreset-8]);strcpy_s(cropResolution,rs[cropPreset-8]);cropResolutionCm=false;}
+            if(cropPreset==16){cropPreset=1;snprintf(cropWidth,sizeof(cropWidth),"%d px",doc.w);snprintf(cropHeight,sizeof(cropHeight),"%d px",doc.h);snprintf(cropResolution,sizeof(cropResolution),"%.2f",doc.dpi);cropResolutionCm=false;}
+            if(cropPreset==1||cropPreset>=8)fitCropAspect();
+            else {cropWidth[0]=cropHeight[0]=cropResolution[0]=0;fitCropAspect();}
+        }
+        if(cropPreset==1||(cropPreset>=8&&cropPreset<=15)){ImGui::SameLine(0,6);ImGui::SetNextItemWidth(72);if(ImGui::InputText("##cropW",cropWidth,sizeof(cropWidth)))fitCropAspect();ImGui::SameLine(0,3);ImGui::TextUnformatted("×");ImGui::SameLine(0,3);ImGui::SetNextItemWidth(72);if(ImGui::InputText("##cropH",cropHeight,sizeof(cropHeight)))fitCropAspect();ImGui::SameLine(0,4);ImGui::SetNextItemWidth(64);ImGui::InputText("##cropResolution",cropResolution,sizeof(cropResolution));ImGui::SameLine(0,3);ImGui::SetNextItemWidth(60);const char* ru[]={"px/in","px/cm"};int rui=cropResolutionCm?1:0;if(ImGui::Combo("##cropResolutionUnit",&rui,ru,2))cropResolutionCm=rui==1;ImGui::SameLine(0,3);if(ImGui::SmallButton("Swap")){std::string w=cropWidth;strcpy_s(cropWidth,cropHeight);strcpy_s(cropHeight,w.c_str());fitCropAspect();}ImGui::SameLine(0,3);if(ImGui::SmallButton("Clear")){cropWidth[0]=cropHeight[0]=cropResolution[0]=0;cropPreset=1;}}
+        if(!cropUserPresets.empty()){ImGui::SameLine(0,5);std::vector<const char*> savedNames;for(const auto&p:cropUserPresets)savedNames.push_back(p.name.c_str());cropSavedChoice=std::clamp(cropSavedChoice,0,(int)savedNames.size()-1);ImGui::SetNextItemWidth(125);if(ImGui::Combo("##savedCropPreset",&cropSavedChoice,savedNames.data(),(int)savedNames.size()))cropSelectUserPreset(cropSavedChoice);}
+        ImGui::SameLine(0,4);if(ImGui::SmallButton("New Preset")){snprintf(cropNewName,sizeof(cropNewName),"%s x %s",cropWidth,cropHeight);ImGui::OpenPopup("New Crop Preset");}
+        ImGui::SameLine(0,3);ImGui::BeginDisabled(cropUserPresets.empty());if(ImGui::SmallButton("Delete Preset"))ImGui::OpenPopup("Delete Crop Preset");ImGui::EndDisabled();
+        if(ImGui::BeginPopupModal("New Crop Preset",nullptr,ImGuiWindowFlags_AlwaysAutoResize)){ImGui::TextUnformatted("Name:");ImGui::InputText("##newCropPresetName",cropNewName,sizeof(cropNewName));if(ImGui::Button("Save",ImVec2(90,0))&&cropNewName[0]&&cropWidth[0]&&cropHeight[0]){CropPreset p{cropNewName,cropWidth,cropHeight,cropResolution,cropResolutionCm};auto it=std::find_if(cropUserPresets.begin(),cropUserPresets.end(),[&](const CropPreset&q){return q.name==p.name;});if(it==cropUserPresets.end())cropUserPresets.push_back(p);else *it=p;cropSavedChoice=(int)(std::find_if(cropUserPresets.begin(),cropUserPresets.end(),[&](const CropPreset&q){return q.name==p.name;})-cropUserPresets.begin());cropSaveUserPresets();ImGui::CloseCurrentPopup();}ImGui::SameLine();if(ImGui::Button("Cancel",ImVec2(90,0)))ImGui::CloseCurrentPopup();ImGui::EndPopup();}
+        if(ImGui::BeginPopupModal("Delete Crop Preset",nullptr,ImGuiWindowFlags_AlwaysAutoResize)){ImGui::TextUnformatted("Delete the selected saved crop preset?");if(ImGui::Button("Delete",ImVec2(90,0))&&!cropUserPresets.empty()){cropUserPresets.erase(cropUserPresets.begin()+std::clamp(cropSavedChoice,0,(int)cropUserPresets.size()-1));cropSavedChoice=std::max(0,(int)cropUserPresets.size()-1);cropSaveUserPresets();ImGui::CloseCurrentPopup();}ImGui::SameLine();if(ImGui::Button("Cancel",ImVec2(90,0)))ImGui::CloseCurrentPopup();ImGui::EndPopup();}
+        static const char* overlays[]={"Thirds","Grid","Diagonal","Triangle","Golden Ratio","Golden Spiral"};
         ImGui::SetNextItemWidth(145); ImGui::Combo("##cropOverlay",&cropOverlay,overlays,6); ImGui::SameLine(0,8);
         static const char* shows[]={"Auto","Always","Never"}; ImGui::SetNextItemWidth(90); ImGui::Combo("##cropOverlayShow",&cropOverlayShow,shows,3); ImGui::SameLine(0,8);
         if(cropOverlay==3 || cropOverlay==5) { if(ImGui::SmallButton("Orientation")) cropOverlayOrientation=(cropOverlayOrientation+1)%(cropOverlay==3?2:4); ImGui::SameLine(0,8); }
@@ -5323,7 +5391,7 @@ void requestQuit() {
 
 void init(SDL_Window* win, const std::string& prefDir, void (*status)(const char* what, float progress)) {
     auto step = [status](const char* what, float progress) { if (status) status(what, progress); };
-    window = win; prefs = prefDir;
+    window = win; prefs = prefDir; cropLoadUserPresets();
     step("Applying the theme...", 0.2f);
     applyStyle();
     {   // Filter > Changeling: find Changeling Studio and ask it for the steps now, so the menu is ready
@@ -5398,6 +5466,20 @@ void script(const std::string& what) {
         const int idle=(int)std::lround(cropShieldOpacity*2.55f), edit=(int)std::lround(cropShieldOpacity*2.55f*.5f);
         const bool ok=idle==191 && edit==96 && std::lround(cropShieldColor[0]*255)==204 && std::lround(cropShieldColor[1]*255)==31 && std::lround(cropShieldColor[2]*255)==56;
         fprintf(stderr,"crop-shield: %s; canvas/custom colors, opacity, auto-adjust and visibility\n",ok?"passed":"failed");return;
+    }
+    if (what == "crop-preset") {
+        Toolbar::select(Toolbar::CROP);syncTool();cropPreset=8;strcpy_s(cropWidth,"4 in");strcpy_s(cropHeight,"5 in");strcpy_s(cropResolution,"300");cropResolutionCm=false;cropAngle=0;fitCropAspect();
+        int w=0,h=0;float dpi=0;cropSizeTarget(w,h,dpi);const bool target=w==1200&&h==1500&&dpi==300;
+        applyCrop();Doc roundtrip;std::string err;const std::string p=(std::filesystem::temp_directory_path()/"chimera-crop-preset.chimera").string();
+        const bool persisted=doc.w==1200&&doc.h==1500&&doc.dpi==300&&saveProject(doc,p,err)&&openDoc(p,roundtrip,err)&&roundtrip.dpi==300;
+        fprintf(stderr,"crop-preset: %s; 4 x 5 inch at 300 ppi gives 1200 x 1500 px and saves resolution\n",target&&persisted?"passed":"failed");return;
+    }
+    if (what == "crop-user-presets") {
+        const auto saved=cropUserPresets;cropUserPresets.push_back({"__script crop preset","640 px","480 px","96",false});cropSaveUserPresets();cropUserPresets.clear();cropLoadUserPresets();
+        const bool loaded=std::any_of(cropUserPresets.begin(),cropUserPresets.end(),[](const CropPreset&p){return p.name=="__script crop preset"&&p.width=="640 px"&&p.height=="480 px"&&p.resolution=="96";});
+        cropUserPresets.erase(std::remove_if(cropUserPresets.begin(),cropUserPresets.end(),[](const CropPreset&p){return p.name=="__script crop preset";}),cropUserPresets.end());cropUserPresets=saved;cropSaveUserPresets();
+        Toolbar::select(Toolbar::CROP);syncTool();cropPreset=1;strcpy_s(cropWidth,"640 px");strcpy_s(cropHeight,"480 px");strcpy_s(cropResolution,"96");fitCropAspect();
+        fprintf(stderr,"crop-user-presets: %s; saved size preset round-trips and restore preserves existing presets\n",loaded?"passed":"failed");return;
     }
     if (what == "text-empty") {
         Toolbar::select(Toolbar::TYPE_H); syncTool();
