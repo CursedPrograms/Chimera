@@ -14,6 +14,7 @@
 #include <limits>
 #include <map>
 #include <mutex>
+#include <numeric>
 #include <sstream>
 #ifdef _WIN32
 #ifndef NOMINMAX
@@ -439,8 +440,8 @@ static float glyphAdvance(const TextGlyph& glyph, const TextGlyph* next, const s
     const float scale = stbtt_ScaleForPixelHeight(&loaded->info, size);
     int advance = 0, bearing = 0;
     stbtt_GetCodepointHMetrics(&loaded->info, glyph.codepoint, &advance, &bearing);
-    float kern = next ? style.kern / 1000.0f * size : 0.0f;
-    if (next && !style.kerningOff) {
+    float kern = next && next->codepoint!='\t' && glyph.codepoint!='\t' ? style.kern / 1000.0f * size : 0.0f;
+    if (next && next->codepoint!='\t' && glyph.codepoint!='\t' && !style.kerningOff) {
         const TextStyle& nextStyle = styleForCharacter(styles, next->character, fallback);
         const std::string& font = style.font.empty() ? fallbackFont : style.font;
         const std::string& nextFont = nextStyle.font.empty() ? fallbackFont : nextStyle.font;
@@ -449,6 +450,23 @@ static float glyphAdvance(const TextGlyph& glyph, const TextGlyph* next, const s
     }
     const float horizontalScale=std::isfinite(style.horizontalScale)&&style.horizontalScale>0?style.horizontalScale:1.0f;
     return (advance * scale + kern + style.tracking / 1000.0f * size) * horizontalScale;
+}
+// after PhotoCraft (crates/text/src/layout/paragraphs.rs next_tab_stop): tabs advance to
+// Photoshop's 36 point stops measured from the paragraph edge or point-text anchor.
+static float nextTextTabStop(float position,float interval){
+    if(!(interval>0)||!std::isfinite(position))return position;
+    return (std::floor((position+1e-3f)/interval)+1.0f)*interval;
+}
+static std::vector<float> glyphAdvances(const std::vector<TextGlyph>& line,const std::vector<TextStyle>& styles,
+                                       const TextStyle& fallback,const std::string& fallbackFont,
+                                       float tabInterval,float start=0){
+    std::vector<float> out(line.size());float position=start;
+    for(size_t i=0;i<line.size();++i){
+        if(line[i].codepoint=='\t')out[i]=std::max(0.0f,nextTextTabStop(position,tabInterval)-position);
+        else out[i]=glyphAdvance(line[i],i+1<line.size()?&line[i+1]:nullptr,styles,fallback,fallbackFont);
+        position+=out[i];
+    }
+    return out;
 }
 static std::vector<std::vector<TextGlyph>> linesOf(const std::string& s,const std::vector<TextStyle>& styles) {   // UTF-8 to styled glyphs, by line
     std::vector<std::vector<TextGlyph>> lines(1);
@@ -477,7 +495,7 @@ static std::vector<std::vector<TextGlyph>> linesOf(const std::string& s,const st
 
 // after PhotoCraft (crates/text paragraph layout): wrap at whitespace without splitting a word.
 static void wrapLines(std::vector<std::vector<TextGlyph>>& lines, const std::vector<TextStyle>& styles,
-                      const TextStyle& fallback, const std::string& fallbackFont, float width) {
+                      const TextStyle& fallback, const std::string& fallbackFont, float width,float tabInterval) {
     if (width <= 0) return;
     std::vector<std::vector<TextGlyph>> wrapped;
     for (const auto& source : lines) {
@@ -490,14 +508,15 @@ static void wrapLines(std::vector<std::vector<TextGlyph>>& lines, const std::vec
             size_t end = at;
             while (end < source.size() && source[end].codepoint != ' ' && source[end].codepoint != '\t') ++end;
             std::vector<TextGlyph> word(source.begin() + at, source.begin() + end);
-            float used = 0;
-            for (size_t i = 0; i < line.size(); ++i) used += glyphAdvance(line[i], i + 1 < line.size() ? &line[i + 1] : (word.empty() ? nullptr : &word[0]), styles, fallback, fallbackFont);
-            float wordWidth = 0;
-            for (size_t i = 0; i < word.size(); ++i) wordWidth += glyphAdvance(word[i], i + 1 < word.size() ? &word[i + 1] : nullptr, styles, fallback, fallbackFont);
-            TextGlyph spaceGlyph{' ', source[separator].character};
-            const float space = line.empty() ? 0 : glyphAdvance(spaceGlyph, word.empty() ? nullptr : &word[0], styles, fallback, fallbackFont);
-            if (!line.empty() && used + space + wordWidth > width) { wrapped.push_back(std::move(line)); line.clear(); }
-            else if (!line.empty()) line.push_back({' ', source[separator].character});
+            const auto lineAdv=glyphAdvances(line,styles,fallback,fallbackFont,tabInterval);
+            const float used=std::accumulate(lineAdv.begin(),lineAdv.end(),0.0f);
+            std::vector<TextGlyph> separators(source.begin()+separator,source.begin()+at);
+            auto sepAdv=glyphAdvances(separators,styles,fallback,fallbackFont,tabInterval,used);
+            const float sepWidth=std::accumulate(sepAdv.begin(),sepAdv.end(),0.0f);
+            const auto wordAdv=glyphAdvances(word,styles,fallback,fallbackFont,tabInterval,used+sepWidth);
+            const float wordWidth=std::accumulate(wordAdv.begin(),wordAdv.end(),0.0f);
+            if (!line.empty() && used + sepWidth + wordWidth > width) { wrapped.push_back(std::move(line)); line.clear(); }
+            else line.insert(line.end(),separators.begin(),separators.end());
             line.insert(line.end(), word.begin(), word.end());
             at = end;
         }
@@ -559,8 +578,7 @@ float textAdvance(const Text& t) {
     const auto lines = linesOf(t.str,styles);
     if (lines.empty() || t.vertical) return 0;
     const auto& line = lines.front(); float width = 0;
-    for (size_t i = 0; i < line.size(); ++i)
-        width += glyphAdvance(line[i], i + 1 < line.size() ? &line[i + 1] : nullptr, styles, fallback, t.font);
+    for(float advance:glyphAdvances(line,styles,fallback,t.font,36.0f))width+=advance;
     return std::max(0.0f, width);
 }
 
@@ -579,7 +597,7 @@ bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float bo
     const auto styles = t.characterStyles();
     TextStyle fallback; fallback.font=t.font; fallback.size=t.size; fallback.tracking=t.tracking; fallback.leading=t.leading;
     auto lines = linesOf(t.str,styles);
-    if (!t.vertical) wrapLines(lines, styles, fallback, t.font, t.boxWidth);
+    if (!t.vertical) wrapLines(lines, styles, fallback, t.font, t.boxWidth,36.0f*(std::isfinite(dpi)&&dpi>0?dpi:72.0f)/72.0f);
     const TextPathMetric path = t.pathText ? pathMetric(t) : TextPathMetric();
     const bool pathOn = t.pathText && !t.vertical && path.length > 0;
     float minX = 1e9f, minY = 1e9f, maxX = -1e9f, maxY = -1e9f;
@@ -776,11 +794,13 @@ bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float bo
         // each line's width, for centring / right
         for (size_t li = 0; li < lines.size(); ++li) {
             const auto& L = lines[li];
-            float wsum = 0; for (size_t i = 0; i < L.size(); ++i) wsum += glyphAdvance(L[i], i + 1 < L.size() ? &L[i + 1] : nullptr, styles, fallback, t.font);
+            const auto advances=glyphAdvances(L,styles,fallback,t.font,36.0f*(std::isfinite(dpi)&&dpi>0?dpi:72.0f)/72.0f);
+            const float wsum=std::accumulate(advances.begin(),advances.end(),0.0f);
             float gx = t.x - (t.align == 1 ? wsum / 2 : t.align == 2 ? wsum : 0);
             const float gy = baselines[li];
             for (size_t i = 0; i < L.size(); ++i) {
-                const float adv = glyphAdvance(L[i], i + 1 < L.size() ? &L[i + 1] : nullptr, styles, fallback, t.font);
+                const float adv=advances[i];
+                if(L[i].codepoint=='\t'){gx+=adv;continue;}
                 Loaded* glyphFont=loadedForGlyph(L[i]);
                 if(!glyphFont)continue;
                 const TextStyle& style=styleForCharacter(styles,L[i].character,fallback);
@@ -800,10 +820,12 @@ bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float bo
         float colX=t.x;
         for (size_t li = 0; li < lines.size(); ++li) {
             const auto& L = lines[li];
-            float total = 0; for(const TextGlyph& glyph:L){const TextStyle& style=styleForCharacter(styles,glyph.character,fallback);const float hs=std::isfinite(style.horizontalScale)&&style.horizontalScale>0?style.horizontalScale:1.0f;const float glyphSize=style.size*glyph.sizeScale;total+=(glyphSize+style.tracking/1000.0f*glyphSize)*hs;}
+            const auto advances=glyphAdvances(L,styles,fallback,t.font,36.0f*(std::isfinite(dpi)&&dpi>0?dpi:72.0f)/72.0f);
+            const float total=std::accumulate(advances.begin(),advances.end(),0.0f);
             float gy = t.y - (t.align == 1 ? total / 2 : t.align == 2 ? total : 0) + metrics[li].ascent;
             const float cx = colX;
             for (size_t i = 0; i < L.size(); ++i) {
+                if(L[i].codepoint=='\t'){gy+=advances[i];continue;}
                 Loaded* glyphFont=loadedForGlyph(L[i]);if(!glyphFont)continue;
                 const float glyphScale=scaleForGlyph(L[i]);int adv=0,lsb=0;stbtt_GetCodepointHMetrics(&glyphFont->info,L[i].codepoint,&adv,&lsb);
                 const TextStyle& style=styleForCharacter(styles,L[i].character,fallback);

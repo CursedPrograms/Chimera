@@ -19,6 +19,8 @@ bool typeMoveEditorLineEdge(ImGuiInputTextState* state, const std::string& text,
 bool typeStepCharacterMetric(Text& text, size_t start, size_t end, int metric, float by, float dpi, float layerScaleY);
 bool typeToggleCharacterStyle(Text& text, size_t start, size_t end, int styleIndex);
 bool typeApplyEditorText(Text& text, const std::string& updated);
+bool typeSetCharacterSize(Text& text, size_t start, size_t end, float size);
+bool typeSetCharacterTracking(Text& text, size_t start, size_t end, float tracking);
 bool typeMoveWordCaret(ImGuiInputTextState* state, const std::string& text, int cursor, int anchor, bool hadSelection, bool forward, bool extend);
 bool typeWordNavigationShortcut(bool ctrl, bool alt, bool shift, bool mac, bool super);
 bool typeDocumentNavigationShortcut(bool ctrl, bool alt, bool mac, bool super);
@@ -494,6 +496,43 @@ static bool typeEditingPreservesCharacterAndParagraphRuns() {
     if(!App::typeApplyEditorText(trailing,"A\nB\n"))return false;
     paras=trailing.normalizedParagraphs();return paras.size()==3&&paras.back().bytes==0&&paras.back().style.align==2;
 }
+// after PhotoCraft (crates/text/src/layout/paragraphs.rs next_tab_stop): tabs use 36 point stops,
+// stay in the editable source string, and wrap with their expanded whitespace width.
+static bool typeTabsUsePhotoCraftStops() {
+    Text tab;tab.str="a\tb";tab.size=24;tab.x=4;tab.y=48;
+    std::vector<float> coverage;float box72[4],box144[4];
+    if(!textCoverage(tab,400,180,coverage,box72,72)||!textCoverage(tab,400,260,coverage,box144,144))return false;
+    if(box144[2]-box72[2]<30||textAdvance(tab)<40)return false;
+    Text stored;if(!stored.load(tab.save())||stored.str!="a\tb")return false;
+    Text wrapped;wrapped.str="a\tb\tc\td\te\tf\tg";wrapped.size=24;wrapped.boxWidth=100;wrapped.boxHeight=200;
+    float wrappedBox[4];if(!textCoverage(wrapped,240,260,coverage,wrappedBox,72))return false;
+    return wrappedBox[2]-wrapped.x<=100.5f;
+}
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/canvas_tests.rs size_applies_at_layer_and_selection_scope):
+// an active selection receives a size edit and a collapsed range formats the whole text layer.
+static bool typeSizeEditsRespectSelectionScope() {
+    Text text;text.str="Hello world";TextStyle small,large;small.size=30;large.size=20;
+    text.runs={{6,small},{5,large}};
+    if(!App::typeSetCharacterSize(text,6,11,10))return false;
+    auto styles=text.characterStyles();if(styles.size()!=11||styles[0].size!=30||styles[5].size!=30||styles[6].size!=10||styles[10].size!=10)return false;
+    if(!App::typeSetCharacterSize(text,0,0,40))return false;
+    styles=text.characterStyles();for(const TextStyle& style:styles)if(style.size!=40)return false;
+    Text unicode;unicode.str="a\xc3\xa9" "z";TextStyle a,b,c;a.size=12;b.size=24;c.size=36;unicode.runs={{1,a},{2,b},{1,c}};
+    if(!App::typeSetCharacterSize(unicode,1,2,18))return false;
+    styles=unicode.characterStyles();return styles.size()==3&&styles[0].size==12&&styles[1].size==18&&styles[2].size==36;
+}
+// after PhotoCraft (crates/engine/src/cmd/type_cmds.rs style_range): tracking edits target the
+// selected characters and preserve the other character styles.
+static bool typeTrackingEditsRespectSelectionScope() {
+    Text text;text.str="Hello world";TextStyle first,second;first.tracking=-20;second.tracking=80;text.runs={{6,first},{5,second}};
+    if(!App::typeSetCharacterTracking(text,6,11,150))return false;
+    auto styles=text.characterStyles();if(styles.size()!=11||styles[0].tracking!=-20||styles[5].tracking!=-20||styles[6].tracking!=150||styles[10].tracking!=150)return false;
+    if(!App::typeSetCharacterTracking(text,0,0,-50))return false;
+    styles=text.characterStyles();for(const TextStyle& style:styles)if(style.tracking!=-50)return false;
+    if(!App::typeSetCharacterTracking(text,3,3,20000))return false;
+    styles=text.characterStyles();for(const TextStyle& style:styles)if(style.tracking!=10000)return false;
+    return true;
+}
 // after PhotoCraft (crates/engine/src/cmd/type_cmds.rs type.edit kernPair): manual kerning starts
 // at the font's current pair spacing, persists per character, and rejects line edges.
 static bool typeManualPairKerningStartsFromMetrics() {
@@ -696,6 +735,9 @@ int runSelfTests() {
         {"Type style shortcuts toggle selected character runs", typeCharacterStyleShortcutsToggleSelections},
         {"rich text all caps changes rasterized glyphs and persists", richTextAllCapsRendersAndPersists},
         {"Type edits preserve character and paragraph runs", typeEditingPreservesCharacterAndParagraphRuns},
+        {"Type tabs use PhotoCraft tab stops and wrap widths", typeTabsUsePhotoCraftStops},
+        {"Type size edits respect selection scope", typeSizeEditsRespectSelectionScope},
+        {"Type tracking edits respect selection scope", typeTrackingEditsRespectSelectionScope},
         {"manual Type pair kerning starts from font metrics", typeManualPairKerningStartsFromMetrics},
         {"type modified deletion uses PhotoCraft boundaries", typeModifiedDeletionMatchesPhotoCraft},
         {"type multi-click count cycle matches PhotoCraft", typeMultiClickCountsMatchPhotoCraft},

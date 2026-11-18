@@ -3135,6 +3135,43 @@ bool typeApplyEditorText(Text& text,const std::string& updated){
     }
     return text.replaceText(prefixOld,suffixOld,updated.substr(prefixNew,suffixNew-prefixNew));
 }
+// after PhotoCraft (crates/engine/src/cmd/type_cmds.rs type.setStyle): a selected range gets
+// the new size while an empty range applies it to the whole text layer.
+bool typeSetCharacterSize(Text& text,size_t start,size_t end,float size){
+    if(!std::isfinite(size))return false;size=std::clamp(size,4.0f,1000.0f);
+    if(text.str.empty()){
+        auto runs=text.normalizedRuns();if(runs.empty())return false;
+        if(runs.front().style.size==size&&text.size==size)return false;
+        runs.front().style.size=size;text.runs={{0,runs.front().style}};text.syncSummary();return true;
+    }
+    auto styles=text.characterStyles();if(styles.empty())return false;
+    start=std::min(start,styles.size());end=std::min(end,styles.size());
+    if(start>=end){start=0;end=styles.size();}
+    bool changed=false;for(size_t i=start;i<end;++i){changed|=styles[i].size!=size;styles[i].size=size;}
+    if(!changed)return false;
+    text.runs.clear();size_t byte=0;
+    for(const TextStyle& style:styles){const unsigned char c=(unsigned char)text.str[byte];const size_t n=c<0x80?1:c<0xe0?2:c<0xf0?3:4;
+        if(!text.runs.empty()&&text.runs.back().style==style)text.runs.back().bytes+=n;else text.runs.push_back({n,style});byte=std::min(text.str.size(),byte+n);}
+    text.syncSummary();return true;
+}
+// after PhotoCraft (crates/engine/src/cmd/type_cmds.rs style_range): tracking remains per
+// character, with an empty selection applying the value to the whole text layer.
+bool typeSetCharacterTracking(Text& text,size_t start,size_t end,float tracking){
+    if(!std::isfinite(tracking))return false;tracking=std::clamp(tracking,-1000.0f,10000.0f);
+    if(text.str.empty()){
+        auto runs=text.normalizedRuns();if(runs.empty())return false;
+        if(runs.front().style.tracking==tracking&&text.tracking==tracking)return false;
+        runs.front().style.tracking=tracking;text.runs={{0,runs.front().style}};text.syncSummary();return true;
+    }
+    auto styles=text.characterStyles();if(styles.empty())return false;
+    start=std::min(start,styles.size());end=std::min(end,styles.size());if(start>=end){start=0;end=styles.size();}
+    bool changed=false;for(size_t i=start;i<end;++i){changed|=styles[i].tracking!=tracking;styles[i].tracking=tracking;}
+    if(!changed)return false;
+    text.runs.clear();size_t byte=0;
+    for(const TextStyle& style:styles){const unsigned char c=(unsigned char)text.str[byte];const size_t n=c<0x80?1:c<0xe0?2:c<0xf0?3:4;
+        if(!text.runs.empty()&&text.runs.back().style==style)text.runs.back().bytes+=n;else text.runs.push_back({n,style});byte=std::min(text.str.size(),byte+n);}
+    text.syncSummary();return true;
+}
 // after PhotoCraft (crates/ui-egui/src/tools/type_tool/editing.rs step_char_metric): selected
 // characters move from their own metric value, and a collapsed range in non-empty text is inert.
 bool typeStepCharacterMetric(Text& text,size_t start,size_t end,int metric,float by,float dpi,float layerScaleY){
@@ -3337,7 +3374,7 @@ static void typeEditor() {
     if(modifiedDelete){typeIo.KeyCtrl=typeIo.KeyAlt=typeIo.KeySuper=false;}
     if(typeSmartQuoteScriptStage==2){ImGuiIO& io=ImGui::GetIO();io.InputQueueCharacters.clear();for(ImWchar c:{'h','i',' ','"','y','o','u','"'})io.InputQueueCharacters.push_back(c);typeSmartQuoteScriptStage=3;}
     if(ImGui::IsWindowFocused())typeMapQueuedSmartQuotes(ImGui::GetInputTextState(typeInputId));
-    if (ImGui::InputTextMultiline("##tb", typeBuf, sizeof typeBuf, ImVec2(360, ImGui::GetTextLineHeight() * 4 + 8))) {
+    if (ImGui::InputTextMultiline("##tb", typeBuf, sizeof typeBuf, ImVec2(360, ImGui::GetTextLineHeight() * 4 + 8), ImGuiInputTextFlags_AllowTabInput)) {
         if (!typeMaskEditing) { Layer& L = doc.layers[typeLayer];Text updated=L.text;if(typeApplyEditorText(updated,typeBuf)){
             typeRemember("Edit Text");L.text=std::move(updated);renderFill(doc,L);changed();L.name=textLayerName(L.text.str);}}
         else typeApplyEditorText(typeMask,typeBuf);
@@ -5028,7 +5065,17 @@ static void optionsBar() {
                 t.pathText = true; t.pathFlip = false; ch = true;
             }
         }
-        ImGui::SameLine(0, 10); edited(sliderF("Size", &t.size, 4, 1000, "%.0f px", ImGuiSliderFlags_Logarithmic));
+        ImGui::SameLine(0, 10);
+        const float rawScale=std::sqrt(std::abs(t.scaleX*t.scaleY));const float sizeScale=std::isfinite(rawScale)&&rawScale>1e-3f?rawScale:1.0f;
+        const auto sizeStyles=t.characterStyles();
+        const bool hasSizeSelection=live&&typeStyleSelectionValid&&typeStyleSelectionLayer==typeLayer&&typeStyleSelectionStart<typeStyleSelectionEnd&&!sizeStyles.empty();
+        const size_t sizeStart=hasSizeSelection?std::min(typeStyleSelectionStart,sizeStyles.size()):0;
+        const size_t sizeEnd=hasSizeSelection?std::min(typeStyleSelectionEnd,sizeStyles.size()):0;
+        float shownSize=(hasSizeSelection?sizeStyles[sizeStart].size:t.size)*sizeScale;
+        if(sliderF("Size",&shownSize,4,1000,"%.0f px",ImGuiSliderFlags_Logarithmic)){
+            Text updated=t;const bool sizeChanged=typeSetCharacterSize(updated,sizeStart,sizeEnd,shownSize/sizeScale);
+            if(sizeChanged)t=std::move(updated);edited(sizeChanged);
+        }else edited(false);
         if (live && L.fill.kind == FILL_SOLID) { ImGui::SameLine(0, 10); edited(ImGui::ColorEdit3("##tc", L.fill.colour, ImGuiColorEditFlags_NoInputs)); }
         ImGui::SameLine(0, 14);
         const char* al[] = {t.vertical ? "Top" : "Left", t.vertical ? "Middle" : "Centre", t.vertical ? "Bottom" : "Right"};
@@ -5039,7 +5086,12 @@ static void optionsBar() {
             if (ImGui::Button(al[k])) { if (live) typeRemember("Align"); t.align = k; ch = true; }
             if (on) ImGui::PopStyleColor();
         }
-        ImGui::SameLine(0, 14); edited(sliderF("Tracking", &t.tracking, -200, 1000, "%.0f"));
+        ImGui::SameLine(0, 14);
+        float shownTracking=hasSizeSelection?sizeStyles[sizeStart].tracking:t.tracking;
+        if(sliderF("Tracking",&shownTracking,-1000,10000,"%.0f")){
+            Text updated=t;const bool trackingChanged=typeSetCharacterTracking(updated,sizeStart,sizeEnd,shownTracking);
+            if(trackingChanged)t=std::move(updated);edited(trackingChanged);
+        }else edited(false);
         ImGui::SameLine(0, 14); edited(sliderF("Leading", &t.leading, 0.5f, 3.0f, "%.2f"));
         ImGui::SameLine(0, 14); edited(sliderF("Rotate", &t.rotation, -180, 180, "%.1f°"));
         ImGui::SameLine(0, 14); edited(sliderF("Scale X", &t.scaleX, 0.1f, 10, "%.2f", ImGuiSliderFlags_Logarithmic));
@@ -6816,6 +6868,33 @@ void script(const std::string& what) {
         effects.runs={{5,bold},{7,italic},{10,underline},{6,strike}};addTextLayer(doc,effects,fill);Toolbar::select(Toolbar::TYPE_H);syncTool();fitNext=true;
         std::vector<float> coverage;float box[4];const bool rendered=textCoverage(doc.cur().text,doc.w,doc.h,coverage,box,doc.dpi);
         fprintf(stderr,"type-rich-runs: %s; per-run font/size/tracking/leading/scale/baseline/weight/italic/decorations\n",rendered?"rendered":"failed");return;
+    }
+    if (what == "type-tabs") {
+        doc=newDoc(520,320,false);hist=History();Text tabs;tabs.str="Name\tValue\nA\tLonger\tB";tabs.font=defaultFont();tabs.size=36;tabs.x=36;tabs.y=46;tabs.boxWidth=260;tabs.boxHeight=200;
+        Fill fill;fill.kind=FILL_SOLID;for(int i=0;i<3;++i)fill.colour[i]=fg[i]/255.0f;addTextLayer(doc,tabs,fill);Toolbar::select(Toolbar::TYPE_H);syncTool();fitNext=true;
+        std::vector<float> coverage;float box[4];const bool rendered=textCoverage(doc.cur().text,doc.w,doc.h,coverage,box,doc.dpi);
+        const bool preserved=doc.cur().text.str=="Name\tValue\nA\tLonger\tB"&&textAdvance(doc.cur().text)>36;
+        fprintf(stderr,"type-tabs: %s; editable tab characters advance to 36 pt stops and wrapped text renders\n",rendered&&preserved?"passed":"failed");return;
+    }
+    if (what == "type-size-selection") {
+        doc=newDoc(520,320,false);hist=History();Text sample;sample.str="Hello world";sample.font=defaultFont();sample.size=30;sample.x=36;sample.y=70;
+        TextStyle first;first.font=sample.font;first.size=30;TextStyle second=first;second.size=20;sample.runs={{6,first},{5,second}};
+        Fill fill;fill.kind=FILL_SOLID;for(int i=0;i<3;++i)fill.colour[i]=fg[i]/255.0f;addTextLayer(doc,sample,fill);
+        Toolbar::select(Toolbar::TYPE_H);syncTool();typeLayer=doc.active;typeMaskEditing=false;typeStyleSelectionStart=6;typeStyleSelectionEnd=11;typeStyleSelectionLayer=typeLayer;typeStyleSelectionValid=true;
+        Text updated=doc.cur().text;const bool applied=typeSetCharacterSize(updated,6,11,42);if(applied){doc.cur().text=std::move(updated);renderFill(doc,doc.cur());changed();}
+        const auto styles=doc.cur().text.characterStyles();std::vector<float> coverage;float box[4];const bool rendered=textCoverage(doc.cur().text,doc.w,doc.h,coverage,box,doc.dpi);
+        const bool selected=styles.size()==11&&styles[0].size==30&&styles[5].size==30&&styles[6].size==42&&styles[10].size==42;
+        fitNext=true;fprintf(stderr,"type-size-selection: %s (apply=%d selected=%d rendered=%d sizes=%g,%g,%g); changing the selected run preserves the other characters\n",applied&&selected&&rendered?"passed":"failed",applied,selected,rendered,styles.empty()?0:styles[0].size,styles.size()>6?styles[6].size:0,styles.size()>10?styles[10].size:0);return;
+    }
+    if (what == "type-tracking-selection") {
+        doc=newDoc(520,320,false);hist=History();Text sample;sample.str="Hello world";sample.font=defaultFont();sample.size=32;sample.x=36;sample.y=70;
+        TextStyle first;first.font=sample.font;first.size=32;first.tracking=-10;TextStyle second=first;second.tracking=0;sample.runs={{6,first},{5,second}};
+        Fill fill;fill.kind=FILL_SOLID;for(int i=0;i<3;++i)fill.colour[i]=fg[i]/255.0f;addTextLayer(doc,sample,fill);
+        Toolbar::select(Toolbar::TYPE_H);syncTool();typeLayer=doc.active;typeMaskEditing=false;typeStyleSelectionStart=6;typeStyleSelectionEnd=11;typeStyleSelectionLayer=typeLayer;typeStyleSelectionValid=true;
+        Text updated=doc.cur().text;const bool applied=typeSetCharacterTracking(updated,6,11,160);if(applied){doc.cur().text=std::move(updated);renderFill(doc,doc.cur());changed();}
+        const auto styles=doc.cur().text.characterStyles();std::vector<float> coverage;float box[4];const bool rendered=textCoverage(doc.cur().text,doc.w,doc.h,coverage,box,doc.dpi);
+        const bool selected=styles.size()==11&&styles[0].tracking==-10&&styles[5].tracking==-10&&styles[6].tracking==160&&styles[10].tracking==160;
+        fitNext=true;fprintf(stderr,"type-tracking-selection: %s; selected tracking changes while the leading run stays intact\n",applied&&selected&&rendered?"passed":"failed");return;
     }
     if (what == "text") {   // tests: horizontal and vertical text layers, centred, a Type Mask selection
         Toolbar::select(Toolbar::TYPE_H); syncTool();
