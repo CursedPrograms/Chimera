@@ -3078,6 +3078,60 @@ static size_t typeByteOffset(const std::string& text,size_t codepoints){
     while(at<text.size()&&count<codepoints){const unsigned char c=(unsigned char)text[at];at+=c<0x80?1:c<0xe0?2:c<0xf0?3:4;++count;}
     return std::min(at,text.size());
 }
+// after PhotoCraft (crates/text/src/layout/navigate.rs line_edge): Home and End target
+// the active visual row, including the editor's soft wraps, and preserve Shift's anchor.
+bool typeMoveEditorLineEdge(ImGuiInputTextState* state,const std::string& text,bool end,int cursor,int anchor,bool hadSelection,bool extend){
+    if(!state)return false;
+    cursor=std::clamp(cursor,0,state->CurLenW);
+    if(state->Ctx){
+        state->Stb.cursor=cursor;state->Stb.select_start=extend&&hadSelection?anchor:cursor;state->Stb.select_end=cursor;
+        state->OnKeyPressed((end?0x200005:0x200004)|(extend?0x400000:0));
+        state->CursorFollow=true;state->CursorAnimReset();
+        return true;
+    }
+    const size_t character=typeCodepointIndex(state,cursor),byte=typeByteOffset(text,character);
+    const size_t lineStart=byte?([&](){const size_t p=text.rfind('\n',byte-1);return p==std::string::npos?size_t(0):p+1;})():0;
+    const size_t foundEnd=text.find('\n',byte),lineEnd=foundEnd==std::string::npos?text.size():foundEnd;
+    const size_t destination=typeCodepointsBeforeByte(text,end?lineEnd:lineStart);
+    const int dest=typeWcharIndex(state,destination);
+    state->Stb.cursor=state->Stb.select_end=dest;state->Stb.select_start=extend?(hadSelection?anchor:cursor):dest;
+    state->Stb.has_preferred_x=0;state->CursorFollow=true;state->CursorAnimReset();
+    return true;
+}
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/editing.rs step_char_metric): selected
+// characters move from their own metric value, and a collapsed range in non-empty text is inert.
+bool typeStepCharacterMetric(Text& text,size_t start,size_t end,int metric,float by,float dpi,float layerScaleY){
+    if(!std::isfinite(by))return false;
+    auto adjust=[&](TextStyle& style){
+        if(metric==0){
+            const float size=std::max(1.0f,std::isfinite(style.size)?style.size:text.size);
+            const float vscale=std::isfinite(style.verticalScale)&&style.verticalScale>0?style.verticalScale:1.0f;
+            const float yscale=std::isfinite(layerScaleY)&&layerScaleY>0?layerScaleY:1.0f;
+            const float resolution=std::isfinite(dpi)&&dpi>0?dpi/72.0f:1.0f;
+            const float current=std::isfinite(style.leading)&&style.leading>0?style.leading:1.2f;
+            const float points=current*size*vscale*yscale/resolution;
+            style.leading=std::clamp(points+by,.01f,5000.0f)*resolution/(size*vscale*yscale);
+        }else if(metric==1)style.baselineShift=std::clamp((std::isfinite(style.baselineShift)?style.baselineShift:0.0f)+by,-5000.0f,5000.0f);
+        else if(metric==2)style.tracking=std::clamp((std::isfinite(style.tracking)?style.tracking:0.0f)+by,-1000.0f,10000.0f);
+    };
+    if(text.str.empty()){
+        if(start||end)return false;
+        auto runs=text.normalizedRuns();if(runs.empty())return false;
+        const TextStyle before=runs.front().style;adjust(runs.front().style);if(before==runs.front().style)return false;
+        text.runs={{0,runs.front().style}};text.syncSummary();return true;
+    }
+    const auto styles=text.characterStyles();const size_t count=styles.size();start=std::min(start,count);end=std::min(end,count);
+    if(start>=end)return false;
+    std::vector<TextStyle> changedStyles=styles;for(size_t i=start;i<end;++i)adjust(changedStyles[i]);
+    text.runs.clear();size_t byte=0;
+    for(size_t i=0;i<changedStyles.size();++i){
+        const unsigned char c=(unsigned char)text.str[byte];const size_t n=c<0x80?1:c<0xe0?2:c<0xf0?3:4;
+        if(!text.runs.empty()&&text.runs.back().style==changedStyles[i])text.runs.back().bytes+=n;
+        else text.runs.push_back({n,changedStyles[i]});
+        byte=std::min(text.str.size(),byte+n);
+    }
+    text.syncSummary();return true;
+}
 // after PhotoCraft (crates/ui-egui/src/tools/type_tool/keys.rs handle_delete_key): modified
 // deletion uses PhotoCraft word boundaries and Command/Ctrl+Backspace stops at the line edge.
 bool typePrepareModifiedDelete(ImGuiInputTextState* state,const std::string& text,bool backspace,bool ctrl,bool alt,bool mac,bool super){
@@ -3184,10 +3238,13 @@ static void typeEditor() {
     const bool moveWordRight=ImGui::IsWindowFocused()&&ImGui::IsKeyPressed(ImGuiKey_RightArrow)&&wordModifier;
     const bool moveDocumentStart=ImGui::IsWindowFocused()&&ImGui::IsKeyPressed(ImGuiKey_UpArrow)&&documentModifier;
     const bool moveDocumentEnd=ImGui::IsWindowFocused()&&ImGui::IsKeyPressed(ImGuiKey_DownArrow)&&documentModifier;
+    const bool moveLineStart=ImGui::IsWindowFocused()&&ImGui::IsKeyPressed(ImGuiKey_Home,true);
+    const bool moveLineEnd=ImGui::IsWindowFocused()&&ImGui::IsKeyPressed(ImGuiKey_End,true);
     ImGuiIO& typeIo=ImGui::GetIO();
     const int movementCursor=movementState?movementState->GetCursorPos():0,movementAnchor=movementState?movementState->GetSelectionStart():0;
     const int movementSelectionEnd=movementState?movementState->GetSelectionEnd():0;
     const int movementSelectionAnchor=movementState?movementState->Stb.select_start:0;
+    const int movementSelectionActive=movementState?movementState->Stb.select_end:0;
     const bool movementSelected=movementState&&movementState->HasSelection(),movementExtend=ImGui::GetIO().KeyShift;
     int verticalDirection=0;
     if(t.vertical&&ImGui::IsWindowFocused()&&!typeIo.KeyCtrl&&!typeIo.KeyAlt&&!typeIo.KeySuper){
@@ -3195,6 +3252,13 @@ static void typeEditor() {
         else if(ImGui::IsKeyPressed(ImGuiKey_DownArrow,true))verticalDirection=1;
         else if(ImGui::IsKeyPressed(ImGuiKey_LeftArrow,true))verticalDirection=2;
         else if(ImGui::IsKeyPressed(ImGuiKey_RightArrow,true))verticalDirection=-2;
+    }
+    int typeMetric=-1;float typeMetricBy=0;
+    const bool typeCommand=typeIo.ConfigMacOSXBehaviors?typeIo.KeySuper:typeIo.KeyCtrl;
+    if(ImGui::IsWindowFocused()&&typeIo.KeyAlt&&
+       (ImGui::IsKeyPressed(ImGuiKey_UpArrow,true)||ImGui::IsKeyPressed(ImGuiKey_DownArrow,true))){
+        const bool up=ImGui::IsKeyPressed(ImGuiKey_UpArrow,true);const float amount=typeCommand?10.0f:2.0f;
+        typeMetric=typeIo.KeyShift?1:0;typeMetricBy=typeIo.KeyShift?(up?amount:-amount):(up?-amount:amount);
     }
     const bool modifiedDelete=ImGui::IsWindowFocused()&&(ImGui::IsKeyPressed(ImGuiKey_Backspace)||ImGui::IsKeyPressed(ImGuiKey_Delete))&&
         typePrepareModifiedDelete(movementState,typeBuf,ImGui::IsKeyPressed(ImGuiKey_Backspace),typeIo.KeyCtrl,typeIo.KeyAlt,typeIo.ConfigMacOSXBehaviors,typeIo.KeySuper);
@@ -3209,6 +3273,18 @@ static void typeEditor() {
     }
     if(modifiedDelete){typeIo.KeyCtrl=savedCtrl;typeIo.KeyAlt=savedAlt;typeIo.KeySuper=savedSuper;}
     if(verticalDirection)typeMoveVerticalCaret(ImGui::GetInputTextState(typeInputId),typeBuf,movementCursor,movementAnchor,movementSelectionEnd,movementSelectionAnchor,movementSelected,verticalDirection,movementExtend);
+    if(typeMetric>=0){
+        if(ImGuiInputTextState* state=ImGui::GetInputTextState(typeInputId)){
+            state->Stb.cursor=movementCursor;state->Stb.select_start=movementSelectionAnchor;state->Stb.select_end=movementSelectionActive;
+            const size_t start=typeCodepointIndex(state,state->GetSelectionStart()),end=typeCodepointIndex(state,state->GetSelectionEnd());
+            Text* target=typeMaskEditing?&typeMask:(typeLayer>=0&&typeLayer<(int)doc.layers.size()&&doc.layers[typeLayer].isText()?&doc.layers[typeLayer].text:nullptr);
+            if(target){Text updated=*target;if(typeStepCharacterMetric(updated,start,end,typeMetric,typeMetricBy,doc.dpi,updated.scaleY)){
+                typeRemember(typeMetric==0?"Leading":"Baseline Shift");*target=std::move(updated);
+                if(!typeMaskEditing){renderFill(doc,doc.layers[typeLayer]);changed();}
+            }}
+        }
+    }
+    if(moveLineStart||moveLineEnd)typeMoveEditorLineEdge(ImGui::GetInputTextState(typeInputId),typeBuf,moveLineEnd,movementCursor,movementSelectionAnchor,movementSelected,movementExtend);
     if(ImGui::IsItemHovered()&&ImGui::IsMouseClicked(ImGuiMouseButton_Left)){
         const int owner=typeMaskEditing?-2:typeLayer;
         const unsigned previous=typeClickOwner==owner?typeClickRun:0;
@@ -6058,6 +6134,24 @@ void script(const std::string& what) {
         const bool back=typeMoveVerticalCaret(&state,text,6,6,6,6,false,-2,false)&&state.GetCursorPos()==1;
         Toolbar::select(Toolbar::TYPE_V);syncTool();typeLayer=0;typeMaskEditing=false;snprintf(typeBuf,sizeof(typeBuf),"%s",vertical.str.c_str());typeFocus=true;fitNext=true;
         fprintf(stderr,"type-vertical-arrows: %s; column moves preserve the inline character offset and return to the prior column\n",forward&&back?"passed":"failed");return;
+    }
+    if (what == "type-line-navigation") {
+        doc=newDoc(480,320,false);hist=History();Text sample;sample.str="Home and End\nfollow the current row";sample.x=44;sample.y=116;sample.size=34;sample.boxWidth=340;sample.boxHeight=100;
+        Fill fill;fill.kind=FILL_SOLID;for(int i=0;i<3;++i)fill.colour[i]=fg[i]/255.0f;addTextLayer(doc,sample,fill);doc.active=0;
+        const std::string value="alpha\nbeta\n";ImGuiInputTextState state;for(char c:value)state.TextW.push_back((ImWchar)c);state.CurLenW=(int)value.size();state.Stb.cursor=state.Stb.select_start=state.Stb.select_end=8;
+        const bool home=typeMoveEditorLineEdge(&state,value,false,8,8,false,false)&&state.GetCursorPos()==6;
+        const bool end=typeMoveEditorLineEdge(&state,value,true,8,8,false,false)&&state.GetCursorPos()==10;
+        Toolbar::select(Toolbar::TYPE_H);syncTool();typeLayer=0;typeMaskEditing=false;snprintf(typeBuf,sizeof(typeBuf),"%s",sample.str.c_str());typeFocus=true;fitNext=true;
+        fprintf(stderr,"type-line-navigation: %s; Home/End select the current row's start and end\n",home&&end?"passed":"failed");return;
+    }
+    if (what == "type-metric-shortcuts") {
+        doc=newDoc(480,320,false);hist=History();Text sample;sample.str="Leading and baseline";sample.x=44;sample.y=116;sample.size=40;
+        TextStyle selected;selected.font=sample.font;selected.size=sample.size;selected.leading=sample.leading;sample.runs={{sample.str.size(),selected}};
+        Text updated=sample;const bool leading=typeStepCharacterMetric(updated,0,updated.str.size(),0,2,doc.dpi,updated.scaleY);
+        const bool baseline=typeStepCharacterMetric(updated,0,updated.str.size(),1,2,doc.dpi,updated.scaleY);
+        Fill fill;fill.kind=FILL_SOLID;for(int i=0;i<3;++i)fill.colour[i]=fg[i]/255.0f;addTextLayer(doc,updated,fill);doc.active=0;
+        Toolbar::select(Toolbar::TYPE_H);syncTool();fitNext=true;
+        fprintf(stderr,"type-metric-shortcuts: %s; selected text stores per-character leading and baseline steps\n",leading&&baseline?"passed":"failed");return;
     }
     if (what == "type-shift-click") {
         doc=newDoc(480,320,false);hist=History();Text existing;existing.str="Existing words";existing.x=60;existing.y=140;existing.size=52;Fill fill;fill.kind=FILL_SOLID;for(int i=0;i<3;++i)fill.colour[i]=fg[i]/255.0f;addTextLayer(doc,existing,fill);

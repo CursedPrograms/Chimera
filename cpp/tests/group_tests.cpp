@@ -15,6 +15,8 @@
 namespace App {
 bool typeMoveDocumentEdge(ImGuiInputTextState* state, bool end, int cursor, int anchor, bool hadSelection, bool extend);
 bool typeMoveVerticalCaret(ImGuiInputTextState* state, const std::string& text, int cursor, int selectionStart, int selectionEnd, int selectionAnchor, bool hadSelection, int direction, bool extend);
+bool typeMoveEditorLineEdge(ImGuiInputTextState* state, const std::string& text, bool end, int cursor, int anchor, bool hadSelection, bool extend);
+bool typeStepCharacterMetric(Text& text, size_t start, size_t end, int metric, float by, float dpi, float layerScaleY);
 bool typeMoveWordCaret(ImGuiInputTextState* state, const std::string& text, int cursor, int anchor, bool hadSelection, bool forward, bool extend);
 bool typeWordNavigationShortcut(bool ctrl, bool alt, bool shift, bool mac, bool super);
 bool typeDocumentNavigationShortcut(bool ctrl, bool alt, bool mac, bool super);
@@ -405,6 +407,39 @@ static bool verticalTypeArrowsFollowTextColumns() {
     state.Stb.cursor=1;state.Stb.select_start=4;state.Stb.select_end=1;
     return App::typeMoveVerticalCaret(&state,text,1,1,4,4,true,1,true)&&state.GetCursorPos()==2&&state.Stb.select_start==4;
 }
+// after PhotoCraft (crates/text/src/layout/navigate.rs line_edge): Home/End use visual-row
+// bounds and Shift extends from the original anchor.
+static bool typeEditorHomeEndFollowVisualRows() {
+    ImGuiInputTextState state; const std::string text="alpha\nbeta\n";
+    for(char c:text)state.TextW.push_back((ImWchar)c);state.CurLenW=(int)text.size();
+    state.Stb.cursor=state.Stb.select_start=state.Stb.select_end=8;
+    if(!App::typeMoveEditorLineEdge(&state,text,false,8,8,false,false)||state.GetCursorPos()!=6)return false;
+    if(!App::typeMoveEditorLineEdge(&state,text,true,8,8,false,false)||state.GetCursorPos()!=10)return false;
+    state.Stb.cursor=8;state.Stb.select_start=3;state.Stb.select_end=8;
+    if(!App::typeMoveEditorLineEdge(&state,text,false,8,3,true,true)||state.GetCursorPos()!=6||state.Stb.select_start!=3||state.GetSelectionStart()!=3)return false;
+    state.Stb.cursor=3;state.Stb.select_start=8;state.Stb.select_end=3;
+    const bool moved=App::typeMoveEditorLineEdge(&state,text,false,3,8,true,true);
+    const bool correct=state.GetCursorPos()==0&&state.Stb.select_start==8&&state.Stb.select_end==0;
+    return moved&&correct;
+}
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/editing.rs step_char_metric): a selected
+// range steps each character's existing metric, while a collapsed non-empty range does nothing.
+static bool typeCharacterMetricsStepPerRun() {
+    Text text;text.str="A\xc3\xa9Z";text.size=20;
+    TextStyle first;first.size=20;first.leading=1.2f;TextStyle second;second.size=40;second.leading=1.5f;second.tracking=30;
+    text.runs={{1,first},{3,second}};
+    if(!App::typeStepCharacterMetric(text,1,3,2,20,72,1))return false;
+    auto styles=text.characterStyles();
+    if(styles.size()!=3||!(styles[0]==first)||styles[1].tracking!=50||styles[2].tracking!=50)return false;
+    if(App::typeStepCharacterMetric(text,1,1,2,20,72,1))return false;
+    if(!App::typeStepCharacterMetric(text,1,3,1,-2,144,1)||!App::typeStepCharacterMetric(text,1,3,0,2,72,1))return false;
+    styles=text.characterStyles();
+    if(!(styles[0]==first)||std::fabs(styles[1].baselineShift+2)>0.001f||std::fabs(styles[2].leading-1.55f)>0.001f)return false;
+    if(!App::typeStepCharacterMetric(text,1,3,2,20000,72,1))return false;
+    styles=text.characterStyles();if(styles[1].tracking!=10000||styles[2].tracking!=10000)return false;
+    Text empty;empty.size=48;
+    return App::typeStepCharacterMetric(empty,0,0,0,2,72,1)&&std::fabs(empty.normalizedRuns()[0].style.leading-(1.2f+2.0f/48))<0.001f;
+}
 static bool typeModifiedDeletionMatchesPhotoCraft() {
     ImGuiInputTextState state; const std::string text="ab, cd";
     for(char c:text)state.TextW.push_back((ImWchar)c);state.CurLenW=(int)text.size();
@@ -588,6 +623,8 @@ int runSelfTests() {
         {"type document-edge movement preserves Shift anchor", typeDocumentEdgeMovementMatchesPhotoCraft},
         {"type navigation shortcuts respect spacing modifiers", typeNavigationShortcutsMatchPhotoCraft},
         {"vertical Type arrow keys follow columns", verticalTypeArrowsFollowTextColumns},
+        {"Type Home and End follow visual editor rows", typeEditorHomeEndFollowVisualRows},
+        {"Type metric shortcuts step each selected character", typeCharacterMetricsStepPerRun},
         {"type modified deletion uses PhotoCraft boundaries", typeModifiedDeletionMatchesPhotoCraft},
         {"type multi-click count cycle matches PhotoCraft", typeMultiClickCountsMatchPhotoCraft},
         {"type multi-click selects word, line, paragraph and all", typeMultiClickRangesMatchPhotoCraft},
