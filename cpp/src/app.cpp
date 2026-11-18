@@ -139,6 +139,7 @@ static int rtRange = 1; static bool spongeDesat = false, cloneSet = false, clone
 static float cloneSrcX = 0, cloneSrcY = 0, cloneDX = 0, cloneDY = 0;
 static int gradToolStyle = 0; static bool gradToolReverse = false; static float gradToolOpacity = 1.0f;
 static bool cropPending = false, cropDelete = true; static float cropR[4] = {0, 0, 0, 0};
+static int cropDragPart = -1; static float cropBase[4] = {}; static ImVec2 cropDragStart;
 static bool pcropPending = false, pcropCustomSize = false; static float pcropQ[8] = {0};
 static std::vector<ImVec2> pcropClicks; static int pcropDragPart = -1, pcropOutW = 0, pcropOutH = 0;
 static ImVec2 pcropMoveStart; static float pcropMoveQ[8] = {0};
@@ -1708,6 +1709,35 @@ static void applyCrop() {
     sliceActive = -1;
     changed(); selChanged(); fitNext = true;
 }
+
+// after PhotoCraft (crates/ui-egui/src/tools/crop_ui.rs pointer hit and resize): handles stay
+// a fixed screen size, the interior moves the frame, and a press outside starts a new frame.
+static void cropBegin(ImVec2 p) {
+    if(!cropPending) { cropPending=true; cropR[0]=cropR[1]=0; cropR[2]=(float)doc.w; cropR[3]=(float)doc.h; }
+    const float x0=std::min(cropR[0],cropR[2]), x1=std::max(cropR[0],cropR[2]);
+    const float y0=std::min(cropR[1],cropR[3]), y1=std::max(cropR[1],cropR[3]);
+    const ImVec2 h[8]={{x0,y0},{(x0+x1)*.5f,y0},{x1,y0},{x1,(y0+y1)*.5f},{x1,y1},{(x0+x1)*.5f,y1},{x0,y1},{x0,(y0+y1)*.5f}};
+    cropDragPart=-1; const float radius=10.0f/std::max(.01f,zoom);
+    for(int i=0;i<8;++i) if(std::hypot(p.x-h[i].x,p.y-h[i].y)<=radius) { cropDragPart=i; break; }
+    if(cropDragPart<0 && p.x>=x0 && p.x<=x1 && p.y>=y0 && p.y<=y1) cropDragPart=8;
+    std::copy(cropR,cropR+4,cropBase); cropDragStart=p;
+    if(cropDragPart<0) { cropDragPart=9; cropR[0]=cropR[2]=p.x; cropR[1]=cropR[3]=p.y; }
+}
+static void cropDragTo(ImVec2 p) {
+    const float dx=p.x-cropDragStart.x, dy=p.y-cropDragStart.y;
+    float x0=cropBase[0],y0=cropBase[1],x1=cropBase[2],y1=cropBase[3];
+    if(x0>x1)std::swap(x0,x1); if(y0>y1)std::swap(y0,y1);
+    if(cropDragPart==9) { cropR[2]=p.x; cropR[3]=p.y; return; }
+    if(cropDragPart==8) { const float w=x1-x0,h=y1-y0; x0=std::clamp(x0+dx,0.0f,std::max(0.0f,(float)doc.w-w)); y0=std::clamp(y0+dy,0.0f,std::max(0.0f,(float)doc.h-h)); x1=x0+w;y1=y0+h; }
+    else {
+        if(cropDragPart==0||cropDragPart==6||cropDragPart==7)x0=std::clamp(x0+dx,0.0f,x1-1);
+        if(cropDragPart==1||cropDragPart==2||cropDragPart==3){}
+        if(cropDragPart==2||cropDragPart==3||cropDragPart==4)x1=std::clamp(x1+dx,x0+1,(float)doc.w);
+        if(cropDragPart==0||cropDragPart==1||cropDragPart==2)y0=std::clamp(y0+dy,0.0f,y1-1);
+        if(cropDragPart==4||cropDragPart==5||cropDragPart==6)y1=std::clamp(y1+dy,y0+1,(float)doc.h);
+    }
+    cropR[0]=x0;cropR[1]=y0;cropR[2]=x1;cropR[3]=y1;
+}
 // Check that the four corners make a nondegenerate convex quadrilateral.
 static bool pcropValid(const float q[8]) {
     double area = 0;
@@ -2997,7 +3027,7 @@ static void canvasInput() {
         }
         case T_CROP:
             if (cropPending && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) { applyCrop(); dragging = false; }
-            else { cropPending = true; cropR[0] = cropR[2] = c.x; cropR[1] = cropR[3] = c.y; }
+            else cropBegin(c);
             break;
         case T_PCROP:
             pcropDragPart = -1;
@@ -3256,7 +3286,7 @@ static void canvasInput() {
             break;
         case T_LASSO: if (std::hypot(c.x - lasso[lasso.size() - 2], c.y - lasso.back()) * zoom > 2) { lasso.push_back(c.x); lasso.push_back(c.y); } break;
         case T_DROPPER: pickColour(c, io.KeyAlt); break;
-        case T_CROP: cropR[2] = c.x; cropR[3] = c.y; break;
+        case T_CROP: cropDragTo(c); break;
         case T_PCROP:
             if (pcropDragPart >= 0) { pcropQ[pcropDragPart * 2] = c.x; pcropQ[pcropDragPart * 2 + 1] = c.y; }
             else if (pcropDragPart == -2) {
@@ -3335,7 +3365,7 @@ static void canvasInput() {
             break;
         case T_LASSO: if (lasso.size() >= 6) finishShape(shapePolygon(doc, lasso), modeFromKeys(), "Lasso"); lasso.clear(); break;
         case T_BRUSH: case T_ERASER: case T_PENCIL: case T_RETOUCH: strokeEnd(stroke); break;
-        case T_CROP: if (std::fabs(cropR[2] - cropR[0]) < 2 || std::fabs(cropR[3] - cropR[1]) < 2) cropPending = false; break;
+        case T_CROP: if (std::fabs(cropR[2] - cropR[0]) < 2 || std::fabs(cropR[3] - cropR[1]) < 2) cropPending = false; cropDragPart=-1; break;
         case T_PCROP:
             if (pcropDragPart == -1) {
                 if (std::hypot(c.x - dragStart.x, c.y - dragStart.y) * zoom >= 3) {
@@ -3682,6 +3712,8 @@ static void drawCanvas() {
             dl->AddLine(ImVec2(q0.x + (q1.x-q0.x)*t, q0.y + (q1.y-q0.y)*t), ImVec2(q3.x + (q2.x-q3.x)*t, q3.y + (q2.y-q3.y)*t), IM_COL32(255, 255, 255, 90));
             dl->AddLine(ImVec2(q0.x + (q3.x-q0.x)*t, q0.y + (q3.y-q0.y)*t), ImVec2(q1.x + (q2.x-q1.x)*t, q1.y + (q2.y-q1.y)*t), IM_COL32(255, 255, 255, 90));
         }
+        const ImVec2 handles[8]={q0,ImVec2((q0.x+q1.x)*.5f,(q0.y+q1.y)*.5f),q1,ImVec2((q1.x+q2.x)*.5f,(q1.y+q2.y)*.5f),q2,ImVec2((q2.x+q3.x)*.5f,(q2.y+q3.y)*.5f),q3,ImVec2((q3.x+q0.x)*.5f,(q3.y+q0.y)*.5f)};
+        for(const ImVec2 h:handles) { dl->AddRectFilled(ImVec2(h.x-3,h.y-3),ImVec2(h.x+3,h.y+3),IM_COL32(255,255,255,240)); dl->AddRect(ImVec2(h.x-3,h.y-3),ImVec2(h.x+3,h.y+3),IM_COL32(30,30,30,255)); }
     }
     if (tool == T_PCROP && pcropPending) {
         ImVec2 q[4];
@@ -5246,6 +5278,18 @@ static bool jobRunning() { return !clOut.empty() || !btOut.empty() || !mmRun.out
 bool busy() { return jobRunning() || Changeling::stepsLoading(); }
 
 void script(const std::string& what) {
+    if (what == "crop-handles") {
+        Toolbar::select(Toolbar::CROP); syncTool();
+        cropR[0]=doc.w*.2f; cropR[1]=doc.h*.2f; cropR[2]=doc.w*.8f; cropR[3]=doc.h*.8f;
+        const ImVec2 corner(cropR[2],cropR[3]); cropBegin(corner); cropDragTo(ImVec2(corner.x-24,corner.y-18));
+        const bool resized=cropDragPart==4 && std::fabs(cropR[2]-doc.w*.8f+24)<1 && std::fabs(cropR[3]-doc.h*.8f+18)<1;
+        cropBegin(ImVec2((cropR[0]+cropR[2])*.5f,(cropR[1]+cropR[3])*.5f));
+        const float x=cropR[0], y=cropR[1]; cropDragTo(ImVec2(cropDragStart.x+12,cropDragStart.y+9));
+        const bool moved=cropDragPart==8 && std::fabs(cropR[0]-x-12)<1 && std::fabs(cropR[1]-y-9)<1;
+        cropDragPart=-1;
+        fprintf(stderr,"crop-handles: %s; corner resize %d, interior move %d\n",resized&&moved?"passed":"failed",resized?1:0,moved?1:0);
+        return;
+    }
     if (what == "crop-frame") {
         Toolbar::select(Toolbar::CROP); syncTool();
         const bool ok=cropPending && cropR[0]==0 && cropR[1]==0 && cropR[2]==doc.w && cropR[3]==doc.h;
