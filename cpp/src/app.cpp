@@ -152,6 +152,7 @@ static char cropWidth[40] = "", cropHeight[40] = "", cropResolution[40] = "";
 static bool cropResolutionCm = false;
 // after PhotoCraft (crates/ui-egui/src/tools/crop_straighten.rs)
 static bool straightenArmed=false, straightenLine=false, straightenFit=false;
+static bool cropClassicMode=false, cropAutoCenter=true;
 static ImVec2 straightenStart,straightenEnd;
 struct CropPreset { std::string name,width,height,resolution; bool cm=false; };
 static std::vector<CropPreset> cropUserPresets;
@@ -4192,6 +4193,7 @@ static void optionsBar() {
         if(ImGui::BeginPopupModal("New Crop Preset",nullptr,ImGuiWindowFlags_AlwaysAutoResize)){ImGui::TextUnformatted("Name:");ImGui::InputText("##newCropPresetName",cropNewName,sizeof(cropNewName));if(ImGui::Button("Save",ImVec2(90,0))&&cropNewName[0]&&cropWidth[0]&&cropHeight[0]){CropPreset p{cropNewName,cropWidth,cropHeight,cropResolution,cropResolutionCm};auto it=std::find_if(cropUserPresets.begin(),cropUserPresets.end(),[&](const CropPreset&q){return q.name==p.name;});if(it==cropUserPresets.end())cropUserPresets.push_back(p);else *it=p;cropSavedChoice=(int)(std::find_if(cropUserPresets.begin(),cropUserPresets.end(),[&](const CropPreset&q){return q.name==p.name;})-cropUserPresets.begin());cropSaveUserPresets();ImGui::CloseCurrentPopup();}ImGui::SameLine();if(ImGui::Button("Cancel",ImVec2(90,0)))ImGui::CloseCurrentPopup();ImGui::EndPopup();}
         if(ImGui::BeginPopupModal("Delete Crop Preset",nullptr,ImGuiWindowFlags_AlwaysAutoResize)){ImGui::TextUnformatted("Delete the selected saved crop preset?");if(ImGui::Button("Delete",ImVec2(90,0))&&!cropUserPresets.empty()){cropUserPresets.erase(cropUserPresets.begin()+std::clamp(cropSavedChoice,0,(int)cropUserPresets.size()-1));cropSavedChoice=std::max(0,(int)cropUserPresets.size()-1);cropSaveUserPresets();ImGui::CloseCurrentPopup();}ImGui::SameLine();if(ImGui::Button("Cancel",ImVec2(90,0)))ImGui::CloseCurrentPopup();ImGui::EndPopup();}
         ImGui::SameLine(0,5);if(ImGui::SmallButton(straightenArmed?"Straighten: On":"Straighten"))straightenArmed=!straightenArmed;
+        ImGui::SameLine(0,5);ImGui::Checkbox("Classic Mode",&cropClassicMode);ImGui::SameLine(0,5);ImGui::BeginDisabled(cropClassicMode);ImGui::Checkbox("Auto Center",&cropAutoCenter);ImGui::EndDisabled();
         static const char* overlays[]={"Thirds","Grid","Diagonal","Triangle","Golden Ratio","Golden Spiral"};
         ImGui::SetNextItemWidth(145); ImGui::Combo("##cropOverlay",&cropOverlay,overlays,6); ImGui::SameLine(0,8);
         static const char* shows[]={"Auto","Always","Never"}; ImGui::SetNextItemWidth(90); ImGui::Combo("##cropOverlayShow",&cropOverlayShow,shows,3); ImGui::SameLine(0,8);
@@ -5510,6 +5512,13 @@ void script(const std::string& what) {
         straightenArmed=true;const bool ok=straightenCrop(ImVec2(doc.w*.1f,doc.h*.35f),ImVec2(doc.w*.9f,doc.h*.48f),true);
         straightenArmed=false;const bool fitted=cropR[0]>=0&&cropR[1]>=0&&cropR[2]<=doc.w&&cropR[3]<=doc.h&&cropAngle>0;
         fprintf(stderr,"crop-straighten: %s; one-shot level line sets the crop angle and fits frame inside canvas\n",ok&&fitted?"passed":"failed");return;
+    }
+    if (what == "crop-delete") {
+        Doc cut=doc,keep=doc;const Rect r{10,10,std::max(11,doc.w-10),std::max(11,doc.h-10)};
+        cropCanvas(cut,r,true);cropCanvas(keep,r,false);
+        const bool ok=cut.w==r.x1-r.x0&&cut.h==r.y1-r.y0&&cut.cur().img.w==cut.w&&keep.cur().img.w==doc.w&&keep.cur().x==-r.x0;
+        Toolbar::select(Toolbar::CROP);syncTool();cropR[0]=doc.w*.12f;cropR[1]=doc.h*.12f;cropR[2]=doc.w*.88f;cropR[3]=doc.h*.88f;cropDelete=true;
+        fprintf(stderr,"crop-delete: %s; enabled cuts layer pixels, disabled keeps pixels beyond new canvas\n",ok?"passed":"failed");return;
     }
     if (what == "text-empty") {
         Toolbar::select(Toolbar::TYPE_H); syncTool();
