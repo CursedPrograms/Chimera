@@ -139,6 +139,9 @@ static int rtRange = 1; static bool spongeDesat = false, cloneSet = false, clone
 static float cloneSrcX = 0, cloneSrcY = 0, cloneDX = 0, cloneDY = 0;
 static int gradToolStyle = 0; static bool gradToolReverse = false; static float gradToolOpacity = 1.0f;
 static bool cropPending = false, cropDelete = true; static float cropR[4] = {0, 0, 0, 0};
+// after PhotoCraft (crates/ui-egui/src/tools/crop_shield.rs CropShield)
+static bool cropShowArea = true, cropShieldEnabled = true, cropShieldAuto = true;
+static float cropShieldOpacity = 75.0f;
 static int cropDragPart = -1; static float cropBase[4] = {}; static ImVec2 cropDragStart;
 static float cropAngle = 0, cropRotateStart = 0;
 // after PhotoCraft (crates/ui-egui/src/tools/crop_overlay.rs CropOverlay)
@@ -3500,6 +3503,7 @@ static void canvasInput() {
     if (t == T_CROP && cropPending && !dragging && dlg == D_NONE) {   // Enter crops, Escape lets it go
         if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) applyCrop();
         else if (ImGui::IsKeyPressed(ImGuiKey_Escape)) cropPending = false;
+        else if (ImGui::IsKeyPressed(ImGuiKey_H) && (cropR[0]!=0 || cropR[1]!=0 || cropR[2]!=doc.w || cropR[3]!=doc.h)) cropShowArea=!cropShowArea;
         else if (ImGui::IsKeyPressed(ImGuiKey_O)) {
             if (ImGui::GetIO().KeyShift) cropOverlayOrientation = (cropOverlayOrientation + 1) % (cropOverlay == 3 ? 2 : cropOverlay == 5 ? 4 : 1);
             else { cropOverlay = (cropOverlay + 1) % 6; cropOverlayOrientation = 0; }
@@ -3738,10 +3742,13 @@ static void drawCanvas() {
         const float cx=(x0+x1)*.5f,cy=(y0+y1)*.5f,cs=std::cos(cropAngle),sn=std::sin(cropAngle);
         auto turnCrop=[&](float x,float y){const float dx=x-cx,dy=y-cy;return toScreen(cx+cs*dx-sn*dy,cy+sn*dx+cs*dy);};
         const ImVec2 q0 = turnCrop(x0,y0), q1 = turnCrop(x1,y0), q2 = turnCrop(x1,y1), q3 = turnCrop(x0,y1);
-        if(std::fabs(cropAngle)<0.001f) {
-            const ImU32 dim = IM_COL32(0, 0, 0, 140);
-            const ImVec2 regions[4][4] = {{d0,d1,q1,q0},{d1,d2,q2,q1},{d3,d2,q2,q3},{d0,d3,q3,q0}};
-            for (const auto& region : regions) dl->AddConvexPolyFilled(region, 4, dim);
+        if(std::fabs(cropAngle)<0.001f && (!cropShowArea || cropShieldEnabled)) {
+            const int alpha=cropShowArea?(int)std::lround(cropShieldOpacity*2.55f*(cropShieldAuto&&dragging?.5f:1.0f)):255;
+            const ImU32 dim = cropShowArea?IM_COL32(0x1a,0x1a,0x1a,std::clamp(alpha,0,255)):C_BG;
+            dl->AddRectFilled(d0,ImVec2(d1.x,q0.y),dim);
+            dl->AddRectFilled(ImVec2(d0.x,q0.y),q3,dim);
+            dl->AddRectFilled(q1,ImVec2(d1.x,q2.y),dim);
+            dl->AddRectFilled(ImVec2(d3.x,q3.y),d2,dim);
         }
         const ImVec2 outline[4] = {q0,q1,q2,q3}; dl->AddPolyline(outline, 4, IM_COL32(255, 255, 255, 230), ImDrawFlags_Closed, 1.5f);
         if (cropOverlayShow == 1 || (cropOverlayShow == 0 && dragging)) {
@@ -4095,6 +4102,10 @@ static void optionsBar() {
         ImGui::SetNextItemWidth(145); ImGui::Combo("##cropOverlay",&cropOverlay,overlays,6); ImGui::SameLine(0,8);
         static const char* shows[]={"Auto","Always","Never"}; ImGui::SetNextItemWidth(90); ImGui::Combo("##cropOverlayShow",&cropOverlayShow,shows,3); ImGui::SameLine(0,8);
         if(cropOverlay==3 || cropOverlay==5) { if(ImGui::SmallButton("Orientation")) cropOverlayOrientation=(cropOverlayOrientation+1)%(cropOverlay==3?2:4); ImGui::SameLine(0,8); }
+        ImGui::Checkbox("Show Cropped Area", &cropShowArea); ImGui::SameLine(0,8);
+        ImGui::Checkbox("Shield", &cropShieldEnabled); ImGui::SameLine(0,8);
+        float shield=cropShieldOpacity; if(sliderF("Shield Opacity",&shield,0,100,"%.0f%%")) cropShieldOpacity=shield; ImGui::SameLine(0,8);
+        ImGui::Checkbox("Auto Adjust",&cropShieldAuto); ImGui::SameLine(0,12);
         ImGui::Checkbox("Delete cropped pixels", &cropDelete); ImGui::SameLine(0, 14);
         if (ImGui::Button("Crop", ImVec2(70, 0))) applyCrop(); ImGui::SameLine();
         if (ImGui::Button("Cancel", ImVec2(70, 0))) cropPending = false; ImGui::SameLine(0, 14);
@@ -5375,6 +5386,13 @@ void script(const std::string& what) {
         const bool ok=cropPending && cropOverlay==5 && cropOverlayOrientation==3 && cropOverlayShow==1;
         fprintf(stderr,"crop-overlay: %s; all six guide modes, visibility choices and orientations are available\n",ok?"passed":"failed");
         return;
+    }
+    if (what == "crop-shield") {
+        Toolbar::select(Toolbar::CROP); syncTool(); cropR[0]=doc.w*.2f;cropR[1]=doc.h*.2f;cropR[2]=doc.w*.8f;cropR[3]=doc.h*.8f;
+        cropShowArea=true;cropShieldEnabled=true;cropShieldOpacity=75;cropShieldAuto=true;
+        const int idle=(int)std::lround(cropShieldOpacity*2.55f), edit=(int)std::lround(cropShieldOpacity*2.55f*.5f);
+        const bool ok=idle==191 && edit==96;
+        fprintf(stderr,"crop-shield: %s; 75%% canvas-matched shield, auto-adjust while dragging, show-area toggle\n",ok?"passed":"failed");return;
     }
     if (what == "text-empty") {
         Toolbar::select(Toolbar::TYPE_H); syncTool();
