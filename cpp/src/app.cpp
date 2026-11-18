@@ -2340,6 +2340,8 @@ static void penFinishSubpath() { penSub = -1; }
 
 // ---------- the Type tools (PhotoCraft's point text; the Type Mask tools make a selection of the letters) ----------
 static Text typeNext = [] { Text t; t.size = 48; return t; }();
+static std::vector<std::string> recentTypeFonts;
+static constexpr size_t recentTypeFontCap = 10;
 static int typeLayer = -1;              // the text layer being typed into (-1: none)
 static bool typeMaskEditing = false;    // a Type Mask tool: typing into typeMask, a selection when done
 static Text typeMask;
@@ -4152,10 +4154,23 @@ static void optionsBar() {
             static char find[64] = "";
             ImGui::SetNextItemWidth(-1); ImGui::InputTextWithHint("##ff", "Find a font", find, sizeof find);
             std::string q = find; for (auto& c : q) c = (char)tolower((unsigned char)c);
+            if (!q.empty()) ImGui::SeparatorText("Recent");
+            else if (!recentTypeFonts.empty()) {
+                ImGui::TextDisabled("Recent");
+                for (const std::string& path : recentTypeFonts) {
+                    auto it=std::find_if(fonts.begin(),fonts.end(),[&](const FontFile& f){return f.path==path;});
+                    if(it!=fonts.end() && ImGui::Selectable(it->name.c_str(),path==cur)) {
+                        if(live) remember("Font"); t.font=path; ch=true;
+                        noteRecentFont(recentTypeFonts,path,recentTypeFontCap);
+                    }
+                }
+                ImGui::Separator();
+            }
             for (const auto& f : fonts) {
                 std::string n = f.name; for (auto& c : n) c = (char)tolower((unsigned char)c);
                 if (!q.empty() && n.find(q) == std::string::npos) continue;
-                if (ImGui::Selectable(f.name.c_str(), f.path == cur)) { if (live) remember("Font"); t.font = f.path; ch = true; }
+                if (!q.empty() && std::find(recentTypeFonts.begin(),recentTypeFonts.end(),f.path)!=recentTypeFonts.end()) continue;
+                if (ImGui::Selectable(f.name.c_str(), f.path == cur)) { if (live) remember("Font"); t.font = f.path; ch = true; noteRecentFont(recentTypeFonts,f.path,recentTypeFontCap); }
             }
             ImGui::EndCombo();
         }
