@@ -156,6 +156,7 @@ static bool cropResolutionCm = false;
 static bool straightenArmed=false, straightenLine=false, straightenFit=false;
 static bool cropClassicMode=false, cropAutoCenter=true;
 static void syncCropView();
+static void toggleCropMode(){cropClassicMode=!cropClassicMode;syncCropView();}
 static ImVec2 straightenStart,straightenEnd;
 struct CropPreset { std::string name,width,height,resolution; bool cm=false; };
 static std::vector<CropPreset> cropUserPresets;
@@ -3603,6 +3604,7 @@ static void canvasInput() {
         if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) applyCrop();
         else if (ImGui::IsKeyPressed(ImGuiKey_Escape)) { cropPending = false;straightenArmed=false;straightenLine=false; }
         else if (ImGui::IsKeyPressed(ImGuiKey_H) && (cropR[0]!=0 || cropR[1]!=0 || cropR[2]!=doc.w || cropR[3]!=doc.h)) cropShowArea=!cropShowArea;
+        else if (ImGui::IsKeyPressed(ImGuiKey_P) && (cropR[0]!=0 || cropR[1]!=0 || cropR[2]!=doc.w || cropR[3]!=doc.h || std::fabs(cropAngle)>.001f)) toggleCropMode();
         else if (ImGui::IsKeyPressed(ImGuiKey_O)) {
             if (ImGui::GetIO().KeyShift) cropOverlayOrientation = (cropOverlayOrientation + 1) % (cropOverlay == 3 ? 2 : cropOverlay == 5 ? 4 : 1);
             else { cropOverlay = (cropOverlay + 1) % 6; cropOverlayOrientation = 0; }
@@ -3842,13 +3844,11 @@ static void drawCanvas() {
         const float cx=(x0+x1)*.5f,cy=(y0+y1)*.5f,cs=std::cos(cropAngle),sn=std::sin(cropAngle);
         auto turnCrop=[&](float x,float y){const float dx=x-cx,dy=y-cy;return toScreen(cx+cs*dx-sn*dy,cy+sn*dx+cs*dy);};
         const ImVec2 q0 = turnCrop(x0,y0), q1 = turnCrop(x1,y0), q2 = turnCrop(x1,y1), q3 = turnCrop(x0,y1);
-        if(std::fabs(cropAngle)<0.001f && (!cropShowArea || cropShieldEnabled)) {
+        if(std::fabs(cropAngle)<.001f && (!cropShowArea || cropShieldEnabled)) {
             const int alpha=cropShowArea?(int)std::lround(cropShieldOpacity*2.55f*(cropShieldAuto&&dragging?.5f:1.0f)):255;
             const ImU32 dim = cropShowArea?IM_COL32((int)std::lround(cropShieldColor[0]*255),(int)std::lround(cropShieldColor[1]*255),(int)std::lround(cropShieldColor[2]*255),std::clamp(alpha,0,255)):C_BG;
-            dl->AddRectFilled(d0,ImVec2(d1.x,q0.y),dim);
-            dl->AddRectFilled(ImVec2(d0.x,q0.y),q3,dim);
-            dl->AddRectFilled(q1,ImVec2(d1.x,q2.y),dim);
-            dl->AddRectFilled(ImVec2(d3.x,q3.y),d2,dim);
+            dl->AddRectFilled(d0,ImVec2(d1.x,q0.y),dim);dl->AddRectFilled(ImVec2(d0.x,q0.y),q3,dim);
+            dl->AddRectFilled(q1,ImVec2(d1.x,q2.y),dim);dl->AddRectFilled(ImVec2(d3.x,q3.y),d2,dim);
         }
         const ImVec2 outline[4] = {q0,q1,q2,q3}; dl->AddPolyline(outline, 4, IM_COL32(255, 255, 255, 230), ImDrawFlags_Closed, 1.5f);
         if (cropOverlayShow == 1 || (cropOverlayShow == 0 && dragging)) {
@@ -5555,6 +5555,11 @@ void script(const std::string& what) {
         cropClassicMode=true;syncCropView();const bool classic=std::fabs(viewRotation)<.01f;
         cropClassicMode=false;syncCropView();const bool back=std::fabs(viewRotation+cropAngle*57.2957795f)<.01f;
         fprintf(stderr,"crop-mode: %s; default mode rotates view opposite crop frame, Classic Mode leaves view upright\n",defaultMode&&classic&&back?"passed":"failed");return;
+    }
+    if (what == "crop-mode-shortcut") {
+        Toolbar::select(Toolbar::CROP);syncTool();cropPending=true;cropR[0]=doc.w*.2f;cropR[1]=doc.h*.2f;cropR[2]=doc.w*.8f;cropR[3]=doc.h*.8f;cropAngle=.2f;cropClassicMode=false;syncCropView();
+        toggleCropMode();const bool classic= cropClassicMode&&std::fabs(viewRotation)<.01f;toggleCropMode();const bool back=!cropClassicMode&&std::fabs(viewRotation+cropAngle*57.2957795f)<.01f;
+        fprintf(stderr,"crop-mode-shortcut: %s; P toggles Classic Mode and restores default view rotation\n",classic&&back?"passed":"failed");return;
     }
     if (what == "text-empty") {
         Toolbar::select(Toolbar::TYPE_H); syncTool();
