@@ -14,6 +14,7 @@
 #include "toolbar.h"
 #include "magnetic.h"
 #include "util.h"
+#include "inpaint.h"
 
 #include <SDL.h>
 #include <SDL_opengl.h>
@@ -143,6 +144,7 @@ static int gradToolStyle = 0; static bool gradToolReverse = false; static float 
 static bool cropPending = false, cropDelete = true; static float cropR[4] = {0, 0, 0, 0};
 // after PhotoCraft (crates/ui-egui/src/tools/crop_shield.rs CropShield)
 static bool cropShowArea = true, cropShieldEnabled = true, cropShieldAuto = true;
+static bool cropContentAware=false;
 static bool cropShieldMatchCanvas = true;
 static float cropShieldColor[3] = {0.102f,0.102f,0.102f};
 static float cropShieldOpacity = 75.0f;
@@ -2094,6 +2096,23 @@ static void applyPerspectiveCrop() {
     for (Layer &layer : warpedDoc.layers)
         if (layer.isFill() && !layer.isShape() && !layer.isText())
             renderFill(warpedDoc, layer);
+    if(cropContentAware) {
+        Image merged=sampleImage();std::vector<float> rgb((size_t)w*ht*3,0);std::vector<uint8_t> hole((size_t)w*ht,0);
+        for(int y=0;y<ht;y++)for(int x=0;x<w;x++){
+            const double u=(x+.5)/w,v=(y+.5)/ht,z=h[6]*u+h[7]*v+1;if(std::fabs(z)<1e-12)continue;
+            const float sx=(float)((h[0]*u+h[1]*v+h[2])/z),sy=(float)((h[3]*u+h[4]*v+h[5])/z);
+            const size_t i=(size_t)y*w+x;
+            if(sx<0||sy<0||sx>=sourceDoc.w||sy>=sourceDoc.h){hole[i]=1;continue;}
+            const uint8_t*p=merged.at(std::clamp((int)sx,0,sourceDoc.w-1),std::clamp((int)sy,0,sourceDoc.h-1));
+            for(int c=0;c<3;c++)rgb[i*3+c]=p[c]/255.0f;
+        }
+        if(Inpaint::complete(w,ht,rgb,hole)) {
+            Layer fill;fill.name="Content-Aware Crop Corners";fill.img=Image(w,ht);
+            for(int y=0;y<ht;y++)for(int x=0;x<w;x++){const size_t i=(size_t)y*w+x;if(!hole[i])continue;uint8_t*p=fill.img.at(x,y);for(int c=0;c<3;c++)p[c]=to8(rgb[i*3+c]);p[3]=255;}
+            warpedDoc.layers.insert(warpedDoc.layers.begin(),std::move(fill));++warpedDoc.active;
+        }
+        cropContentAware=false;
+    }
     doc.w = w;
     doc.h = ht;
     doc.layers = std::move(warpedDoc.layers);
@@ -4205,6 +4224,7 @@ static void optionsBar() {
         float shield=cropShieldOpacity; if(sliderF("Shield Opacity",&shield,0,100,"%.0f%%")) cropShieldOpacity=shield; ImGui::SameLine(0,8);
         ImGui::Checkbox("Auto Adjust",&cropShieldAuto); ImGui::SameLine(0,12);
         ImGui::Checkbox("Delete cropped pixels", &cropDelete); ImGui::SameLine(0, 14);
+        ImGui::Checkbox("Content-Aware Corners",&cropContentAware); ImGui::SameLine(0,8);
         if (ImGui::Button("Crop", ImVec2(70, 0))) applyCrop(); ImGui::SameLine();
         if (ImGui::Button("Cancel", ImVec2(70, 0))) cropPending = false; ImGui::SameLine(0, 14);
         ImGui::TextDisabled("Drag what to keep; O cycles guides, Shift+O changes orientation"); }
@@ -5519,6 +5539,11 @@ void script(const std::string& what) {
         const bool ok=cut.w==r.x1-r.x0&&cut.h==r.y1-r.y0&&cut.cur().img.w==cut.w&&keep.cur().img.w==doc.w&&keep.cur().x==-r.x0;
         Toolbar::select(Toolbar::CROP);syncTool();cropR[0]=doc.w*.12f;cropR[1]=doc.h*.12f;cropR[2]=doc.w*.88f;cropR[3]=doc.h*.88f;cropDelete=true;
         fprintf(stderr,"crop-delete: %s; enabled cuts layer pixels, disabled keeps pixels beyond new canvas\n",ok?"passed":"failed");return;
+    }
+    if (what == "crop-corners") {
+        Toolbar::select(Toolbar::CROP);syncTool();cropPreset=0;cropR[0]=doc.w*.16f;cropR[1]=doc.h*.16f;cropR[2]=doc.w*.84f;cropR[3]=doc.h*.84f;cropAngle=.18f;cropContentAware=true;
+        applyCrop();const bool ok=std::any_of(doc.layers.begin(),doc.layers.end(),[](const Layer&l){return l.name=="Content-Aware Crop Corners";});
+        fprintf(stderr,"crop-corners: %s; content-aware fill layer generated under retained crop layers\n",ok?"passed":"failed");return;
     }
     if (what == "text-empty") {
         Toolbar::select(Toolbar::TYPE_H); syncTool();
