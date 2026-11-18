@@ -140,6 +140,9 @@ static float cloneSrcX = 0, cloneSrcY = 0, cloneDX = 0, cloneDY = 0;
 static int gradToolStyle = 0; static bool gradToolReverse = false; static float gradToolOpacity = 1.0f;
 static bool cropPending = false, cropDelete = true; static float cropR[4] = {0, 0, 0, 0};
 static int cropDragPart = -1; static float cropBase[4] = {}; static ImVec2 cropDragStart;
+static float cropAngle = 0, cropRotateStart = 0;
+static void pcropSet(const float q[8]);
+static void applyPerspectiveCrop();
 static bool pcropPending = false, pcropCustomSize = false; static float pcropQ[8] = {0};
 static std::vector<ImVec2> pcropClicks; static int pcropDragPart = -1, pcropOutW = 0, pcropOutH = 0;
 static ImVec2 pcropMoveStart; static float pcropMoveQ[8] = {0};
@@ -1696,6 +1699,14 @@ static void objectSelect(float ax, float ay, float bx, float by) {
 }
 static void applyCrop() {
     if (!cropPending) return;
+    if(std::fabs(cropAngle)>0.001f) {
+        const float cx=(cropR[0]+cropR[2])*.5f,cy=(cropR[1]+cropR[3])*.5f,cs=std::cos(cropAngle),sn=std::sin(cropAngle);
+        const float x0=std::min(cropR[0],cropR[2]),x1=std::max(cropR[0],cropR[2]),y0=std::min(cropR[1],cropR[3]),y1=std::max(cropR[1],cropR[3]);
+        auto turn=[&](float x,float y){const float dx=x-cx,dy=y-cy;return ImVec2(cx+cs*dx-sn*dy,cy+sn*dx+cs*dy);};
+        const ImVec2 q[4]={turn(x0,y0),turn(x1,y0),turn(x1,y1),turn(x0,y1)};
+        const float quad[8]={q[0].x,q[0].y,q[1].x,q[1].y,q[2].x,q[2].y,q[3].x,q[3].y};
+        cropPending=false; cropAngle=0; pcropSet(quad); applyPerspectiveCrop(); return;
+    }
     Rect r{(int)std::lround(std::min(cropR[0], cropR[2])), (int)std::lround(std::min(cropR[1], cropR[3])), (int)std::lround(std::max(cropR[0], cropR[2])), (int)std::lround(std::max(cropR[1], cropR[3]))};
     cropPending = false;
     r = r.clip(doc.w, doc.h);
@@ -1716,14 +1727,29 @@ static void cropBegin(ImVec2 p) {
     if(!cropPending) { cropPending=true; cropR[0]=cropR[1]=0; cropR[2]=(float)doc.w; cropR[3]=(float)doc.h; }
     const float x0=std::min(cropR[0],cropR[2]), x1=std::max(cropR[0],cropR[2]);
     const float y0=std::min(cropR[1],cropR[3]), y1=std::max(cropR[1],cropR[3]);
-    const ImVec2 h[8]={{x0,y0},{(x0+x1)*.5f,y0},{x1,y0},{x1,(y0+y1)*.5f},{x1,y1},{(x0+x1)*.5f,y1},{x0,y1},{x0,(y0+y1)*.5f}};
+    const float cx=(x0+x1)*.5f, cy=(y0+y1)*.5f, cs=std::cos(cropAngle), sn=std::sin(cropAngle);
+    auto turn=[&](ImVec2 v){const float dx=v.x-cx,dy=v.y-cy;return ImVec2(cx+cs*dx-sn*dy,cy+sn*dx+cs*dy);};
+    const ImVec2 h[8]={turn({x0,y0}),turn({(x0+x1)*.5f,y0}),turn({x1,y0}),turn({x1,(y0+y1)*.5f}),turn({x1,y1}),turn({(x0+x1)*.5f,y1}),turn({x0,y1}),turn({x0,(y0+y1)*.5f})};
     cropDragPart=-1; const float radius=10.0f/std::max(.01f,zoom);
     for(int i=0;i<8;++i) if(std::hypot(p.x-h[i].x,p.y-h[i].y)<=radius) { cropDragPart=i; break; }
-    if(cropDragPart<0 && p.x>=x0 && p.x<=x1 && p.y>=y0 && p.y<=y1) cropDragPart=8;
+    const float lx=cx+cs*(p.x-cx)+sn*(p.y-cy), ly=cy-sn*(p.x-cx)+cs*(p.y-cy);
+    if(cropDragPart<0 && lx>=x0 && lx<=x1 && ly>=y0 && ly<=y1) cropDragPart=8;
     std::copy(cropR,cropR+4,cropBase); cropDragStart=p;
+    if(cropDragPart<0 && cropPending) {
+        const float edgeDist=std::min({std::fabs(lx-x0),std::fabs(lx-x1),std::fabs(ly-y0),std::fabs(ly-y1)});
+        if(edgeDist>4/std::max(.01f,zoom) && edgeDist<28/std::max(.01f,zoom)) {
+            cropDragPart=10; cropRotateStart=std::atan2(p.y-cy,p.x-cx);
+        }
+    }
     if(cropDragPart<0) { cropDragPart=9; cropR[0]=cropR[2]=p.x; cropR[1]=cropR[3]=p.y; }
 }
 static void cropDragTo(ImVec2 p) {
+    if(cropDragPart==10) {
+        const float cx=(cropBase[0]+cropBase[2])*.5f,cy=(cropBase[1]+cropBase[3])*.5f;
+        cropAngle=std::atan2(p.y-cy,p.x-cx)-cropRotateStart;
+        while(cropAngle>3.14159265f)cropAngle-=6.2831853f; while(cropAngle< -3.14159265f)cropAngle+=6.2831853f;
+        return;
+    }
     const float dx=p.x-cropDragStart.x, dy=p.y-cropDragStart.y;
     float x0=cropBase[0],y0=cropBase[1],x1=cropBase[2],y1=cropBase[3];
     if(x0>x1)std::swap(x0,x1); if(y0>y1)std::swap(y0,y1);
@@ -3702,10 +3728,14 @@ static void drawCanvas() {
         const float x0 = std::clamp(std::min(cropR[0], cropR[2]), 0.0f, (float)doc.w), x1 = std::clamp(std::max(cropR[0], cropR[2]), 0.0f, (float)doc.w);
         const float y0 = std::clamp(std::min(cropR[1], cropR[3]), 0.0f, (float)doc.h), y1 = std::clamp(std::max(cropR[1], cropR[3]), 0.0f, (float)doc.h);
         const ImVec2 d0 = toScreen(0, 0), d1 = toScreen((float)doc.w, 0), d2 = toScreen((float)doc.w, (float)doc.h), d3 = toScreen(0, (float)doc.h);
-        const ImVec2 q0 = toScreen(x0,y0), q1 = toScreen(x1,y0), q2 = toScreen(x1,y1), q3 = toScreen(x0,y1);
-        const ImU32 dim = IM_COL32(0, 0, 0, 140);
-        const ImVec2 regions[4][4] = {{d0,d1,q1,q0},{d1,d2,q2,q1},{d3,d2,q2,q3},{d0,d3,q3,q0}};
-        for (const auto& region : regions) dl->AddConvexPolyFilled(region, 4, dim);
+        const float cx=(x0+x1)*.5f,cy=(y0+y1)*.5f,cs=std::cos(cropAngle),sn=std::sin(cropAngle);
+        auto turnCrop=[&](float x,float y){const float dx=x-cx,dy=y-cy;return toScreen(cx+cs*dx-sn*dy,cy+sn*dx+cs*dy);};
+        const ImVec2 q0 = turnCrop(x0,y0), q1 = turnCrop(x1,y0), q2 = turnCrop(x1,y1), q3 = turnCrop(x0,y1);
+        if(std::fabs(cropAngle)<0.001f) {
+            const ImU32 dim = IM_COL32(0, 0, 0, 140);
+            const ImVec2 regions[4][4] = {{d0,d1,q1,q0},{d1,d2,q2,q1},{d3,d2,q2,q3},{d0,d3,q3,q0}};
+            for (const auto& region : regions) dl->AddConvexPolyFilled(region, 4, dim);
+        }
         const ImVec2 outline[4] = {q0,q1,q2,q3}; dl->AddPolyline(outline, 4, IM_COL32(255, 255, 255, 230), ImDrawFlags_Closed, 1.5f);
         for (int k = 1; k < 3; ++k) {
             const float t = k / 3.0f;
@@ -5288,6 +5318,19 @@ void script(const std::string& what) {
         const bool moved=cropDragPart==8 && std::fabs(cropR[0]-x-12)<1 && std::fabs(cropR[1]-y-9)<1;
         cropDragPart=-1;
         fprintf(stderr,"crop-handles: %s; corner resize %d, interior move %d\n",resized&&moved?"passed":"failed",resized?1:0,moved?1:0);
+        return;
+    }
+    if (what == "crop-rotate") {
+        Toolbar::select(Toolbar::CROP); syncTool(); cropR[0]=doc.w*.2f;cropR[1]=doc.h*.2f;cropR[2]=doc.w*.8f;cropR[3]=doc.h*.8f;cropAngle=0;
+        const float cx=(cropR[0]+cropR[2])*.5f,cy=(cropR[1]+cropR[3])*.5f;
+        cropBegin(ImVec2(cropR[2]+14/std::max(.01f,zoom),cy));
+        cropDragTo(ImVec2(cx,cy+cropR[2]-cx));
+        const bool rotated=cropDragPart==10 && std::fabs(cropAngle)>.1f;
+        cropDragPart=-1;
+        const float degrees=cropAngle*57.29578f;
+        applyCrop();
+        const bool committed=doc.w>0 && doc.h>0 && !cropPending;
+        fprintf(stderr,"crop-rotate: %s; outside-frame drag %.1f degrees, warp commit %d\n",rotated&&committed?"passed":"failed",degrees,committed?1:0);
         return;
     }
     if (what == "crop-frame") {
