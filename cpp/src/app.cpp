@@ -155,6 +155,7 @@ static bool cropResolutionCm = false;
 // after PhotoCraft (crates/ui-egui/src/tools/crop_straighten.rs)
 static bool straightenArmed=false, straightenLine=false, straightenFit=false;
 static bool cropClassicMode=false, cropAutoCenter=true;
+static void syncCropView();
 static ImVec2 straightenStart,straightenEnd;
 struct CropPreset { std::string name,width,height,resolution; bool cm=false; };
 static std::vector<CropPreset> cropUserPresets;
@@ -211,6 +212,7 @@ static int tolerance = 32; static bool contiguous = true, sampleAll = false; sta
 
 // view: canvas pixel (x, y) is at screen origin + (x, y) * zoom
 static float zoom = 1.0f, viewRotation = 0.0f; static ImVec2 origin(0, 0); static ImVec2 canvasPos, canvasSize; static bool fitNext = true;
+static void syncCropView(){if(tool==T_CROP&&cropPending)viewRotation=cropClassicMode?0.0f:-cropAngle*57.2957795f;}
 
 // interaction
 static bool dragging = false, panning = false; static ImVec2 dragStart, dragNow, panStart, originStart;
@@ -1732,10 +1734,10 @@ static void applyCrop() {
         auto turn=[&](float x,float y){const float dx=x-cx,dy=y-cy;return ImVec2(cx+cs*dx-sn*dy,cy+sn*dx+cs*dy);};
         const ImVec2 q[4]={turn(x0,y0),turn(x1,y0),turn(x1,y1),turn(x0,y1)};
         const float quad[8]={q[0].x,q[0].y,q[1].x,q[1].y,q[2].x,q[2].y,q[3].x,q[3].y};
-        cropPending=false; cropAngle=0; pcropSet(quad); applyPerspectiveCrop(); return;
+        cropPending=false; cropAngle=0; viewRotation=0; pcropSet(quad); applyPerspectiveCrop(); return;
     }
     Rect r{(int)std::lround(std::min(cropR[0], cropR[2])), (int)std::lround(std::min(cropR[1], cropR[3])), (int)std::lround(std::max(cropR[0], cropR[2])), (int)std::lround(std::max(cropR[1], cropR[3]))};
-    cropPending = false;
+    cropPending = false; viewRotation=0;
     r = r.clip(doc.w, doc.h);
     if (r.empty()) return;
     int outW=0,outH=0;float outPpi=doc.dpi;cropSizeTarget(outW,outH,outPpi);
@@ -1779,6 +1781,7 @@ static void cropDragTo(ImVec2 p, bool snapAngle=false) {
         cropAngle=std::atan2(p.y-cy,p.x-cx)-cropRotateStart;
         while(cropAngle>3.14159265f)cropAngle-=6.2831853f; while(cropAngle< -3.14159265f)cropAngle+=6.2831853f;
         if(snapAngle) cropAngle=std::round(cropAngle/(15.0f*0.01745329252f))*(15.0f*0.01745329252f);
+        syncCropView();
         return;
     }
     const float dx=p.x-cropDragStart.x, dy=p.y-cropDragStart.y;
@@ -1835,7 +1838,7 @@ static bool straightenCrop(ImVec2 a,ImVec2 b,bool fit) {
     if(!std::isfinite(len)||len*zoom<3.0f)return false;
     float degrees=std::atan2(dy,dx)*57.295779513f;
     if(degrees>45)degrees-=90;else if(degrees< -45)degrees+=90;
-    cropAngle=degrees*0.01745329252f;
+    cropAngle=degrees*0.01745329252f;syncCropView();
     if(fit){
         const float w=std::fabs(cropR[2]-cropR[0]),h=std::fabs(cropR[3]-cropR[1]);
         const float cs=std::fabs(std::cos(cropAngle)),sn=std::fabs(std::sin(cropAngle));
@@ -3614,6 +3617,7 @@ static void canvasInput() {
 }
 
 static void drawCanvas() {
+    syncCropView();
     ImDrawList* dl = ImGui::GetWindowDrawList();
     dl->AddRectFilled(canvasPos, ImVec2(canvasPos.x + canvasSize.x, canvasPos.y + canvasSize.y), C_BG);
     const ImVec2 a = toScreen(0, 0), b = toScreen((float)doc.w, 0), c = toScreen((float)doc.w, (float)doc.h), d = toScreen(0, (float)doc.h);
@@ -4212,7 +4216,7 @@ static void optionsBar() {
         if(ImGui::BeginPopupModal("New Crop Preset",nullptr,ImGuiWindowFlags_AlwaysAutoResize)){ImGui::TextUnformatted("Name:");ImGui::InputText("##newCropPresetName",cropNewName,sizeof(cropNewName));if(ImGui::Button("Save",ImVec2(90,0))&&cropNewName[0]&&cropWidth[0]&&cropHeight[0]){CropPreset p{cropNewName,cropWidth,cropHeight,cropResolution,cropResolutionCm};auto it=std::find_if(cropUserPresets.begin(),cropUserPresets.end(),[&](const CropPreset&q){return q.name==p.name;});if(it==cropUserPresets.end())cropUserPresets.push_back(p);else *it=p;cropSavedChoice=(int)(std::find_if(cropUserPresets.begin(),cropUserPresets.end(),[&](const CropPreset&q){return q.name==p.name;})-cropUserPresets.begin());cropSaveUserPresets();ImGui::CloseCurrentPopup();}ImGui::SameLine();if(ImGui::Button("Cancel",ImVec2(90,0)))ImGui::CloseCurrentPopup();ImGui::EndPopup();}
         if(ImGui::BeginPopupModal("Delete Crop Preset",nullptr,ImGuiWindowFlags_AlwaysAutoResize)){ImGui::TextUnformatted("Delete the selected saved crop preset?");if(ImGui::Button("Delete",ImVec2(90,0))&&!cropUserPresets.empty()){cropUserPresets.erase(cropUserPresets.begin()+std::clamp(cropSavedChoice,0,(int)cropUserPresets.size()-1));cropSavedChoice=std::max(0,(int)cropUserPresets.size()-1);cropSaveUserPresets();ImGui::CloseCurrentPopup();}ImGui::SameLine();if(ImGui::Button("Cancel",ImVec2(90,0)))ImGui::CloseCurrentPopup();ImGui::EndPopup();}
         ImGui::SameLine(0,5);if(ImGui::SmallButton(straightenArmed?"Straighten: On":"Straighten"))straightenArmed=!straightenArmed;
-        ImGui::SameLine(0,5);ImGui::Checkbox("Classic Mode",&cropClassicMode);ImGui::SameLine(0,5);ImGui::BeginDisabled(cropClassicMode);ImGui::Checkbox("Auto Center",&cropAutoCenter);ImGui::EndDisabled();
+        ImGui::SameLine(0,5);if(ImGui::Checkbox("Classic Mode",&cropClassicMode))syncCropView();ImGui::SameLine(0,5);ImGui::BeginDisabled(cropClassicMode);ImGui::Checkbox("Auto Center",&cropAutoCenter);ImGui::EndDisabled();
         static const char* overlays[]={"Thirds","Grid","Diagonal","Triangle","Golden Ratio","Golden Spiral"};
         ImGui::SetNextItemWidth(145); ImGui::Combo("##cropOverlay",&cropOverlay,overlays,6); ImGui::SameLine(0,8);
         static const char* shows[]={"Auto","Always","Never"}; ImGui::SetNextItemWidth(90); ImGui::Combo("##cropOverlayShow",&cropOverlayShow,shows,3); ImGui::SameLine(0,8);
@@ -5544,6 +5548,13 @@ void script(const std::string& what) {
         Toolbar::select(Toolbar::CROP);syncTool();cropPreset=0;cropR[0]=doc.w*.16f;cropR[1]=doc.h*.16f;cropR[2]=doc.w*.84f;cropR[3]=doc.h*.84f;cropAngle=.18f;cropContentAware=true;
         applyCrop();const bool ok=std::any_of(doc.layers.begin(),doc.layers.end(),[](const Layer&l){return l.name=="Content-Aware Crop Corners";});
         fprintf(stderr,"crop-corners: %s; content-aware fill layer generated under retained crop layers\n",ok?"passed":"failed");return;
+    }
+    if (what == "crop-mode") {
+        Toolbar::select(Toolbar::CROP);syncTool();cropR[0]=doc.w*.2f;cropR[1]=doc.h*.2f;cropR[2]=doc.w*.8f;cropR[3]=doc.h*.8f;cropPending=true;cropAngle=.25f;
+        cropClassicMode=false;syncCropView();const bool defaultMode=std::fabs(viewRotation+cropAngle*57.2957795f)<.01f;
+        cropClassicMode=true;syncCropView();const bool classic=std::fabs(viewRotation)<.01f;
+        cropClassicMode=false;syncCropView();const bool back=std::fabs(viewRotation+cropAngle*57.2957795f)<.01f;
+        fprintf(stderr,"crop-mode: %s; default mode rotates view opposite crop frame, Classic Mode leaves view upright\n",defaultMode&&classic&&back?"passed":"failed");return;
     }
     if (what == "text-empty") {
         Toolbar::select(Toolbar::TYPE_H); syncTool();
