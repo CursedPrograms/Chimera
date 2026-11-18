@@ -141,6 +141,8 @@ static int gradToolStyle = 0; static bool gradToolReverse = false; static float 
 static bool cropPending = false, cropDelete = true; static float cropR[4] = {0, 0, 0, 0};
 // after PhotoCraft (crates/ui-egui/src/tools/crop_shield.rs CropShield)
 static bool cropShowArea = true, cropShieldEnabled = true, cropShieldAuto = true;
+static bool cropShieldMatchCanvas = true;
+static float cropShieldColor[3] = {0.102f,0.102f,0.102f};
 static float cropShieldOpacity = 75.0f;
 static int cropDragPart = -1; static float cropBase[4] = {}; static ImVec2 cropDragStart;
 static float cropAngle = 0, cropRotateStart = 0;
@@ -3744,7 +3746,7 @@ static void drawCanvas() {
         const ImVec2 q0 = turnCrop(x0,y0), q1 = turnCrop(x1,y0), q2 = turnCrop(x1,y1), q3 = turnCrop(x0,y1);
         if(std::fabs(cropAngle)<0.001f && (!cropShowArea || cropShieldEnabled)) {
             const int alpha=cropShowArea?(int)std::lround(cropShieldOpacity*2.55f*(cropShieldAuto&&dragging?.5f:1.0f)):255;
-            const ImU32 dim = cropShowArea?IM_COL32(0x1a,0x1a,0x1a,std::clamp(alpha,0,255)):C_BG;
+            const ImU32 dim = cropShowArea?IM_COL32((int)std::lround(cropShieldColor[0]*255),(int)std::lround(cropShieldColor[1]*255),(int)std::lround(cropShieldColor[2]*255),std::clamp(alpha,0,255)):C_BG;
             dl->AddRectFilled(d0,ImVec2(d1.x,q0.y),dim);
             dl->AddRectFilled(ImVec2(d0.x,q0.y),q3,dim);
             dl->AddRectFilled(q1,ImVec2(d1.x,q2.y),dim);
@@ -4104,6 +4106,8 @@ static void optionsBar() {
         if(cropOverlay==3 || cropOverlay==5) { if(ImGui::SmallButton("Orientation")) cropOverlayOrientation=(cropOverlayOrientation+1)%(cropOverlay==3?2:4); ImGui::SameLine(0,8); }
         ImGui::Checkbox("Show Cropped Area", &cropShowArea); ImGui::SameLine(0,8);
         ImGui::Checkbox("Shield", &cropShieldEnabled); ImGui::SameLine(0,8);
+        ImGui::Checkbox("Match Canvas",&cropShieldMatchCanvas); ImGui::SameLine(0,4);
+        ImGui::BeginDisabled(cropShieldMatchCanvas); ImGui::ColorEdit3("##cropShieldColor",cropShieldColor,ImGuiColorEditFlags_NoInputs|ImGuiColorEditFlags_NoLabel|ImGuiColorEditFlags_NoSidePreview); ImGui::EndDisabled(); ImGui::SameLine(0,8);
         float shield=cropShieldOpacity; if(sliderF("Shield Opacity",&shield,0,100,"%.0f%%")) cropShieldOpacity=shield; ImGui::SameLine(0,8);
         ImGui::Checkbox("Auto Adjust",&cropShieldAuto); ImGui::SameLine(0,12);
         ImGui::Checkbox("Delete cropped pixels", &cropDelete); ImGui::SameLine(0, 14);
@@ -5390,9 +5394,10 @@ void script(const std::string& what) {
     if (what == "crop-shield") {
         Toolbar::select(Toolbar::CROP); syncTool(); cropR[0]=doc.w*.2f;cropR[1]=doc.h*.2f;cropR[2]=doc.w*.8f;cropR[3]=doc.h*.8f;
         cropShowArea=true;cropShieldEnabled=true;cropShieldOpacity=75;cropShieldAuto=true;
+        cropShieldMatchCanvas=false;cropShieldColor[0]=.8f;cropShieldColor[1]=.12f;cropShieldColor[2]=.22f;
         const int idle=(int)std::lround(cropShieldOpacity*2.55f), edit=(int)std::lround(cropShieldOpacity*2.55f*.5f);
-        const bool ok=idle==191 && edit==96;
-        fprintf(stderr,"crop-shield: %s; 75%% canvas-matched shield, auto-adjust while dragging, show-area toggle\n",ok?"passed":"failed");return;
+        const bool ok=idle==191 && edit==96 && std::lround(cropShieldColor[0]*255)==204 && std::lround(cropShieldColor[1]*255)==31 && std::lround(cropShieldColor[2]*255)==56;
+        fprintf(stderr,"crop-shield: %s; canvas/custom colors, opacity, auto-adjust and visibility\n",ok?"passed":"failed");return;
     }
     if (what == "text-empty") {
         Toolbar::select(Toolbar::TYPE_H); syncTool();
