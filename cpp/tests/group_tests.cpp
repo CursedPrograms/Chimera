@@ -17,6 +17,8 @@ bool typeMoveDocumentEdge(ImGuiInputTextState* state, bool end, int cursor, int 
 bool typeMoveVerticalCaret(ImGuiInputTextState* state, const std::string& text, int cursor, int selectionStart, int selectionEnd, int selectionAnchor, bool hadSelection, int direction, bool extend);
 bool typeMoveEditorLineEdge(ImGuiInputTextState* state, const std::string& text, bool end, int cursor, int anchor, bool hadSelection, bool extend);
 bool typeStepCharacterMetric(Text& text, size_t start, size_t end, int metric, float by, float dpi, float layerScaleY);
+bool typeToggleCharacterStyle(Text& text, size_t start, size_t end, int styleIndex);
+bool typeApplyEditorText(Text& text, const std::string& updated);
 bool typeMoveWordCaret(ImGuiInputTextState* state, const std::string& text, int cursor, int anchor, bool hadSelection, bool forward, bool extend);
 bool typeWordNavigationShortcut(bool ctrl, bool alt, bool shift, bool mac, bool super);
 bool typeDocumentNavigationShortcut(bool ctrl, bool alt, bool mac, bool super);
@@ -440,6 +442,58 @@ static bool typeCharacterMetricsStepPerRun() {
     Text empty;empty.size=48;
     return App::typeStepCharacterMetric(empty,0,0,0,2,72,1)&&std::fabs(empty.normalizedRuns()[0].style.leading-(1.2f+2.0f/48))<0.001f;
 }
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/editing.rs toggle_char_style): mixed
+// selected characters toggle on together, a fully styled selection toggles off, and caret-only text is unchanged.
+static bool typeCharacterStyleShortcutsToggleSelections() {
+    Text text;text.str="A\xc3\xa9Z";TextStyle plain,bold;bold.bold=true;text.runs={{1,plain},{2,bold}};
+    if(!App::typeToggleCharacterStyle(text,0,2,0))return false;
+    auto styles=text.characterStyles();if(styles.size()!=3||!styles[0].bold||!styles[1].bold||!styles[2].bold)return false;
+    if(!App::typeToggleCharacterStyle(text,0,2,0))return false;
+    styles=text.characterStyles();if(styles[0].bold||styles[1].bold||!styles[2].bold)return false;
+    if(!App::typeToggleCharacterStyle(text,0,2,4)||text.characterStyles()[0].caps!=TextCaps::All)return false;
+    if(!App::typeToggleCharacterStyle(text,0,2,4)||text.characterStyles()[0].caps!=TextCaps::Normal)return false;
+    if(!App::typeToggleCharacterStyle(text,0,2,5)||text.characterStyles()[0].caps!=TextCaps::Small)return false;
+    if(!App::typeToggleCharacterStyle(text,0,2,5)||text.characterStyles()[0].caps!=TextCaps::Normal)return false;
+    if(App::typeToggleCharacterStyle(text,1,1,2)||App::typeToggleCharacterStyle(text,0,3,6))return false;
+    Text empty;return App::typeToggleCharacterStyle(empty,0,0,2)&&empty.normalizedRuns()[0].style.underline;
+}
+// after PhotoCraft (crates/text/src/layout/shaping.rs push_cased): all caps changes drawn glyphs,
+// not the editable source text, and its style persists through project serialization.
+static bool richTextAllCapsRendersAndPersists() {
+    Text source;source.str="Stra\xc3\x9f" "e";source.size=42;source.x=20;source.y=60;
+    Text upper=source;upper.str="STRASSE";TextStyle plain;plain.size=42;upper.runs={{upper.str.size(),plain}};
+    TextStyle caps=plain;caps.caps=TextCaps::All;source.runs={{source.str.size(),caps}};
+    std::vector<float> sourceInk,upperInk;float sourceBox[4],upperBox[4];
+    if(!textCoverage(source,240,120,sourceInk,sourceBox)||!textCoverage(upper,240,120,upperInk,upperBox))return false;
+    if(sourceInk!=upperInk||textAdvance(source)!=textAdvance(upper))return false;
+    Text small;small.str="a";small.size=40;small.x=20;small.y=60;TextStyle smallStyle;smallStyle.size=40;smallStyle.caps=TextCaps::Small;small.runs={{1,smallStyle}};
+    Text scaledCap=small;scaledCap.str="A";TextStyle scaledStyle;scaledStyle.size=28;scaledCap.runs={{1,scaledStyle}};std::vector<float> smallInk,scaledInk;float smallBox[4],scaledBox[4];
+    if(!textCoverage(small,240,120,smallInk,smallBox)||!textCoverage(scaledCap,240,120,scaledInk,scaledBox)||smallInk!=scaledInk||textAdvance(small)!=textAdvance(scaledCap))return false;
+    Text decoded;if(!decoded.load(source.save()))return false;
+    Text oldText4;if(!oldText4.load("text4 53747261c39f65 - - 42 20 60 0 0 0 1.2 0 0 1 1 0 0 0 0 -1 372c34322c302c312e322c302c312c312c302c302c302c302c302c302c2d3b -"))return false;
+    return decoded.str==source.str&&decoded.characterStyles().size()==source.characterStyles().size()&&decoded.characterStyles()[0].caps==TextCaps::All&&
+        oldText4.characterStyles()[0].caps==TextCaps::Normal;
+}
+// after PhotoCraft (crates/engine/src/cmd/type_cmds.rs changed_span and replace_text): insertion
+// inherits the character before the caret, replacement keeps its first character style, and edits stay UTF-8 aligned.
+static bool typeEditingPreservesCharacterAndParagraphRuns() {
+    Text text;text.str="ABC";TextStyle a,b,c;a.size=12;b.size=24;c.size=36;text.runs={{1,a},{1,b},{1,c}};
+    if(!App::typeApplyEditorText(text,"AXBC"))return false;
+    auto styles=text.characterStyles();if(styles.size()!=4||styles[0].size!=12||styles[1].size!=12||styles[2].size!=24||styles[3].size!=36)return false;
+    if(!App::typeApplyEditorText(text,"AZBC"))return false;
+    styles=text.characterStyles();if(styles[1].size!=12||styles[2].size!=24)return false;
+    if(!App::typeApplyEditorText(text,"AZC"))return false;
+    styles=text.characterStyles();if(styles.size()!=3||styles[0].size!=12||styles[1].size!=12||styles[2].size!=36)return false;
+    Text unicode;unicode.str="A\xc3\xa9" "B";TextStyle u1,u2,u3;u1.size=10;u2.size=20;u3.size=30;unicode.runs={{1,u1},{2,u2},{1,u3}};
+    if(!App::typeApplyEditorText(unicode,"A\xc3\xa9\xe2\x9c\xa8" "B"))return false;
+    styles=unicode.characterStyles();if(styles.size()!=4||styles[0].size!=10||styles[1].size!=20||styles[2].size!=20||styles[3].size!=30)return false;
+    Text paragraphs;paragraphs.str="A\nB";ParagraphStyle left,right;left.align=0;right.align=2;paragraphs.paragraphs={{2,left},{1,right}};
+    if(!App::typeApplyEditorText(paragraphs,"A\nxB"))return false;
+    auto paras=paragraphs.normalizedParagraphs();if(paras.size()!=2||paras[0].style.align!=0||paras[1].style.align!=2||paras[1].bytes!=2)return false;
+    Text trailing;trailing.str="A\n";trailing.paragraphs={{2,left},{0,right}};
+    if(!App::typeApplyEditorText(trailing,"A\nB\n"))return false;
+    paras=trailing.normalizedParagraphs();return paras.size()==3&&paras.back().bytes==0&&paras.back().style.align==2;
+}
 // after PhotoCraft (crates/engine/src/cmd/type_cmds.rs type.edit kernPair): manual kerning starts
 // at the font's current pair spacing, persists per character, and rejects line edges.
 static bool typeManualPairKerningStartsFromMetrics() {
@@ -639,6 +693,9 @@ int runSelfTests() {
         {"vertical Type arrow keys follow columns", verticalTypeArrowsFollowTextColumns},
         {"Type Home and End follow visual editor rows", typeEditorHomeEndFollowVisualRows},
         {"Type metric shortcuts step each selected character", typeCharacterMetricsStepPerRun},
+        {"Type style shortcuts toggle selected character runs", typeCharacterStyleShortcutsToggleSelections},
+        {"rich text all caps changes rasterized glyphs and persists", richTextAllCapsRendersAndPersists},
+        {"Type edits preserve character and paragraph runs", typeEditingPreservesCharacterAndParagraphRuns},
         {"manual Type pair kerning starts from font metrics", typeManualPairKerningStartsFromMetrics},
         {"type modified deletion uses PhotoCraft boundaries", typeModifiedDeletionMatchesPhotoCraft},
         {"type multi-click count cycle matches PhotoCraft", typeMultiClickCountsMatchPhotoCraft},

@@ -3,23 +3,26 @@
 // them (a colour or a gradient), as a shape layer's.
 #pragma once
 #include "shape.h"
+#include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
 
 // after PhotoCraft (crates/doc/src/text.rs CharStyle): per-run settings stay editable even
 // when the renderer has not yet applied a particular character attribute.
+enum class TextCaps : uint8_t { Normal = 0, Small = 1, All = 2 };
 struct TextStyle {
     std::string font;
     float size = 48, tracking = 0, leading = 1.2f;
     float baselineShift = 0, horizontalScale = 1, verticalScale = 1;
     float kern = 0;
     bool kerningOff = false;
+    TextCaps caps = TextCaps::Normal;
     bool bold = false, italic = false, underline = false, strikethrough = false;
     bool operator==(const TextStyle& o) const {
         return font == o.font && size == o.size && tracking == o.tracking && leading == o.leading &&
             baselineShift == o.baselineShift && horizontalScale == o.horizontalScale && verticalScale == o.verticalScale &&
-            kern == o.kern && kerningOff == o.kerningOff &&
+            kern == o.kern && kerningOff == o.kerningOff && caps == o.caps &&
             bold == o.bold && italic == o.italic && underline == o.underline && strikethrough == o.strikethrough;
     }
 };
@@ -53,6 +56,8 @@ struct Text {
     // each Unicode character index, including multi-byte UTF-8 characters.
     std::vector<TextStyle> characterStyles() const;
     std::vector<ParagraphRun> normalizedParagraphs() const;
+    // after PhotoCraft (crates/engine/src/cmd/type_cmds.rs replace_text): replace a UTF-8 byte range and keep run styles.
+    bool replaceText(size_t startByte, size_t endByte, const std::string& inserted);
     // after PhotoCraft (crates/doc/src/lib.rs TextLayer::sync_summary).
     void syncSummary();
 };

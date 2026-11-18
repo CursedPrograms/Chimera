@@ -2587,6 +2587,9 @@ static Text typeNext = [] { Text t; t.size = 48; return t; }();
 static std::vector<std::string> recentTypeFonts;
 static int recentTypeFontCap = 10;
 static int typeLayer = -1;              // the text layer being typed into (-1: none)
+static size_t typeStyleSelectionStart=0,typeStyleSelectionEnd=0;
+static int typeStyleSelectionLayer=-1;
+static bool typeStyleSelectionValid=false;
 static int typeReturnToolbar = -1;      // Move-tool double-click returns to Move when editing ends
 static Doc typeEditOriginalDoc;
 static bool typeEditHasSnapshot=false,typeEditCreated=false,typeEditUndoPushed=false;
@@ -2663,7 +2666,7 @@ static void typeCommit() {
     else if(typeEditHasSnapshot&&(typeEditCreated||typeEditUndoPushed))hist.push(typeEditOriginalDoc,typeEditUndoName);
     typeLayer = -1;
     changed();
-    typeEditHasSnapshot=typeEditCreated=typeEditUndoPushed=false;
+    typeEditHasSnapshot=typeEditCreated=typeEditUndoPushed=false;typeStyleSelectionValid=false;typeStyleSelectionLayer=-1;
     const int restore=typeReturnToolbar;typeReturnToolbar=-1;
     if(restore>=0&&Toolbar::current()==Toolbar::TYPE_H){Toolbar::select(restore);syncTool();}
 }
@@ -2675,7 +2678,7 @@ static void typeCancel() {
     if(typeMaskEditing){typeMaskEditing=false;typeLayer=-1;typeFocus=false;}
     else if(typeEditHasSnapshot){const bool wasDirty=typeEditOriginalDoc.dirty;doc=typeEditOriginalDoc;changed();doc.dirty=wasDirty;selChanged();typeLayer=-1;typeFocus=false;}
     else {typeLayer=-1;typeFocus=false;}
-    typeEditHasSnapshot=typeEditCreated=typeEditUndoPushed=false;
+    typeEditHasSnapshot=typeEditCreated=typeEditUndoPushed=false;typeStyleSelectionValid=false;typeStyleSelectionLayer=-1;
     const int restore=typeReturnToolbar;typeReturnToolbar=-1;
     if(restore>=0&&Toolbar::current()==Toolbar::TYPE_H){Toolbar::select(restore);syncTool();}
 }
@@ -2923,6 +2926,7 @@ static void typePathDragCancel() {
 // after PhotoCraft (crates/ui-egui/src/tools/type_tool/pointer.rs pointer_down): edit shown type under the pointer
 // unless Shift requests a new layer, then select its content in the editor.
 static void typeBegin(ImVec2 c, bool forceNew = false) {
+    typeStyleSelectionValid=false;typeStyleSelectionLayer=-1;
     // on a text layer's letters: edit it again; else new text where clicked (its first line's top a little above)
     const int hit = forceNew ? -1 : typeHitLayer(doc, c);
     if (hit >= 0) {
@@ -3111,6 +3115,26 @@ bool typeMoveEditorLineEdge(ImGuiInputTextState* state,const std::string& text,b
     state->Stb.has_preferred_x=0;state->CursorFollow=true;state->CursorAnimReset();
     return true;
 }
+// after PhotoCraft (crates/engine/src/cmd/type_cmds.rs changed_span and replace_text): find the
+// smallest UTF-8 character-aligned edit, then let Text preserve character and paragraph runs.
+bool typeApplyEditorText(Text& text,const std::string& updated){
+    const std::string& old=text.str;if(old==updated)return false;
+    auto nextByte=[](const std::string& s,size_t at){const unsigned char c=(unsigned char)s[at];return std::min(s.size(),at+(size_t)(c<0x80?1:c<0xe0?2:c<0xf0?3:4));};
+    auto previousByte=[](const std::string& s,size_t at){size_t p=at-1;while(p&&((unsigned char)s[p]&0xc0)==0x80)--p;return p;};
+    size_t prefixOld=0,prefixNew=0;
+    while(prefixOld<old.size()&&prefixNew<updated.size()){
+        const size_t oldNext=nextByte(old,prefixOld),newNext=nextByte(updated,prefixNew);
+        if(oldNext-prefixOld!=newNext-prefixNew||old.compare(prefixOld,oldNext-prefixOld,updated,prefixNew,newNext-prefixNew)!=0)break;
+        prefixOld=oldNext;prefixNew=newNext;
+    }
+    size_t suffixOld=old.size(),suffixNew=updated.size();
+    while(suffixOld>prefixOld&&suffixNew>prefixNew){
+        const size_t oldPrev=previousByte(old,suffixOld),newPrev=previousByte(updated,suffixNew);
+        if(old.compare(oldPrev,suffixOld-oldPrev,updated,newPrev,suffixNew-newPrev)!=0)break;
+        suffixOld=oldPrev;suffixNew=newPrev;
+    }
+    return text.replaceText(prefixOld,suffixOld,updated.substr(prefixNew,suffixNew-prefixNew));
+}
 // after PhotoCraft (crates/ui-egui/src/tools/type_tool/editing.rs step_char_metric): selected
 // characters move from their own metric value, and a collapsed range in non-empty text is inert.
 bool typeStepCharacterMetric(Text& text,size_t start,size_t end,int metric,float by,float dpi,float layerScaleY){
@@ -3143,6 +3167,25 @@ bool typeStepCharacterMetric(Text& text,size_t start,size_t end,int metric,float
         else text.runs.push_back({n,changedStyles[i]});
         byte=std::min(text.str.size(),byte+n);
     }
+    text.syncSummary();return true;
+}
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/editing.rs toggle_char_style): selected
+// characters toggle together; mixed selections turn the style on, and a collapsed non-empty range does nothing.
+bool typeToggleCharacterStyle(Text& text,size_t start,size_t end,int styleIndex){
+    if(styleIndex<0||styleIndex>5)return false;
+    auto value=[&](const TextStyle& s){return styleIndex==0?s.bold:styleIndex==1?s.italic:styleIndex==2?s.underline:styleIndex==3?s.strikethrough:styleIndex==4?s.caps==TextCaps::All:s.caps==TextCaps::Small;};
+    auto set=[&](TextStyle& s,bool on){if(styleIndex==0)s.bold=on;else if(styleIndex==1)s.italic=on;else if(styleIndex==2)s.underline=on;else if(styleIndex==3)s.strikethrough=on;else s.caps=on?(styleIndex==4?TextCaps::All:TextCaps::Small):TextCaps::Normal;};
+    auto styles=text.characterStyles();
+    if(text.str.empty()){
+        auto runs=text.normalizedRuns();if(start||end||runs.empty())return false;
+        const bool on=!value(runs.front().style);set(runs.front().style,on);text.runs={{0,runs.front().style}};text.syncSummary();return true;
+    }
+    start=std::min(start,styles.size());end=std::min(end,styles.size());if(start>=end)return false;
+    bool all=true;for(size_t i=start;i<end;++i)all&=value(styles[i]);
+    for(size_t i=start;i<end;++i)set(styles[i],!all);
+    text.runs.clear();size_t byte=0;
+    for(size_t i=0;i<styles.size();++i){const unsigned char c=(unsigned char)text.str[byte];const size_t n=c<0x80?1:c<0xe0?2:c<0xf0?3:4;
+        if(!text.runs.empty()&&text.runs.back().style==styles[i])text.runs.back().bytes+=n;else text.runs.push_back({n,styles[i]});byte=std::min(text.str.size(),byte+n);}
     text.syncSummary();return true;
 }
 // after PhotoCraft (crates/ui-egui/src/tools/type_tool/keys.rs handle_delete_key): modified
@@ -3268,8 +3311,15 @@ static void typeEditor() {
         else if(ImGui::IsKeyPressed(ImGuiKey_LeftArrow,true))verticalDirection=2;
         else if(ImGui::IsKeyPressed(ImGuiKey_RightArrow,true))verticalDirection=-2;
     }
-    int typeMetric=-1;float typeMetricBy=0;int pairKerningDirection=0;float pairKerningBy=0;
+    int typeMetric=-1;float typeMetricBy=0;int pairKerningDirection=0;float pairKerningBy=0;int typeStyleShortcut=-1;
     const bool typeCommand=typeIo.ConfigMacOSXBehaviors?typeIo.KeySuper:typeIo.KeyCtrl;
+    if(ImGui::IsWindowFocused()&&typeCommand&&typeIo.KeyShift&&!typeIo.KeyAlt){
+        if(ImGui::IsKeyPressed(ImGuiKey_B))typeStyleShortcut=0;
+        else if(ImGui::IsKeyPressed(ImGuiKey_I))typeStyleShortcut=1;
+        else if(ImGui::IsKeyPressed(ImGuiKey_U))typeStyleShortcut=2;
+        else if(ImGui::IsKeyPressed(ImGuiKey_Slash))typeStyleShortcut=3;
+        else if(ImGui::IsKeyPressed(ImGuiKey_K))typeStyleShortcut=4;
+    }
     if(ImGui::IsWindowFocused()&&typeIo.KeyAlt&&
        (ImGui::IsKeyPressed(ImGuiKey_UpArrow,true)||ImGui::IsKeyPressed(ImGuiKey_DownArrow,true))){
         const bool up=ImGui::IsKeyPressed(ImGuiKey_UpArrow,true);const float amount=typeCommand?10.0f:2.0f;
@@ -3288,9 +3338,9 @@ static void typeEditor() {
     if(typeSmartQuoteScriptStage==2){ImGuiIO& io=ImGui::GetIO();io.InputQueueCharacters.clear();for(ImWchar c:{'h','i',' ','"','y','o','u','"'})io.InputQueueCharacters.push_back(c);typeSmartQuoteScriptStage=3;}
     if(ImGui::IsWindowFocused())typeMapQueuedSmartQuotes(ImGui::GetInputTextState(typeInputId));
     if (ImGui::InputTextMultiline("##tb", typeBuf, sizeof typeBuf, ImVec2(360, ImGui::GetTextLineHeight() * 4 + 8))) {
-        if (!typeMaskEditing) { typeRemember("Edit Text");Layer& L = doc.layers[typeLayer]; L.text.str = typeBuf; renderFill(doc, L); changed();
-            L.name = textLayerName(L.text.str); }
-        else typeMask.str = typeBuf;
+        if (!typeMaskEditing) { Layer& L = doc.layers[typeLayer];Text updated=L.text;if(typeApplyEditorText(updated,typeBuf)){
+            typeRemember("Edit Text");L.text=std::move(updated);renderFill(doc,L);changed();L.name=textLayerName(L.text.str);}}
+        else typeApplyEditorText(typeMask,typeBuf);
     }
     if(modifiedDelete){typeIo.KeyCtrl=savedCtrl;typeIo.KeyAlt=savedAlt;typeIo.KeySuper=savedSuper;}
     if(verticalDirection)typeMoveVerticalCaret(ImGui::GetInputTextState(typeInputId),typeBuf,movementCursor,movementRangeStart,movementRangeEnd,movementSelectionAnchor,movementSelected,verticalDirection,movementExtend);
@@ -3315,6 +3365,20 @@ static void typeEditor() {
                 if(!typeMaskEditing)typeRememberDiscrete("Kerning");*target=std::move(updated);
                 if(!typeMaskEditing){renderFill(doc,doc.layers[typeLayer]);changed();}
             }}
+        }
+    }
+    if(typeStyleShortcut>=0){
+        if(ImGuiInputTextState* state=ImGui::GetInputTextState(typeInputId)){
+            state->Stb.cursor=movementCursor;state->Stb.select_start=movementSelectionAnchor;state->Stb.select_end=movementSelectionActive;
+            const size_t start=typeCodepointIndex(state,std::min(state->Stb.select_start,state->Stb.select_end));
+            const size_t end=typeCodepointIndex(state,std::max(state->Stb.select_start,state->Stb.select_end));
+            if(!typeMaskEditing&&typeLayer>=0&&typeLayer<(int)doc.layers.size()&&doc.layers[typeLayer].isText()){
+                Text updated=doc.layers[typeLayer].text;
+                if(typeToggleCharacterStyle(updated,start,end,typeStyleShortcut)){
+                    typeRememberDiscrete(typeStyleShortcut==0?"Faux Bold":typeStyleShortcut==1?"Faux Italic":typeStyleShortcut==2?"Underline":typeStyleShortcut==3?"Strikethrough":"All Caps");
+                    doc.layers[typeLayer].text=std::move(updated);renderFill(doc,doc.layers[typeLayer]);changed();
+                }
+            }
         }
     }
     if(moveLineStart||moveLineEnd)typeMoveEditorLineEdge(ImGui::GetInputTextState(typeInputId),typeBuf,moveLineEnd,movementCursor,movementSelectionAnchor,movementSelected,movementExtend);
@@ -3359,6 +3423,11 @@ static void typeEditor() {
     if(typeSmartQuoteScriptStage==1){if(ImGuiInputTextState* state=ImGui::GetInputTextState(typeInputId)){typeSmartQuoteScriptSelection=state->GetSelectionStart()==0&&state->GetSelectionEnd()==state->CurLenW;typeSmartQuoteScriptStage=2;}}
     const bool finishTypeScript=typeSmartQuoteScriptStage==3&&typeLayer>=0&&typeLayer<(int)doc.layers.size()&&doc.layers[typeLayer].text.str=="hi \xe2\x80\x9cyou\xe2\x80\x9d";
     if(typeSmartQuoteScriptStage==3){fprintf(stderr,"type-smart-quotes: %s; keyboard quotes transform and replace selected placeholder\n",finishTypeScript&&typeSmartQuoteScriptSelection?"passed":"failed");typeSmartQuoteScriptStage=4;}
+    if(ImGuiInputTextState* state=ImGui::GetInputTextState(typeInputId)){
+        typeStyleSelectionStart=typeCodepointIndex(state,std::min(state->Stb.select_start,state->Stb.select_end));
+        typeStyleSelectionEnd=typeCodepointIndex(state,std::max(state->Stb.select_start,state->Stb.select_end));
+        typeStyleSelectionLayer=typeLayer;typeStyleSelectionValid=!typeMaskEditing;
+    }
     ImGui::TextDisabled("Ctrl+Enter or click away to finish, Esc too");
     const bool cancel = ImGui::IsKeyPressed(ImGuiKey_Escape);
     const bool done = ImGui::GetIO().KeyCtrl && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter));
@@ -5347,6 +5416,17 @@ static void fillPanel() {
         if (adjSlider("##gsc", &sc, 10, 1000, "Scale %.0f%%")) { f.scale = sc / 100; ch = true; }
         ch |= adjCheck("Reverse", &f.reverse);
     }
+    if(l.isText()){
+        Text& text=l.text;const auto styles=text.characterStyles();size_t start=0,end=styles.size();
+        if(typeLayer==doc.active&&typeStyleSelectionValid&&typeStyleSelectionLayer==typeLayer){start=std::min(typeStyleSelectionStart,styles.size());end=std::min(typeStyleSelectionEnd,styles.size());}
+        auto shown=[&](TextCaps caps){
+            if(styles.empty()){const auto runs=text.normalizedRuns();return !runs.empty()&&runs.front().style.caps==caps;}
+            if(start<end){for(size_t i=start;i<end;++i)if(styles[i].caps!=caps)return false;return true;}
+            const size_t at=start?start-1:0;return styles[std::min(at,styles.size()-1)].caps==caps;
+        };
+        bool allCaps=shown(TextCaps::All);if(ImGui::Checkbox("All Caps",&allCaps)){Text updated=text;if(typeToggleCharacterStyle(updated,start,end,4)){typeRememberDiscrete("All Caps");text=std::move(updated);ch=true;}}
+        bool smallCaps=shown(TextCaps::Small);if(ImGui::Checkbox("Small Caps",&smallCaps)){Text updated=text;if(typeToggleCharacterStyle(updated,start,end,5)){typeRememberDiscrete("Small Caps");text=std::move(updated);ch=true;}}
+    }
     ImGui::PopItemWidth();
     if (ch) { renderFill(doc, l); changed(); }
     ImGui::Spacing(); ImGui::Separator();
@@ -6183,8 +6263,14 @@ void script(const std::string& what) {
         Text updated=sample;const bool leading=typeStepCharacterMetric(updated,0,updated.str.size(),0,2,doc.dpi,updated.scaleY);
         const bool baseline=typeStepCharacterMetric(updated,0,updated.str.size(),1,2,doc.dpi,updated.scaleY);
         const bool tracking=typeStepCharacterMetric(updated,0,updated.str.size(),2,20,doc.dpi,updated.scaleY);
+        Text styled=updated;const bool styleOn=typeToggleCharacterStyle(styled,0,styled.str.size(),0);
+        const bool styleOff=styleOn&&typeToggleCharacterStyle(styled,0,styled.str.size(),0)&&!styled.characterStyles().front().bold;
+        const bool capsOn=styleOff&&typeToggleCharacterStyle(styled,0,styled.str.size(),4)&&styled.characterStyles().front().caps==TextCaps::All;
+        const bool capsOff=capsOn&&typeToggleCharacterStyle(styled,0,styled.str.size(),4)&&styled.characterStyles().front().caps==TextCaps::Normal;
         Text pair;pair.str="AV";pair.size=40;const float pairBefore=textAdvance(pair);const bool kern=textAdjustKerningPair(pair,1,20)&&textAdvance(pair)>pairBefore;
         Fill fill;fill.kind=FILL_SOLID;for(int i=0;i<3;++i)fill.colour[i]=fg[i]/255.0f;addTextLayer(doc,updated,fill);doc.active=0;
+        Text capsPreview;capsPreview.str="All Caps: Stra\xc3\x9f" "e";capsPreview.x=44;capsPreview.y=180;capsPreview.size=30;TextStyle capsStyle;capsStyle.size=30;capsStyle.caps=TextCaps::All;capsPreview.runs={{capsPreview.str.size(),capsStyle}};addTextLayer(doc,capsPreview,fill);doc.active=1;
+        Text smallCapsPreview;smallCapsPreview.str="Small Caps: Stra\xc3\x9f" "e";smallCapsPreview.x=44;smallCapsPreview.y=225;smallCapsPreview.size=30;TextStyle smallCapsStyle;smallCapsStyle.size=30;smallCapsStyle.caps=TextCaps::Small;smallCapsPreview.runs={{smallCapsPreview.str.size(),smallCapsStyle}};addTextLayer(doc,smallCapsPreview,fill);doc.active=2;
         typeLayer=0;typeSnapshotStart(false);const float tracked=doc.cur().text.runs.front().style.tracking;
         Text oneStep=doc.cur().text;const bool stepped=typeStepCharacterMetric(oneStep,0,oneStep.str.size(),2,20,doc.dpi,oneStep.scaleY);
         if(stepped){typeRememberDiscrete("Tracking");doc.cur().text=std::move(oneStep);renderFill(doc,doc.cur());changed();}
@@ -6195,7 +6281,7 @@ void script(const std::string& what) {
         const bool separateRedo=separateUndo&&doc.cur().text.runs.front().style.tracking>tracked;
         typeEditHasSnapshot=typeEditCreated=typeEditUndoPushed=false;typeLayer=-1;
         Toolbar::select(Toolbar::TYPE_H);syncTool();fitNext=true;
-        fprintf(stderr,"type-metric-shortcuts: %s; selected-run leading/baseline/tracking, collapsed pair kerning and discrete metric undo\n",leading&&baseline&&tracking&&kern&&separateUndo&&separateRedo?"passed":"failed");return;
+        fprintf(stderr,"type-metric-shortcuts: %s; selected-run metrics/styles/caps, collapsed pair kerning and discrete undo\n",leading&&baseline&&tracking&&styleOn&&styleOff&&capsOn&&capsOff&&kern&&separateUndo&&separateRedo?"passed":"failed");return;
     }
     if (what == "type-shift-click") {
         doc=newDoc(480,320,false);hist=History();Text existing;existing.str="Existing words";existing.x=60;existing.y=140;existing.size=52;Fill fill;fill.kind=FILL_SOLID;for(int i=0;i<3;++i)fill.colour[i]=fg[i]/255.0f;addTextLayer(doc,existing,fill);
@@ -6244,6 +6330,9 @@ void script(const std::string& what) {
         typePlaceholderEnabled=false;Toolbar::select(Toolbar::TYPE_H);syncTool();typeBegin(ImVec2(doc.w*.5f,doc.h*.5f));
         const bool placeholderOff=typeLayer>=0&&doc.layers[typeLayer].text.str.empty()&&!typeSelectPlaceholder;
         doc=savedDoc;hist=savedHist;typeLayer=savedLayer;typeMaskEditing=savedMask;typeMask=savedTypeMask;typeFocus=savedFocus;typeSelectPlaceholder=savedSelect;memcpy(typeBuf,savedBuf,sizeof(typeBuf));
+        typePlaceholderEnabled=true;Toolbar::select(Toolbar::TYPE_H_MASK);syncTool();typeBegin(ImVec2(doc.w*.5f,doc.h*.5f));
+        const bool horizontalMaskPlaceholder=typeMaskEditing&&typeMask.str=="Lorem Ipsum"&&typeSelectPlaceholder;
+        doc=savedDoc;hist=savedHist;typeLayer=savedLayer;typeMaskEditing=savedMask;typeMask=savedTypeMask;typeFocus=savedFocus;typeSelectPlaceholder=savedSelect;memcpy(typeBuf,savedBuf,sizeof(typeBuf));
         typePlaceholderEnabled=true;Toolbar::select(Toolbar::TYPE_V_MASK);syncTool();typeBegin(ImVec2(doc.w*.5f,doc.h*.5f));
         const bool verticalMaskEmpty=typeMaskEditing&&typeMask.str.empty();
         doc=savedDoc;hist=savedHist;typeLayer=savedLayer;typeMaskEditing=savedMask;typeMask=savedTypeMask;typeFocus=savedFocus;typeSelectPlaceholder=savedSelect;memcpy(typeBuf,savedBuf,sizeof(typeBuf));
@@ -6258,7 +6347,7 @@ void script(const std::string& what) {
         const bool disabledKeepsStraight=io.InputQueueCharacters.Size==1&&io.InputQueueCharacters[0]=='"';io.InputQueueCharacters.clear();for(ImWchar ch:queued)io.InputQueueCharacters.push_back(ch);
         typeSmartQuotesEnabled=oldSmart;typePlaceholderEnabled=oldPlaceholder;
         typePreferencesScriptOpen=true;
-        fprintf(stderr,"type-preferences: %s (stored=%d recent=%d placeholder=%d off=%d vertical-mask=%d quotes-on=%d quotes-off=%d); preference and Type creation rules\n",stored&&recentStored&&placeholder&&placeholderOff&&verticalMaskEmpty&&quotes&&queueMapped&&disabledKeepsStraight?"passed":"failed",stored?1:0,recentStored?1:0,placeholder?1:0,placeholderOff?1:0,verticalMaskEmpty?1:0,quotes&&queueMapped?1:0,disabledKeepsStraight?1:0);return;
+        fprintf(stderr,"type-preferences: %s (stored=%d recent=%d placeholder=%d off=%d horizontal-mask-placeholder=%d vertical-mask-empty=%d quotes-on=%d quotes-off=%d); preference and Type creation rules\n",stored&&recentStored&&placeholder&&placeholderOff&&horizontalMaskPlaceholder&&verticalMaskEmpty&&quotes&&queueMapped&&disabledKeepsStraight?"passed":"failed",stored?1:0,recentStored?1:0,placeholder?1:0,placeholderOff?1:0,horizontalMaskPlaceholder?1:0,verticalMaskEmpty?1:0,quotes&&queueMapped?1:0,disabledKeepsStraight?1:0);return;
     }
     if (what == "text-empty") {
         Toolbar::select(Toolbar::TYPE_H); syncTool();

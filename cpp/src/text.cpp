@@ -43,6 +43,18 @@ static bool unicodeAlphanumeric(uint32_t cp) {
     return std::use_facet<std::ctype<wchar_t>>(unicodeLocale).is(std::ctype_base::alnum,(wchar_t)cp);
 #endif
 }
+static bool unicodeLowercase(uint32_t cp){
+#ifdef _WIN32
+    wchar_t units[2];int count=1;
+    if(cp<=0xffff)units[0]=(wchar_t)cp;
+    else{cp-=0x10000;units[0]=(wchar_t)(0xd800+(cp>>10));units[1]=(wchar_t)(0xdc00+(cp&0x3ff));count=2;}
+    WORD types[2]={};if(!GetStringTypeW(CT_CTYPE1,units,count,types))return false;
+    for(int i=0;i<count;++i)if(types[i]&C1_LOWER)return true;
+    return false;
+#else
+    return cp<=static_cast<uint32_t>(WCHAR_MAX)&&std::towlower((wchar_t)cp)!=(wchar_t)cp;
+#endif
+}
 
 // after PhotoCraft (crates/text/src/layout/navigate.rs word_boundary): skip separators then
 // consume the adjacent alphanumeric run, counting Unicode code points rather than UTF-8 bytes.
@@ -76,6 +88,26 @@ static uint32_t utf8CodePoint(const std::string& text,size_t i,size_t& bytes){
     if((c&0xf0)==0xe0&&i+2<text.size()){bytes=3;return ((c&0x0f)<<12)|(((unsigned char)text[i+1]&0x3f)<<6)|((unsigned char)text[i+2]&0x3f);}
     if((c&0xf8)==0xf0&&i+3<text.size()){bytes=4;return ((c&7)<<18)|(((unsigned char)text[i+1]&0x3f)<<12)|(((unsigned char)text[i+2]&0x3f)<<6)|((unsigned char)text[i+3]&0x3f);}
     return c;
+}
+static size_t utf8Length(uint32_t cp){return cp<0x80?1:cp<0x800?2:cp<0x10000?3:4;}
+// after PhotoCraft (crates/text/src/layout/shaping.rs push_cased): use the Unicode uppercase
+// mapping only when it occupies the same UTF-8 byte length as the source character.
+static std::vector<uint32_t> uppercaseCodePoints(uint32_t cp){
+    const uint32_t original=cp;
+    if(cp==0x00df)return {'S','S'};
+#ifdef _WIN32
+    wchar_t input[2];int inputLength=1;
+    if(cp<=0xffff)input[0]=(wchar_t)cp;
+    else{cp-=0x10000;input[0]=(wchar_t)(0xd800+(cp>>10));input[1]=(wchar_t)(0xdc00+(cp&0x3ff));inputLength=2;}
+    wchar_t output[8]{};const int outputLength=LCMapStringEx(LOCALE_NAME_INVARIANT,LCMAP_UPPERCASE,input,inputLength,output,8,nullptr,nullptr,0);
+    if(outputLength<=0)return {original};
+    std::vector<uint32_t> result;
+    for(int i=0;i<outputLength;++i){uint32_t value=(uint16_t)output[i];if(value>=0xd800&&value<=0xdbff&&i+1<outputLength){const uint32_t low=(uint16_t)output[++i];value=0x10000+((value-0xd800)<<10)+(low-0xdc00);}result.push_back(value);}
+    return result.empty()?std::vector<uint32_t>{original}:result;
+#else
+    if(cp>static_cast<uint32_t>(WCHAR_MAX))return {cp};
+    return {(uint32_t)std::towupper((wchar_t)cp)};
+#endif
 }
 static bool quoteOpensAfter(uint32_t c){
     const bool ws=(c>=9&&c<=13)||c==32||c==0x85||c==0xa0||c==0x1680||(c>=0x2000&&c<=0x200a)||c==0x2028||c==0x2029||c==0x202f||c==0x205f||c==0x3000;
@@ -142,18 +174,19 @@ std::string Text::save() const {
     snprintf(b, sizeof b, " %g %g %g %d %d %g %g %g %g %g %g %g %g %d %d %g", size, x, y, align, vertical ? 1 : 0, tracking, leading, boxWidth, boxHeight, scaleX, scaleY, rotation, pathStart, pathText ? 1 : 0, pathFlip ? 1 : 0, pathEnd);
     std::string runData, paraData;
     for (const TextRun& r : runs) {
-        char q[256]; snprintf(q, sizeof q, "%zu,%g,%g,%g,%g,%g,%g,%d,%d,%d,%d,%d,%g,", r.bytes, r.style.size, r.style.tracking, r.style.leading,
-            r.style.baselineShift, r.style.horizontalScale, r.style.verticalScale, r.style.bold, r.style.italic, r.style.underline, r.style.strikethrough, r.style.kerningOff, r.style.kern);
+        char q[256]; snprintf(q, sizeof q, "%zu,%g,%g,%g,%g,%g,%g,%d,%d,%d,%d,%d,%g,%d,", r.bytes, r.style.size, r.style.tracking, r.style.leading,
+            r.style.baselineShift, r.style.horizontalScale, r.style.verticalScale, r.style.bold, r.style.italic, r.style.underline, r.style.strikethrough, r.style.kerningOff, r.style.kern, (int)r.style.caps);
         runData += q + hex(r.style.font) + ";";
     }
     for (const ParagraphRun& r : paragraphs) { char q[180]; snprintf(q, sizeof q, "%zu,%d,%g,%g,%g,%g,%g,%g;", r.bytes, r.style.align, r.style.firstIndent, r.style.startIndent, r.style.endIndent, r.style.spaceBefore, r.style.spaceAfter, r.style.autoLeading); paraData += q; }
-    return "text4 " + hex(str) + " " + hex(font) + " " + hex(pathData) + b + " " + hex(runData) + " " + hex(paraData);
+    return "text5 " + hex(str) + " " + hex(font) + " " + hex(pathData) + b + " " + hex(runData) + " " + hex(paraData);
 }
 bool Text::load(const std::string& blob) {
     auto unhex = [](const std::string& h) { std::string o; if (h.empty() || h[0] == '-') return o; for (size_t i = 0; i + 1 < h.size(); i += 2) { char b[3] = {h[i], h[i + 1], 0}; o += (char)strtol(b, nullptr, 16); } return o; };
     std::string version, textHex, fontHex; int al = 0, v = 0;
-    if (blob.rfind("text4 ", 0) == 0 || blob.rfind("text3 ", 0) == 0 || blob.rfind("text2 ", 0) == 0) {
-        const bool v4 = blob.rfind("text4 ", 0) == 0;
+    if (blob.rfind("text5 ", 0) == 0 || blob.rfind("text4 ", 0) == 0 || blob.rfind("text3 ", 0) == 0 || blob.rfind("text2 ", 0) == 0) {
+        const bool v5 = blob.rfind("text5 ", 0) == 0;
+        const bool v4 = v5 || blob.rfind("text4 ", 0) == 0;
         const bool v3 = v4 || blob.rfind("text3 ", 0) == 0;
         std::string pathHex; int onPath = 0, flipped = 0;
         std::istringstream in(blob);
@@ -167,10 +200,12 @@ bool Text::load(const std::string& blob) {
             std::string rh, ph; if (!(in >> rh >> ph)) return false;
             std::istringstream ri(unhex(rh)); std::string item;
             while (std::getline(ri, item, ';')) { if (item.empty()) continue; std::istringstream fields(item); TextRun r; std::string fhex; int bo=0,it=0,un=0,st=0; char comma;
-                int ko=0;
+                int ko=0,caps=0;
                 if (!(fields >> r.bytes >> comma >> r.style.size >> comma >> r.style.tracking >> comma >> r.style.leading >> comma >> r.style.baselineShift >> comma >> r.style.horizontalScale >> comma >> r.style.verticalScale >> comma >> bo >> comma >> it >> comma >> un >> comma >> st >> comma)) return false;
                 if(v4 && !(fields >> ko >> comma >> r.style.kern >> comma))return false;
+                if(v5 && !(fields >> caps >> comma))return false;
                 r.style.kerningOff=ko!=0;
+                r.style.caps=(TextCaps)std::clamp(caps,0,2);
                 if (!(fields >> fhex)) return false; r.style.font = unhex(fhex); r.style.bold=bo!=0; r.style.italic=it!=0; r.style.underline=un!=0; r.style.strikethrough=st!=0; runs.push_back(std::move(r));
             }
             std::istringstream pi(unhex(ph));
@@ -251,6 +286,55 @@ std::vector<ParagraphRun> Text::normalizedParagraphs() const {
         if(preceding==str.size()) out.push_back({0,paragraphs.back().style});
     }
     return out;
+}
+
+// after PhotoCraft (crates/engine/src/cmd/type_cmds.rs replace_text): insertions inherit the
+// character before the caret, replacements inherit the first removed character, and paragraph
+// insertion at a paragraph start belongs to that following paragraph.
+bool Text::replaceText(size_t startByte,size_t endByte,const std::string& inserted){
+    startByte=std::min(startByte,str.size());endByte=std::clamp(endByte,startByte,str.size());
+    while(startByte<str.size()&&startByte&&(static_cast<unsigned char>(str[startByte])&0xc0)==0x80)++startByte;
+    while(endByte<str.size()&&endByte&&(static_cast<unsigned char>(str[endByte])&0xc0)==0x80)++endByte;
+    std::string replacement;replacement.reserve(inserted.size());
+    for(size_t i=0;i<inserted.size();++i){if(inserted[i]=='\r'){if(i+1<inserted.size()&&inserted[i+1]=='\n')++i;replacement.push_back('\n');}else replacement.push_back(inserted[i]);}
+    const TextStyle firstChar=normalizedRuns().front().style;
+    const auto oldParas=normalizedParagraphs();const ParagraphStyle firstPara=oldParas.empty()?ParagraphStyle{}:oldParas.front().style;
+    const bool hadTrailingEmpty=!oldParas.empty()&&oldParas.back().bytes==0&&(!str.empty()&&(str.back()=='\n'||str.back()=='\r'));
+    auto charRuns=normalizedRuns();
+    auto paraRuns=oldParas;
+    auto adjust=[&](auto runs,size_t a,size_t b,size_t add,bool paragraph,const auto& fallback,auto equal){
+        using Run=typename decltype(runs)::value_type;
+        std::vector<Run> out;size_t at=0;
+        auto push=[&](size_t len,const auto& style){if(!len){if(out.empty()&&add==0)out.push_back({0,style});return;}
+            if(!out.empty()&&equal(out.back().style,style))out.back().bytes+=len;else out.push_back({len,style});};
+        auto startsHere=[&]()->size_t{size_t s=0;for(size_t i=0;i<runs.size();++i){if(s==a&&runs[i].bytes>0)return i;s+=runs[i].bytes;}return runs.size();};
+        size_t host=runs.empty()?0:runs.size()-1;
+        if(paragraph&&a==b&&hadTrailingEmpty&&!runs.empty()&&runs.back().bytes==0&&a==str.size())host=runs.size()-1;
+        else if(paragraph&&a==b&&a>0){const size_t next=startsHere();if(next<runs.size())host=next;else host=runs.empty()?0:runs.size()-1;}
+        else if(!runs.empty()){
+            for(size_t i=0;i<runs.size();++i){const size_t rs=at,re=at+runs[i].bytes;at=re;
+                if(a==0?(re>0||rs==0):(a<b?(a>=rs&&a<re):(a>rs&&a<=re))){host=i;break;}}
+        }
+        at=0;
+        for(size_t i=0;i<runs.size();++i){const size_t rs=at,re=at+runs[i].bytes;at=re;
+            const size_t keep=(std::clamp(a,rs,re)-rs)+(re-std::clamp(b,rs,re));
+            const size_t len=keep+(i==host?add:0);push(len,runs[i].style);
+        }
+        if(out.empty())out.push_back({0,runs.empty()?fallback:runs.front().style});
+        return out;
+    };
+    auto sameChar=[](const TextStyle& a,const TextStyle& b){return a==b;};
+    auto samePara=[](const ParagraphStyle& a,const ParagraphStyle& b){return a.align==b.align&&a.firstIndent==b.firstIndent&&a.startIndent==b.startIndent&&a.endIndent==b.endIndent&&a.spaceBefore==b.spaceBefore&&a.spaceAfter==b.spaceAfter&&a.autoLeading==b.autoLeading;};
+    const size_t add=replacement.size();
+    auto nextChars=adjust(charRuns,startByte,endByte,add,false,firstChar,sameChar);
+    auto nextParas=adjust(paraRuns,startByte,endByte,add,true,firstPara,samePara);
+    str.replace(startByte,endByte-startByte,replacement);
+    runs=std::move(nextChars);paragraphs=std::move(nextParas);
+    if(runs.empty())runs.push_back({0,firstChar});
+    if(paragraphs.empty())paragraphs.push_back({0,firstPara});
+    if(str.empty()){runs={{0,runs.front().style}};paragraphs={{0,paragraphs.front().style}};}
+    else if((str.back()=='\n'||str.back()=='\r')&&(paragraphs.empty()||paragraphs.back().bytes!=0))paragraphs.push_back({0,paragraphs.empty()?firstPara:paragraphs.back().style});
+    syncSummary();return true;
 }
 
 // after PhotoCraft (crates/doc/src/lib.rs TextLayer::sync_summary): simple layer fields mirror
@@ -338,7 +422,7 @@ static std::pair<int,int> strikeMetrics(Loaded& loaded) {
 
 // Keep the source character index with each glyph; wrapped lines must still resolve the
 // character style that was attached before layout.
-struct TextGlyph { int codepoint = 0; size_t character = 0; };
+struct TextGlyph { int codepoint = 0; size_t character = 0; float sizeScale = 1.0f; };
 static const TextStyle& styleForCharacter(const std::vector<TextStyle>& styles, size_t character, const TextStyle& fallback) {
     return character < styles.size() ? styles[character] : fallback;
 }
@@ -351,7 +435,7 @@ static float glyphAdvance(const TextGlyph& glyph, const TextGlyph* next, const s
     const TextStyle& style = styleForCharacter(styles, glyph.character, fallback);
     Loaded* loaded = fontForStyle(style, fallbackFont);
     if (!loaded) return 0;
-    const float size = std::max(1.0f, style.size);
+    const float size = std::max(1.0f, style.size*glyph.sizeScale);
     const float scale = stbtt_ScaleForPixelHeight(&loaded->info, size);
     int advance = 0, bearing = 0;
     stbtt_GetCodepointHMetrics(&loaded->info, glyph.codepoint, &advance, &bearing);
@@ -366,7 +450,7 @@ static float glyphAdvance(const TextGlyph& glyph, const TextGlyph* next, const s
     const float horizontalScale=std::isfinite(style.horizontalScale)&&style.horizontalScale>0?style.horizontalScale:1.0f;
     return (advance * scale + kern + style.tracking / 1000.0f * size) * horizontalScale;
 }
-static std::vector<std::vector<TextGlyph>> linesOf(const std::string& s) {   // UTF-8 to code points, by line
+static std::vector<std::vector<TextGlyph>> linesOf(const std::string& s,const std::vector<TextStyle>& styles) {   // UTF-8 to styled glyphs, by line
     std::vector<std::vector<TextGlyph>> lines(1);
     size_t character = 0;
     for (size_t i = 0; i < s.size();) {
@@ -375,7 +459,17 @@ static std::vector<std::vector<TextGlyph>> linesOf(const std::string& s) {   // 
         if (c >= 0xF0) { cp = c & 7; n = 4; } else if (c >= 0xE0) { cp = c & 15; n = 3; } else if (c >= 0xC0) { cp = c & 31; n = 2; }
         for (int k = 1; k < n && i + k < s.size(); ++k) cp = (cp << 6) | (s[i + k] & 63);
         i += n;
-        if (cp == '\n') lines.emplace_back(); else if (cp != '\r') lines.back().push_back({cp, character});
+        if (cp == '\n') lines.emplace_back();
+        else if (cp != '\r') {
+            static const TextStyle defaultStyle{};
+            const TextStyle& style=styleForCharacter(styles,character,defaultStyle);
+            if(style.caps==TextCaps::All||style.caps==TextCaps::Small){
+                const auto upper=uppercaseCodePoints((uint32_t)cp);size_t mappedBytes=0;for(uint32_t value:upper)mappedBytes+=utf8Length(value);
+                const bool isSmallCaps=style.caps==TextCaps::Small&&unicodeLowercase((uint32_t)cp);
+                if(mappedBytes==(size_t)n){for(uint32_t value:upper)lines.back().push_back({(int)value,character,isSmallCaps?.7f:1.0f});}
+                else lines.back().push_back({cp,character});
+            }else lines.back().push_back({cp,character});
+        }
         ++character;
     }
     return lines;
@@ -462,7 +556,7 @@ static TextPathMetric pathMetric(const Text& t) {
 float textAdvance(const Text& t) {
     const auto styles = t.characterStyles();
     TextStyle fallback; fallback.font=t.font; fallback.size=t.size; fallback.tracking=t.tracking; fallback.leading=t.leading;
-    const auto lines = linesOf(t.str);
+    const auto lines = linesOf(t.str,styles);
     if (lines.empty() || t.vertical) return 0;
     const auto& line = lines.front(); float width = 0;
     for (size_t i = 0; i < line.size(); ++i)
@@ -484,7 +578,7 @@ bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float bo
     int asc, desc, gap; stbtt_GetFontVMetrics(fi, &asc, &desc, &gap);
     const auto styles = t.characterStyles();
     TextStyle fallback; fallback.font=t.font; fallback.size=t.size; fallback.tracking=t.tracking; fallback.leading=t.leading;
-    auto lines = linesOf(t.str);
+    auto lines = linesOf(t.str,styles);
     if (!t.vertical) wrapLines(lines, styles, fallback, t.font, t.boxWidth);
     const TextPathMetric path = t.pathText ? pathMetric(t) : TextPathMetric();
     const bool pathOn = t.pathText && !t.vertical && path.length > 0;
@@ -653,7 +747,7 @@ bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float bo
     };
     auto scaleForGlyph = [&](const TextGlyph& glyph) {
         return stbtt_ScaleForPixelHeight(&loadedForGlyph(glyph)->info,
-            std::max(1.0f, styleForCharacter(styles, glyph.character, fallback).size));
+            std::max(1.0f, styleForCharacter(styles, glyph.character, fallback).size*glyph.sizeScale));
     };
     struct LineMetrics { float ascent=0, descent=0, step=0; };
     std::vector<LineMetrics> metrics(lines.size());
@@ -693,7 +787,7 @@ bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float bo
                 const float horizontalScale=std::isfinite(style.horizontalScale)&&style.horizontalScale>0?style.horizontalScale:1.0f;
                 const float verticalScale=std::isfinite(style.verticalScale)&&style.verticalScale>0?style.verticalScale:1.0f;
                 const auto strike=strikeMetrics(*glyphFont);
-                blit(L[i].codepoint, gx, gy, &glyphFont->info, scaleForGlyph(L[i]),style.size,L[i].character,adv,strike.first,strike.second,horizontalScale,verticalScale,
+                blit(L[i].codepoint, gx, gy, &glyphFont->info, scaleForGlyph(L[i]),style.size*L[i].sizeScale,L[i].character,adv,strike.first,strike.second,horizontalScale,verticalScale,
                      style.baselineShift*pointsToPixels,false,style.bold,style.italic,style.underline,style.strikethrough,
                      pathOn ? gx - t.x + adv * 0.5f : std::numeric_limits<float>::quiet_NaN());
                 gx += adv;
@@ -706,7 +800,7 @@ bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float bo
         float colX=t.x;
         for (size_t li = 0; li < lines.size(); ++li) {
             const auto& L = lines[li];
-            float total = 0; for(const TextGlyph& glyph:L){const TextStyle& style=styleForCharacter(styles,glyph.character,fallback);const float hs=std::isfinite(style.horizontalScale)&&style.horizontalScale>0?style.horizontalScale:1.0f;total+=(style.size+style.tracking/1000.0f*style.size)*hs;}
+            float total = 0; for(const TextGlyph& glyph:L){const TextStyle& style=styleForCharacter(styles,glyph.character,fallback);const float hs=std::isfinite(style.horizontalScale)&&style.horizontalScale>0?style.horizontalScale:1.0f;const float glyphSize=style.size*glyph.sizeScale;total+=(glyphSize+style.tracking/1000.0f*glyphSize)*hs;}
             float gy = t.y - (t.align == 1 ? total / 2 : t.align == 2 ? total : 0) + metrics[li].ascent;
             const float cx = colX;
             for (size_t i = 0; i < L.size(); ++i) {
@@ -716,8 +810,8 @@ bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float bo
                 const float hs=std::isfinite(style.horizontalScale)&&style.horizontalScale>0?style.horizontalScale:1.0f;
                 const float vs=std::isfinite(style.verticalScale)&&style.verticalScale>0?style.verticalScale:1.0f;
                 const auto strike=strikeMetrics(*glyphFont);
-                const float step=style.size*vs+style.tracking/1000.0f*style.size*hs;
-                blit(L[i].codepoint, cx - adv * glyphScale * hs / 2, gy,&glyphFont->info,glyphScale,style.size,L[i].character,step,strike.first,strike.second,hs,vs,
+                const float glyphSize=style.size*L[i].sizeScale,step=glyphSize*vs+style.tracking/1000.0f*glyphSize*hs;
+                blit(L[i].codepoint, cx - adv * glyphScale * hs / 2, gy,&glyphFont->info,glyphScale,glyphSize,L[i].character,step,strike.first,strike.second,hs,vs,
                      style.baselineShift*pointsToPixels,true,style.bold,style.italic,style.underline,style.strikethrough);
                 gy+=style.size*vs+style.tracking/1000.0f*style.size*hs;
             }
