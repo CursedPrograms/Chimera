@@ -1743,11 +1743,12 @@ static void cropBegin(ImVec2 p) {
     }
     if(cropDragPart<0) { cropDragPart=9; cropR[0]=cropR[2]=p.x; cropR[1]=cropR[3]=p.y; }
 }
-static void cropDragTo(ImVec2 p) {
+static void cropDragTo(ImVec2 p, bool snapAngle=false) {
     if(cropDragPart==10) {
         const float cx=(cropBase[0]+cropBase[2])*.5f,cy=(cropBase[1]+cropBase[3])*.5f;
         cropAngle=std::atan2(p.y-cy,p.x-cx)-cropRotateStart;
         while(cropAngle>3.14159265f)cropAngle-=6.2831853f; while(cropAngle< -3.14159265f)cropAngle+=6.2831853f;
+        if(snapAngle) cropAngle=std::round(cropAngle/(15.0f*0.01745329252f))*(15.0f*0.01745329252f);
         return;
     }
     const float dx=p.x-cropDragStart.x, dy=p.y-cropDragStart.y;
@@ -3312,7 +3313,7 @@ static void canvasInput() {
             break;
         case T_LASSO: if (std::hypot(c.x - lasso[lasso.size() - 2], c.y - lasso.back()) * zoom > 2) { lasso.push_back(c.x); lasso.push_back(c.y); } break;
         case T_DROPPER: pickColour(c, io.KeyAlt); break;
-        case T_CROP: cropDragTo(c); break;
+        case T_CROP: cropDragTo(c, io.KeyShift); break;
         case T_PCROP:
             if (pcropDragPart >= 0) { pcropQ[pcropDragPart * 2] = c.x; pcropQ[pcropDragPart * 2 + 1] = c.y; }
             else if (pcropDragPart == -2) {
@@ -5324,8 +5325,8 @@ void script(const std::string& what) {
         Toolbar::select(Toolbar::CROP); syncTool(); cropR[0]=doc.w*.2f;cropR[1]=doc.h*.2f;cropR[2]=doc.w*.8f;cropR[3]=doc.h*.8f;cropAngle=0;
         const float cx=(cropR[0]+cropR[2])*.5f,cy=(cropR[1]+cropR[3])*.5f;
         cropBegin(ImVec2(cropR[2]+14/std::max(.01f,zoom),cy));
-        cropDragTo(ImVec2(cx,cy+cropR[2]-cx));
-        const bool rotated=cropDragPart==10 && std::fabs(cropAngle)>.1f;
+        cropDragTo(ImVec2(cx,cy+cropR[2]-cx+17),true);
+        const bool rotated=cropDragPart==10 && std::fabs(cropAngle-90.0f*0.01745329252f)<.001f;
         cropDragPart=-1;
         const float degrees=cropAngle*57.29578f;
         applyCrop();
