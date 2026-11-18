@@ -150,6 +150,9 @@ static float cropShieldOpacity = 75.0f;
 static int cropPreset = 0;
 static char cropWidth[40] = "", cropHeight[40] = "", cropResolution[40] = "";
 static bool cropResolutionCm = false;
+// after PhotoCraft (crates/ui-egui/src/tools/crop_straighten.rs)
+static bool straightenArmed=false, straightenLine=false, straightenFit=false;
+static ImVec2 straightenStart,straightenEnd;
 struct CropPreset { std::string name,width,height,resolution; bool cm=false; };
 static std::vector<CropPreset> cropUserPresets;
 static int cropPresetChoice=0;
@@ -1824,6 +1827,21 @@ static std::filesystem::path cropPresetFile(){return std::filesystem::path(prefs
 static void cropLoadUserPresets(){cropUserPresets.clear();std::ifstream f(cropPresetFile());CropPreset p;while(f>>std::quoted(p.name)>>std::quoted(p.width)>>std::quoted(p.height)>>std::quoted(p.resolution)>>p.cm){if(!p.name.empty())cropUserPresets.push_back(p);p=CropPreset{};}}
 static void cropSaveUserPresets(){std::ofstream f(cropPresetFile(),std::ios::trunc);for(const auto&p:cropUserPresets)f<<std::quoted(p.name)<<' '<<std::quoted(p.width)<<' '<<std::quoted(p.height)<<' '<<std::quoted(p.resolution)<<' '<<p.cm<<'\n';}
 static void cropSelectUserPreset(int i){if(i<0||i>=(int)cropUserPresets.size())return;const CropPreset&p=cropUserPresets[i];strcpy_s(cropWidth,p.width.c_str());strcpy_s(cropHeight,p.height.c_str());strcpy_s(cropResolution,p.resolution.c_str());cropResolutionCm=p.cm;cropPreset=1;cropSavedChoice=i;fitCropAspect();}
+static bool straightenCrop(ImVec2 a,ImVec2 b,bool fit) {
+    const float dx=b.x-a.x,dy=b.y-a.y,len=std::hypot(dx,dy);
+    if(!std::isfinite(len)||len*zoom<3.0f)return false;
+    float degrees=std::atan2(dy,dx)*57.295779513f;
+    if(degrees>45)degrees-=90;else if(degrees< -45)degrees+=90;
+    cropAngle=degrees*0.01745329252f;
+    if(fit){
+        const float w=std::fabs(cropR[2]-cropR[0]),h=std::fabs(cropR[3]-cropR[1]);
+        const float cs=std::fabs(std::cos(cropAngle)),sn=std::fabs(std::sin(cropAngle));
+        const float scale=std::min((float)doc.w/std::max(1.0f,w*cs+h*sn),(float)doc.h/std::max(1.0f,w*sn+h*cs));
+        const float nw=w*scale,nh=h*scale,cx=doc.w*.5f,cy=doc.h*.5f;
+        cropR[0]=cx-nw*.5f;cropR[1]=cy-nh*.5f;cropR[2]=cx+nw*.5f;cropR[3]=cy+nh*.5f;
+    }
+    cropDragPart=-1;return true;
+}
 // Check that the four corners make a nondegenerate convex quadrilateral.
 static bool pcropValid(const float q[8]) {
     double area = 0;
@@ -3112,7 +3130,8 @@ static void canvasInput() {
             dragging = false; break;
         }
         case T_CROP:
-            if (cropPending && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) { applyCrop(); dragging = false; }
+            if(straightenArmed||io.KeyCtrl){straightenLine=true;straightenFit=straightenArmed;straightenStart=straightenEnd=c;}
+            else if (cropPending && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) { applyCrop(); dragging = false; }
             else cropBegin(c);
             break;
         case T_PCROP:
@@ -3372,7 +3391,7 @@ static void canvasInput() {
             break;
         case T_LASSO: if (std::hypot(c.x - lasso[lasso.size() - 2], c.y - lasso.back()) * zoom > 2) { lasso.push_back(c.x); lasso.push_back(c.y); } break;
         case T_DROPPER: pickColour(c, io.KeyAlt); break;
-        case T_CROP: cropDragTo(c, io.KeyShift); break;
+        case T_CROP: if(straightenLine)straightenEnd=c;else cropDragTo(c, io.KeyShift); break;
         case T_PCROP:
             if (pcropDragPart >= 0) { pcropQ[pcropDragPart * 2] = c.x; pcropQ[pcropDragPart * 2 + 1] = c.y; }
             else if (pcropDragPart == -2) {
@@ -3451,7 +3470,10 @@ static void canvasInput() {
             break;
         case T_LASSO: if (lasso.size() >= 6) finishShape(shapePolygon(doc, lasso), modeFromKeys(), "Lasso"); lasso.clear(); break;
         case T_BRUSH: case T_ERASER: case T_PENCIL: case T_RETOUCH: strokeEnd(stroke); break;
-        case T_CROP: if (std::fabs(cropR[2] - cropR[0]) < 2 || std::fabs(cropR[3] - cropR[1]) < 2) cropPending = false; cropDragPart=-1; break;
+        case T_CROP:
+            if(straightenLine){straightenCrop(straightenStart,c,straightenFit);straightenLine=false;if(straightenFit)straightenArmed=false;}
+            else if (std::fabs(cropR[2] - cropR[0]) < 2 || std::fabs(cropR[3] - cropR[1]) < 2) cropPending = false;
+            cropDragPart=-1; break;
         case T_PCROP:
             if (pcropDragPart == -1) {
                 if (std::hypot(c.x - dragStart.x, c.y - dragStart.y) * zoom >= 3) {
@@ -3556,7 +3578,7 @@ static void canvasInput() {
     }
     if (t == T_CROP && cropPending && !dragging && dlg == D_NONE) {   // Enter crops, Escape lets it go
         if (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)) applyCrop();
-        else if (ImGui::IsKeyPressed(ImGuiKey_Escape)) cropPending = false;
+        else if (ImGui::IsKeyPressed(ImGuiKey_Escape)) { cropPending = false;straightenArmed=false;straightenLine=false; }
         else if (ImGui::IsKeyPressed(ImGuiKey_H) && (cropR[0]!=0 || cropR[1]!=0 || cropR[2]!=doc.w || cropR[3]!=doc.h)) cropShowArea=!cropShowArea;
         else if (ImGui::IsKeyPressed(ImGuiKey_O)) {
             if (ImGui::GetIO().KeyShift) cropOverlayOrientation = (cropOverlayOrientation + 1) % (cropOverlay == 3 ? 2 : cropOverlay == 5 ? 4 : 1);
@@ -3832,6 +3854,7 @@ static void drawCanvas() {
         const ImVec2 handles[8]={q0,ImVec2((q0.x+q1.x)*.5f,(q0.y+q1.y)*.5f),q1,ImVec2((q1.x+q2.x)*.5f,(q1.y+q2.y)*.5f),q2,ImVec2((q2.x+q3.x)*.5f,(q2.y+q3.y)*.5f),q3,ImVec2((q3.x+q0.x)*.5f,(q3.y+q0.y)*.5f)};
         for(const ImVec2 h:handles) { dl->AddRectFilled(ImVec2(h.x-3,h.y-3),ImVec2(h.x+3,h.y+3),IM_COL32(255,255,255,240)); dl->AddRect(ImVec2(h.x-3,h.y-3),ImVec2(h.x+3,h.y+3),IM_COL32(30,30,30,255)); }
     }
+    if(tool==T_CROP&&straightenLine){const ImVec2 a=toScreen(straightenStart.x,straightenStart.y),b=toScreen(straightenEnd.x,straightenEnd.y);dl->AddLine(a,b,IM_COL32(0,0,0,220),3);dl->AddLine(a,b,IM_COL32(255,255,255,245),1.2f);const float deg=std::atan2(straightenEnd.y-straightenStart.y,straightenEnd.x-straightenStart.x)*57.2957795f;char label[32];snprintf(label,sizeof(label),"%.1f°",deg);dl->AddText(ImVec2(b.x+10,b.y-18),IM_COL32(255,255,255,255),label);}
     if (tool == T_PCROP && pcropPending) {
         ImVec2 q[4];
         for (int i = 0; i < 4; ++i) q[i] = toScreen(pcropQ[i * 2], pcropQ[i * 2 + 1]);
@@ -4168,6 +4191,7 @@ static void optionsBar() {
         ImGui::SameLine(0,3);ImGui::BeginDisabled(cropUserPresets.empty());if(ImGui::SmallButton("Delete Preset"))ImGui::OpenPopup("Delete Crop Preset");ImGui::EndDisabled();
         if(ImGui::BeginPopupModal("New Crop Preset",nullptr,ImGuiWindowFlags_AlwaysAutoResize)){ImGui::TextUnformatted("Name:");ImGui::InputText("##newCropPresetName",cropNewName,sizeof(cropNewName));if(ImGui::Button("Save",ImVec2(90,0))&&cropNewName[0]&&cropWidth[0]&&cropHeight[0]){CropPreset p{cropNewName,cropWidth,cropHeight,cropResolution,cropResolutionCm};auto it=std::find_if(cropUserPresets.begin(),cropUserPresets.end(),[&](const CropPreset&q){return q.name==p.name;});if(it==cropUserPresets.end())cropUserPresets.push_back(p);else *it=p;cropSavedChoice=(int)(std::find_if(cropUserPresets.begin(),cropUserPresets.end(),[&](const CropPreset&q){return q.name==p.name;})-cropUserPresets.begin());cropSaveUserPresets();ImGui::CloseCurrentPopup();}ImGui::SameLine();if(ImGui::Button("Cancel",ImVec2(90,0)))ImGui::CloseCurrentPopup();ImGui::EndPopup();}
         if(ImGui::BeginPopupModal("Delete Crop Preset",nullptr,ImGuiWindowFlags_AlwaysAutoResize)){ImGui::TextUnformatted("Delete the selected saved crop preset?");if(ImGui::Button("Delete",ImVec2(90,0))&&!cropUserPresets.empty()){cropUserPresets.erase(cropUserPresets.begin()+std::clamp(cropSavedChoice,0,(int)cropUserPresets.size()-1));cropSavedChoice=std::max(0,(int)cropUserPresets.size()-1);cropSaveUserPresets();ImGui::CloseCurrentPopup();}ImGui::SameLine();if(ImGui::Button("Cancel",ImVec2(90,0)))ImGui::CloseCurrentPopup();ImGui::EndPopup();}
+        ImGui::SameLine(0,5);if(ImGui::SmallButton(straightenArmed?"Straighten: On":"Straighten"))straightenArmed=!straightenArmed;
         static const char* overlays[]={"Thirds","Grid","Diagonal","Triangle","Golden Ratio","Golden Spiral"};
         ImGui::SetNextItemWidth(145); ImGui::Combo("##cropOverlay",&cropOverlay,overlays,6); ImGui::SameLine(0,8);
         static const char* shows[]={"Auto","Always","Never"}; ImGui::SetNextItemWidth(90); ImGui::Combo("##cropOverlayShow",&cropOverlayShow,shows,3); ImGui::SameLine(0,8);
@@ -5480,6 +5504,12 @@ void script(const std::string& what) {
         cropUserPresets.erase(std::remove_if(cropUserPresets.begin(),cropUserPresets.end(),[](const CropPreset&p){return p.name=="__script crop preset";}),cropUserPresets.end());cropUserPresets=saved;cropSaveUserPresets();
         Toolbar::select(Toolbar::CROP);syncTool();cropPreset=1;strcpy_s(cropWidth,"640 px");strcpy_s(cropHeight,"480 px");strcpy_s(cropResolution,"96");fitCropAspect();
         fprintf(stderr,"crop-user-presets: %s; saved size preset round-trips and restore preserves existing presets\n",loaded?"passed":"failed");return;
+    }
+    if (what == "crop-straighten") {
+        Toolbar::select(Toolbar::CROP);syncTool();cropPreset=0;cropR[0]=doc.w*.2f;cropR[1]=doc.h*.2f;cropR[2]=doc.w*.8f;cropR[3]=doc.h*.8f;cropAngle=0;
+        straightenArmed=true;const bool ok=straightenCrop(ImVec2(doc.w*.1f,doc.h*.35f),ImVec2(doc.w*.9f,doc.h*.48f),true);
+        straightenArmed=false;const bool fitted=cropR[0]>=0&&cropR[1]>=0&&cropR[2]<=doc.w&&cropR[3]<=doc.h&&cropAngle>0;
+        fprintf(stderr,"crop-straighten: %s; one-shot level line sets the crop angle and fits frame inside canvas\n",ok&&fitted?"passed":"failed");return;
     }
     if (what == "text-empty") {
         Toolbar::select(Toolbar::TYPE_H); syncTool();
