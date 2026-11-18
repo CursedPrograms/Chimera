@@ -162,3 +162,6 @@ cpp/build/
 cpp/dist/
 cpp/external/
 cpp/build-fresh/
+AGENTS.md
+READY.txt
+REVIEW.md

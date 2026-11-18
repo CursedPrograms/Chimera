@@ -155,6 +155,10 @@ static bool cropResolutionCm = false;
 // after PhotoCraft (crates/ui-egui/src/tools/crop_straighten.rs)
 static bool straightenArmed=false, straightenLine=false, straightenFit=false;
 static bool cropClassicMode=false, cropAutoCenter=true;
+static bool cropMoveImage=false;
+static ImVec2 cropMoveScreenStart,cropMoveOrigin;
+static ImVec2 cropResizeCenterScreen;
+static float cropMoveRotation=0;
 static void syncCropView();
 static void toggleCropMode(){cropClassicMode=!cropClassicMode;syncCropView();}
 static ImVec2 straightenStart,straightenEnd;
@@ -214,9 +218,22 @@ static int tolerance = 32; static bool contiguous = true, sampleAll = false; sta
 // view: canvas pixel (x, y) is at screen origin + (x, y) * zoom
 static float zoom = 1.0f, viewRotation = 0.0f; static ImVec2 origin(0, 0); static ImVec2 canvasPos, canvasSize; static bool fitNext = true;
 static void syncCropView(){if(tool==T_CROP&&cropPending)viewRotation=cropClassicMode?0.0f:-cropAngle*57.2957795f;}
+static void centerCropAtScreen(ImVec2 screen){
+    const float cx=(cropR[0]+cropR[2])*.5f,cy=(cropR[1]+cropR[3])*.5f;
+    const float dx=screen.x-canvasPos.x-canvasSize.x*.5f,dy=screen.y-canvasPos.y-canvasSize.y*.5f;
+    const float a=viewRotation*.017453292519943295f,cs=std::cos(a),sn=std::sin(a);
+    origin=ImVec2(cs*dx+sn*dy+canvasSize.x*.5f-cx*zoom,-sn*dx+cs*dy+canvasSize.y*.5f-cy*zoom);
+}
+// Keep an Auto Center handle drag's frame at its press-time screen position while Space pans the view.
+static void cropCompensatePan(ImVec2 originDelta){
+    if(tool!=T_CROP||cropClassicMode||!cropAutoCenter||cropDragPart<0||cropDragPart>=8||zoom<=0)return;
+    const float dx=-originDelta.x/zoom,dy=-originDelta.y/zoom;
+    for(int i=0;i<4;++i){cropR[i]+=(i%2==0)?dx:dy;cropBase[i]+=(i%2==0)?dx:dy;}
+    cropDragStart.x+=dx;cropDragStart.y+=dy;
+}
 
 // interaction
-static bool dragging = false, panning = false; static ImVec2 dragStart, dragNow, panStart, originStart;
+static bool dragging = false, panning = false, cropSpacePanning = false; static ImVec2 dragStart, dragNow, panStart, originStart;
 static float rotateStartAngle = 0.0f, rotateStartPointer = 0.0f;
 static int moveStartX = 0, moveStartY = 0;
 static int moveGroupId = 0;
@@ -239,6 +256,7 @@ static std::vector<int> ants; static int antsVersion = -1;
 static std::vector<GLuint> thumbs, mthumbs; static int thumbVersion = -1; static double thumbAt = 0;
 
 static double now() { return SDL_GetTicks() / 1000.0; }
+static void syncTool();
 static void say(const std::string& s) { toast = s; toastUntil = now() + 5; }
 static void changed(Rect r = {0, 0, 1 << 30, 1 << 30}) { magneticClear(); dirty = dirty.unite(r.clip(doc.w, doc.h)); docVersion++; doc.dirty = true; }
 static void selChanged() { selVersion++; }
@@ -1565,6 +1583,45 @@ static void zoomAt(float nz, ImVec2 screen) {
     zoom = nz;
     origin = ImVec2(localX - c.x * zoom, localY - c.y * zoom);
 }
+static void beginCropImageMove(ImVec2 screen){cropMoveImage=true;cropMoveScreenStart=screen;cropMoveOrigin=origin;cropMoveRotation=viewRotation;}
+static void cropImageMoveTo(ImVec2 screen){
+    const float a=cropMoveRotation*.017453292519943295f,cs=std::cos(a),sn=std::sin(a),sx=screen.x-cropMoveScreenStart.x,sy=screen.y-cropMoveScreenStart.y;
+    float dx=(cs*sx+sn*sy)/std::max(.001f,zoom),dy=(-sn*sx+cs*sy)/std::max(.001f,zoom);
+    const float x0=std::min(cropBase[0],cropBase[2]),x1=std::max(cropBase[0],cropBase[2]),y0=std::min(cropBase[1],cropBase[3]),y1=std::max(cropBase[1],cropBase[3]);
+    dx=std::clamp(dx,-x0,std::max(0.0f,(float)doc.w-x1));dy=std::clamp(dy,-y0,std::max(0.0f,(float)doc.h-y1));
+    cropR[0]=cropBase[0]+dx;cropR[2]=cropBase[2]+dx;cropR[1]=cropBase[1]+dy;cropR[3]=cropBase[3]+dy;
+    origin=ImVec2(cropMoveOrigin.x-dx*zoom,cropMoveOrigin.y-dy*zoom);
+}
+// after PhotoCraft (crates/ui-egui/src/tools/crop_ui.rs): arrow keys nudge the frame in
+// screen space, while the default mode keeps the frame fixed and moves the image beneath it.
+static void nudgeCrop(float screenX,float screenY,bool large){
+    const float step=large?10.0f:1.0f;
+    if(!cropClassicMode){
+        const ImVec2 center=toScreen((cropR[0]+cropR[2])*.5f,(cropR[1]+cropR[3])*.5f);
+        std::copy(cropR,cropR+4,cropBase);
+        beginCropImageMove(center);
+        cropImageMoveTo(ImVec2(center.x+screenX*step,center.y+screenY*step));
+        cropMoveImage=false;
+    }else{
+        const float a=viewRotation*.017453292519943295f,cs=std::cos(a),sn=std::sin(a);
+        const float dx=(cs*screenX+sn*screenY)*step/std::max(.01f,zoom);
+        const float dy=(-sn*screenX+cs*screenY)*step/std::max(.01f,zoom);
+        const float w=cropR[2]-cropR[0],h=cropR[3]-cropR[1];
+        const float minX=std::min(cropR[0],cropR[2]),maxX=std::max(cropR[0],cropR[2]);
+        const float minY=std::min(cropR[1],cropR[3]),maxY=std::max(cropR[1],cropR[3]);
+        const float sx=std::clamp(dx,-minX,(float)doc.w-maxX),sy=std::clamp(dy,-minY,(float)doc.h-maxY);
+        cropR[0]+=sx;cropR[2]+=sx;cropR[1]+=sy;cropR[3]+=sy;
+    }
+}
+// after PhotoCraft (crates/ui-egui/src/tools/crop_size.rs): X swaps the frame and output axes.
+static void swapCropOrientation(){
+    const float cx=(cropR[0]+cropR[2])*.5f,cy=(cropR[1]+cropR[3])*.5f;
+    const float hw=(cropR[2]-cropR[0])*.5f,hh=(cropR[3]-cropR[1])*.5f;
+    cropR[0]=cx-hh;cropR[2]=cx+hh;cropR[1]=cy-hw;cropR[3]=cy+hw;
+    const std::string value=cropWidth;strcpy_s(cropWidth,cropHeight);strcpy_s(cropHeight,value.c_str());
+    syncCropView();
+    if(!cropClassicMode&&cropAutoCenter)centerCropAtScreen(ImVec2(canvasPos.x+canvasSize.x*.5f,canvasPos.y+canvasSize.y*.5f));
+}
 
 static int modeFromKeys() {
     const ImGuiIO& io = ImGui::GetIO();
@@ -1757,6 +1814,7 @@ static void applyCrop() {
 // after PhotoCraft (crates/ui-egui/src/tools/crop_ui.rs pointer hit and resize): handles stay
 // a fixed screen size, the interior moves the frame, and a press outside starts a new frame.
 static void cropBegin(ImVec2 p) {
+    cropSpacePanning=false;
     if(!cropPending) { cropPending=true; cropR[0]=cropR[1]=0; cropR[2]=(float)doc.w; cropR[3]=(float)doc.h; }
     const float x0=std::min(cropR[0],cropR[2]), x1=std::max(cropR[0],cropR[2]);
     const float y0=std::min(cropR[1],cropR[3]), y1=std::max(cropR[1],cropR[3]);
@@ -1775,8 +1833,10 @@ static void cropBegin(ImVec2 p) {
         }
     }
     if(cropDragPart<0) { cropDragPart=9; cropR[0]=cropR[2]=p.x; cropR[1]=cropR[3]=p.y; }
+    cropResizeCenterScreen=toScreen(cx,cy);
 }
-static void cropDragTo(ImVec2 p, bool snapAngle=false) {
+static float cropAspect();
+static void cropDragTo(ImVec2 p, bool snapAngle=false, bool centerResize=false) {
     if(cropDragPart==10) {
         const float cx=(cropBase[0]+cropBase[2])*.5f,cy=(cropBase[1]+cropBase[3])*.5f;
         cropAngle=std::atan2(p.y-cy,p.x-cx)-cropRotateStart;
@@ -1788,6 +1848,8 @@ static void cropDragTo(ImVec2 p, bool snapAngle=false) {
     const float dx=p.x-cropDragStart.x, dy=p.y-cropDragStart.y;
     float x0=cropBase[0],y0=cropBase[1],x1=cropBase[2],y1=cropBase[3];
     if(x0>x1)std::swap(x0,x1); if(y0>y1)std::swap(y0,y1);
+    const float bx0=x0,by0=y0,bx1=x1,by1=y1;
+    const bool centered=centerResize||(!cropClassicMode&&cropAutoCenter);
     if(cropDragPart==9) { cropR[2]=p.x; cropR[3]=p.y; return; }
     if(cropDragPart==8) { const float w=x1-x0,h=y1-y0; x0=std::clamp(x0+dx,0.0f,std::max(0.0f,(float)doc.w-w)); y0=std::clamp(y0+dy,0.0f,std::max(0.0f,(float)doc.h-h)); x1=x0+w;y1=y0+h; }
     else {
@@ -1796,8 +1858,32 @@ static void cropDragTo(ImVec2 p, bool snapAngle=false) {
         if(cropDragPart==2||cropDragPart==3||cropDragPart==4)x1=std::clamp(x1+dx,x0+1,(float)doc.w);
         if(cropDragPart==0||cropDragPart==1||cropDragPart==2)y0=std::clamp(y0+dy,0.0f,y1-1);
         if(cropDragPart==4||cropDragPart==5||cropDragPart==6)y1=std::clamp(y1+dy,y0+1,(float)doc.h);
+        if(centered){
+            if(cropDragPart==0||cropDragPart==6||cropDragPart==7)x1=std::clamp(bx1-(x0-bx0),x0+1.0f,(float)doc.w);
+            else if(cropDragPart==2||cropDragPart==3||cropDragPart==4)x0=std::clamp(bx0-(x1-bx1),0.0f,x1-1.0f);
+            if(cropDragPart==0||cropDragPart==1||cropDragPart==2)y1=std::clamp(by1-(y0-by0),y0+1.0f,(float)doc.h);
+            else if(cropDragPart==4||cropDragPart==5||cropDragPart==6)y0=std::clamp(by0-(y1-by1),0.0f,y1-1.0f);
+        }
+    }
+    float ratio=cropAspect();
+    if(ratio<=0&&snapAngle&&bx1>bx0&&by1>by0)ratio=(bx1-bx0)/(by1-by0);
+    if(cropDragPart>=0&&cropDragPart<8&&ratio>0&&std::isfinite(ratio)){
+        float w=x1-x0,h=y1-y0;
+        const bool horizontal=cropDragPart==3||cropDragPart==7;
+        const bool vertical=cropDragPart==1||cropDragPart==5;
+        const bool widthDrives=horizontal||(!vertical&&std::fabs((w-(bx1-bx0))/std::max(1.0f,bx1-bx0))>=std::fabs((h-(by1-by0))/std::max(1.0f,by1-by0)));
+        if(widthDrives)h=w/ratio;else w=h*ratio;
+        const float scale=std::min(1.0f,std::min((float)doc.w/std::max(1.0f,w),(float)doc.h/std::max(1.0f,h)));w*=scale;h*=scale;
+        if(centered){const float cx=(bx0+bx1)*.5f,cy=(by0+by1)*.5f;x0=cx-w*.5f;x1=cx+w*.5f;y0=cy-h*.5f;y1=cy+h*.5f;}
+        else {
+            if(cropDragPart==0||cropDragPart==6||cropDragPart==7){x1=bx1;x0=x1-w;}else if(cropDragPart==2||cropDragPart==3||cropDragPart==4){x0=bx0;x1=x0+w;}else{x0=(bx0+bx1-w)*.5f;x1=x0+w;}
+            if(cropDragPart==0||cropDragPart==1||cropDragPart==2){y1=by1;y0=y1-h;}else if(cropDragPart==4||cropDragPart==5||cropDragPart==6){y0=by0;y1=y0+h;}else{y0=(by0+by1-h)*.5f;y1=y0+h;}
+        }
+        if(x0<0){x1-=x0;x0=0;}if(x1>doc.w){x0-=x1-doc.w;x1=(float)doc.w;}
+        if(y0<0){y1-=y0;y0=0;}if(y1>doc.h){y0-=y1-doc.h;y1=(float)doc.h;}
     }
     cropR[0]=x0;cropR[1]=y0;cropR[2]=x1;cropR[3]=y1;
+    if(cropDragPart>=0&&cropDragPart<8&&!cropClassicMode&&cropAutoCenter)centerCropAtScreen(cropResizeCenterScreen);
 }
 static float cropLengthPx(const char* text, float dpi) {
     char* end=nullptr; const float v=std::strtof(text,&end); if(end==text||!std::isfinite(v)||v<=0)return 0;
@@ -2499,12 +2585,41 @@ static void penFinishSubpath() { penSub = -1; }
 // ---------- the Type tools (PhotoCraft's point text; the Type Mask tools make a selection of the letters) ----------
 static Text typeNext = [] { Text t; t.size = 48; return t; }();
 static std::vector<std::string> recentTypeFonts;
-static constexpr size_t recentTypeFontCap = 10;
+static int recentTypeFontCap = 10;
 static int typeLayer = -1;              // the text layer being typed into (-1: none)
+static int typeReturnToolbar = -1;      // Move-tool double-click returns to Move when editing ends
+static Doc typeEditOriginalDoc;
+static bool typeEditHasSnapshot=false,typeEditCreated=false,typeEditUndoPushed=false;
+static std::string typeEditUndoName="Edit Text";
 static bool typeMaskEditing = false;    // a Type Mask tool: typing into typeMask, a selection when done
 static Text typeMask;
 static char typeBuf[8192] = "";
 static bool typeFocus = false;
+// after PhotoCraft (crates/engine/src/prefs.rs TypePrefs): these Type options are user preferences.
+static bool typeSmartQuotesEnabled = true, typePlaceholderEnabled = true;
+static bool typeSelectPlaceholder = false, typePreferencesScriptOpen = false;
+static int typeSmartQuoteScriptStage=0;
+static bool typeSmartQuoteScriptSelection=false;
+static int typeWordNavigationScriptStage=0;
+static int typeMultiClickScriptStage=0;
+static int typeClickOwner=-1;
+static unsigned typeClickRun=0;
+static std::filesystem::path typePreferencesFile(){return (prefs.empty()?std::filesystem::current_path():std::filesystem::u8path(prefs))/"type-prefs.txt";}
+static bool saveTypePreferences(){
+    std::ofstream f(typePreferencesFile(),std::ios::trunc);if(!f)return false;
+    f<<"TYPE2 "<<typeSmartQuotesEnabled<<' '<<typePlaceholderEnabled<<' '<<recentTypeFontCap<<' '<<recentTypeFonts.size();
+    for(const std::string& path:recentTypeFonts)f<<' '<<std::quoted(path);
+    f<<'\n';return (bool)f;
+}
+static void loadTypePreferences(){
+    std::ifstream f(typePreferencesFile());std::string version;int smart=1,placeholder=1;
+    if(!(f>>version>>smart>>placeholder))return;
+    typeSmartQuotesEnabled=smart!=0;typePlaceholderEnabled=placeholder!=0;
+    if(version=="TYPE2"){
+        size_t cap=10,count=0;if(!(f>>cap>>count))return;recentTypeFontCap=(int)std::min<size_t>(cap,100);recentTypeFonts.clear();
+        for(size_t i=0;i<std::min(count,(size_t)recentTypeFontCap);++i){std::string path;if(!(f>>std::quoted(path)))break;if(!path.empty()&&std::find(recentTypeFonts.begin(),recentTypeFonts.end(),path)==recentTypeFonts.end())recentTypeFonts.push_back(std::move(path));}
+    }else if(version!="TYPE1")return;
+}
 static bool typeMoving = false;       // a Type-tool drag that moves the text without ending editing
 static float typeMoveX = 0, typeMoveY = 0;
 static bool typeRotating = false;
@@ -2518,30 +2633,60 @@ static float typeBoxX0 = 0, typeBoxY0 = 0, typeBoxW0 = 0, typeBoxH0 = 0;
 static float typeBoxAnchorX0 = 0, typeBoxAnchorY0 = 0, typeBoxScaleX0 = 1, typeBoxScaleY0 = 1, typeBoxRotation0 = 0;
 static bool typeIsMask() { return Toolbar::current() == Toolbar::TYPE_H_MASK || Toolbar::current() == Toolbar::TYPE_V_MASK; }
 static bool typeIsVertical() { return Toolbar::current() == Toolbar::TYPE_V || Toolbar::current() == Toolbar::TYPE_V_MASK; }
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/editing.rs commit): finish the edit and
+// restore a temporary return tool only when the user has not selected another one.
 static void typeCommit() {
+    typeClickOwner=-1;typeClickRun=0;
     typeMoving = false;
     typeRotating = false;
     typeScaleHandle = -1;
     typeBoxDrag = false;
     typeResizeHandle = -1;
+    typeSelectPlaceholder=false;
     if (typeMaskEditing) {   // the letters as a selection
         typeMaskEditing = false;
         typeMask.str = typeBuf;
         if (!typeMask.str.empty()) {
             std::vector<float> cov; float box[4];
-            textCoverage(typeMask, doc.w, doc.h, cov, box);
+            textCoverage(typeMask, doc.w, doc.h, cov, box, doc.dpi);
             std::vector<uint8_t> sel(cov.size());
             for (size_t i = 0; i < cov.size(); ++i) sel[i] = to8(cov[i]);
             finishShape(sel, SEL_NEW, "Type Mask");
         }
+        typeEditHasSnapshot=typeEditCreated=typeEditUndoPushed=false;
         return;
     }
-    if (typeLayer < 0) return;
-    if (typeLayer < (int)doc.layers.size() && doc.layers[typeLayer].isText() && doc.layers[typeLayer].text.str.empty()) {
-        doc.active = typeLayer; deleteLayer(doc);   // nothing typed: no layer
+    if (typeLayer < 0) { typeReturnToolbar=-1;typeEditHasSnapshot=typeEditCreated=typeEditUndoPushed=false; return; }
+    if(typeEditCreated&&typeLayer<(int)doc.layers.size()&&doc.layers[typeLayer].isText()&&doc.layers[typeLayer].text.str.empty()){
+        doc=typeEditOriginalDoc;
     }
+    else if(typeEditHasSnapshot&&(typeEditCreated||typeEditUndoPushed))hist.push(typeEditOriginalDoc,typeEditUndoName);
     typeLayer = -1;
     changed();
+    typeEditHasSnapshot=typeEditCreated=typeEditUndoPushed=false;
+    const int restore=typeReturnToolbar;typeReturnToolbar=-1;
+    if(restore>=0&&Toolbar::current()==Toolbar::TYPE_H){Toolbar::select(restore);syncTool();}
+}
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/editing.rs cancel): discard text edits and restore the
+// document from before this Type session without creating an undo entry.
+static void typeCancel() {
+    typeClickOwner=-1;typeClickRun=0;
+    typeMoving=false;typeRotating=false;typeScaleHandle=-1;typeBoxDrag=false;typeResizeHandle=-1;typeSelectPlaceholder=false;
+    if(typeMaskEditing){typeMaskEditing=false;typeLayer=-1;typeFocus=false;}
+    else if(typeEditHasSnapshot){const bool wasDirty=typeEditOriginalDoc.dirty;doc=typeEditOriginalDoc;changed();doc.dirty=wasDirty;selChanged();typeLayer=-1;typeFocus=false;}
+    else {typeLayer=-1;typeFocus=false;}
+    typeEditHasSnapshot=typeEditCreated=typeEditUndoPushed=false;
+    const int restore=typeReturnToolbar;typeReturnToolbar=-1;
+    if(restore>=0&&Toolbar::current()==Toolbar::TYPE_H){Toolbar::select(restore);syncTool();}
+}
+static void typeSnapshotStart(bool created,const char* undoName="Edit Text"){typeEditOriginalDoc=doc;typeEditHasSnapshot=true;typeEditCreated=created;typeEditUndoPushed=false;typeEditUndoName=undoName;}
+// Defer the Type undo snapshot until commit so editing does not copy the whole history or clear redo.
+static void typeRemember(const char* what){
+    if(typeEditHasSnapshot){
+        if(!typeEditCreated&&!typeEditUndoPushed){typeEditUndoName=what?what:"Edit Text";typeEditUndoPushed=true;}
+        return;
+    }
+    remember(what?what:"Text");
 }
 // Map a canvas point into the text frame so paragraph handles follow rotation and scale.
 static ImVec2 typeToTextPoint(const Text& t, ImVec2 p) {
@@ -2706,15 +2851,27 @@ static void typePathDragTo(ImVec2 c) {
     } else { t.pathStart = proposedStart; t.pathEnd = proposedEnd; }
     renderFill(doc, doc.layers[typePathDragLayer]); changed();
 }
-// A text layer inside a hidden group must not expose interactive path markers.
-static bool typePathLayerShown(const Layer& layer) {
-    if (!layer.visible) return false;
-    for (int id = layer.groupId; id;) {
-        const auto it = std::find_if(doc.groups.begin(), doc.groups.end(), [id](const LayerGroup& group) { return group.id == id; });
-        if (it == doc.groups.end() || !it->visible) return false;
-        id = it->parentId;
+// A text layer and every group above it must be visible before it can be picked or expose path markers.
+static bool typeLayerShown(const Doc& source, const Layer& layer) {
+    const int index=(int)(&layer-source.layers.data());
+    return layerShown(source,index);
+}
+static bool typePathLayerShown(const Layer& layer) { return typeLayerShown(doc, layer); }
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/layout.rs hit_layer): walk topmost first,
+// skipping text hidden by any parent group and testing the rendered text bounds plus paragraph box.
+static int typeHitLayer(const Doc& source, ImVec2 c, bool includeParagraph = true) {
+    const std::vector<LayerTreeEntry> walk = layerTreeWalk(source);
+    for (auto it = walk.rbegin(); it != walk.rend(); ++it) {
+        if (it->group || it->layerIndex < 0 || it->layerIndex >= (int)source.layers.size()) continue;
+        const Layer& layer = source.layers[it->layerIndex];
+        if (!layer.isText() || !typeLayerShown(source, layer)) continue;
+        const float* b = layer.text.box;
+        const bool inGlyphs = c.x >= b[0] - 4 && c.x <= b[2] + 4 && c.y >= b[1] - 4 && c.y <= b[3] + 4;
+        const ImVec2 local = typeToTextPoint(layer.text, c);
+        const bool inParagraph = layer.text.boxWidth > 0 && local.x >= layer.text.x && local.x <= layer.text.x + layer.text.boxWidth && local.y >= layer.text.y && local.y <= layer.text.y + layer.text.boxHeight;
+        if (inGlyphs || (includeParagraph && inParagraph)) return it->layerIndex;
     }
-    return true;
+    return -1;
 }
 // Capture one of the visible path placement markers or the text range itself.
 static bool typePathMarkerPress(ImVec2 c) {
@@ -2750,36 +2907,45 @@ static void typePathDragCancel() {
     if (typePathDragRemembered) { hist.doUndo(doc); changed(); selChanged(); }
     typePathDragPart = -1; typePathDragLayer = -1; typePathDragTab = -1; typePathDragRemembered = false; dragging = false;
 }
-static void typeBegin(ImVec2 c) {
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/pointer.rs pointer_down): edit shown type under the pointer
+// unless Shift requests a new layer, then select its content in the editor.
+static void typeBegin(ImVec2 c, bool forceNew = false) {
     // on a text layer's letters: edit it again; else new text where clicked (its first line's top a little above)
-    for (int i = (int)doc.layers.size() - 1; i >= 0; --i) {
-        const Layer& L = doc.layers[i];
-        if (!L.isText() || !L.visible) continue;
-        const float* b = L.text.box;
-        const bool inGlyphs = c.x >= b[0] - 4 && c.x <= b[2] + 4 && c.y >= b[1] - 4 && c.y <= b[3] + 4;
-        const ImVec2 local = typeToTextPoint(L.text, c);
-        const bool inParagraph = L.text.boxWidth > 0 && local.x >= L.text.x && local.x <= L.text.x + L.text.boxWidth && local.y >= L.text.y && local.y <= L.text.y + L.text.boxHeight;
-        if (inGlyphs || inParagraph) {
-            doc.active = i; typeLayer = i; snprintf(typeBuf, sizeof typeBuf, "%s", L.text.str.c_str()); typeFocus = true; return;
-        }
+    const int hit = forceNew ? -1 : typeHitLayer(doc, c);
+    if (hit >= 0) {
+        typeSnapshotStart(false);
+        const Layer& layer = doc.layers[hit];
+        doc.active = hit; typeLayer = hit; snprintf(typeBuf, sizeof typeBuf, "%s", layer.text.str.c_str()); typeSelectPlaceholder=false; typeFocus = true; return;
     }
     Text t = typeNext;
     t.vertical = typeIsVertical();
     t.x = c.x; t.y = c.y - t.size * 0.75f;
-    typeBuf[0] = 0; typeFocus = true;
+    const bool placeholder=typePlaceholderEnabled&&!(typeIsMask()&&typeIsVertical());
+    t.str=placeholder?"Lorem Ipsum":"";
+    snprintf(typeBuf,sizeof(typeBuf),"%s",t.str.c_str());typeSelectPlaceholder=placeholder;typeFocus = true;
     if (typeIsMask()) { typeMask = t; typeMaskEditing = true; return; }
-    remember("New Text");
+    typeSnapshotStart(true,"New Text");
     Fill f; f.kind = FILL_SOLID; for (int k = 0; k < 3; ++k) f.colour[k] = fg[k] / 255.0f;
     addTextLayer(doc, t, f);
     typeLayer = doc.active;
     changed();
 }
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/pointer.rs double-click from Move): edit
+// the shown text layer and return to Move when the text session commits.
+static bool moveEditTextAt(ImVec2 c) {
+    const int hit=typeHitLayer(doc,c,false);
+    if(hit<0)return false;
+    if(groupLocked(doc,doc.layers[hit].groupId)){say("This layer is locked by its group");return true;}
+    Toolbar::select(Toolbar::TYPE_H);syncTool();typeReturnToolbar=Toolbar::MOVE;typeBegin(c);
+    return typeLayer==hit;
+}
 static void typeBeginOnPath(ImVec2 c, float at, int selected = -1) {
     Text t = typeNext; t.vertical = false;
     if (selected >= 0 && selected < (int)doc.workPath.size()) t.path = {doc.workPath[selected]}; else t.path = doc.workPath;
     t.pathText = true; t.pathFlip = false; t.pathStart = at; t.x = c.x; t.y = c.y;
-    typeBuf[0] = 0; typeFocus = true;
-    remember("New Text on Path");
+    t.str=typePlaceholderEnabled?"Lorem Ipsum":"";
+    snprintf(typeBuf,sizeof(typeBuf),"%s",t.str.c_str());typeSelectPlaceholder=typePlaceholderEnabled;typeFocus = true;
+    typeSnapshotStart(true,"New Text on Path");
     Fill f; f.kind = FILL_SOLID; for (int k = 0; k < 3; ++k) f.colour[k] = fg[k] / 255.0f;
     addTextLayer(doc, t, f); typeLayer = doc.active; changed();
 }
@@ -2848,6 +3014,122 @@ static void typeResizeByPointer(ImVec2 now, bool fromCentre) {
     Layer& L = doc.layers[typeLayer]; L.text.x = x0; L.text.y = y0; L.text.boxWidth = x1 - x0; L.text.boxHeight = y1 - y0;
     renderFill(doc, L); changed();
 }
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/editing.rs insert_typed): mutate only the
+// keyboard character queue so pasted text keeps its original quotation marks.
+static void typeMapQueuedSmartQuotes(ImGuiInputTextState* state){
+    ImGuiIO& io=ImGui::GetIO();if(!typeSmartQuotesEnabled||!state||io.InputQueueCharacters.empty())return;
+    int cursor=state->GetCursorPos();
+    if(state->HasSelection())cursor=std::min(state->GetSelectionStart(),state->GetSelectionEnd());
+    cursor=std::clamp(cursor,0,state->CurLenW);
+    ImWchar previous=cursor>0?state->TextW[cursor-1]:0;
+    for(int i=0;i<io.InputQueueCharacters.Size;++i){ImWchar& c=io.InputQueueCharacters[i];
+        c=(ImWchar)textSmartQuoteCharacter(previous,c);
+        previous=c;
+    }
+}
+static size_t typeCodepointIndex(const ImGuiInputTextState* state,int units){
+    const int end=std::clamp(units,0,state->CurLenW);size_t count=0;
+    for(int i=0;i<end;++i){const uint32_t c=state->TextW[i];if(c>=0xd800&&c<=0xdbff&&i+1<end&&state->TextW[i+1]>=0xdc00&&state->TextW[i+1]<=0xdfff)++i;++count;}
+    return count;
+}
+static int typeWcharIndex(const ImGuiInputTextState* state,size_t codepoints){
+    int i=0;size_t count=0;
+    while(i<state->CurLenW&&count<codepoints){const uint32_t c=state->TextW[i++];if(c>=0xd800&&c<=0xdbff&&i<state->CurLenW&&state->TextW[i]>=0xdc00&&state->TextW[i]<=0xdfff)++i;++count;}
+    return i;
+}
+static size_t typeByteOffset(const std::string& text,size_t codepoints){
+    size_t at=0,count=0;
+    while(at<text.size()&&count<codepoints){const unsigned char c=(unsigned char)text[at];at+=c<0x80?1:c<0xe0?2:c<0xf0?3:4;++count;}
+    return std::min(at,text.size());
+}
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/keys.rs handle_delete_key): modified
+// deletion uses PhotoCraft word boundaries and Command/Ctrl+Backspace stops at the line edge.
+bool typePrepareModifiedDelete(ImGuiInputTextState* state,const std::string& text,bool backspace,bool ctrl,bool alt,bool mac,bool super){
+    const bool command=mac?super:ctrl;
+    if(!state||(!command&&!alt))return false;
+    if(state->HasSelection())return true;
+    const int cursor=std::clamp(state->GetCursorPos(),0,state->CurLenW);
+    const size_t character=typeCodepointIndex(state,cursor),characterCount=typeCodepointIndex(state,state->CurLenW);
+    size_t target=character;
+    if(backspace){
+        if(command){
+            // Dear ImGui 1.90.4's STB line-start key lays out the active multiline editor row,
+            // including soft wraps, before selecting back to it.
+            if(state->Ctx){state->OnKeyPressed(0x200004|0x400000);return true;}
+            const size_t byte=typeByteOffset(text,character);
+            if(byte>0){const size_t newline=text.rfind('\n',byte-1);if(newline!=std::string::npos){size_t cp=0;for(size_t i=0;i<newline+1;){const unsigned char c=(unsigned char)text[i];i+=c<0x80?1:c<0xe0?2:c<0xf0?3:4;++cp;}target=cp;}else target=0;}
+        }else if(alt)target=textWordBoundary(text,character,false);
+    }else if(alt)target=textWordBoundary(text,character,true);
+    else if(command)target=std::min(character+1,characterCount);
+    if(target==character)return true;
+    const int destination=typeWcharIndex(state,target);
+    state->Stb.cursor=cursor;state->Stb.select_start=cursor;state->Stb.select_end=destination;
+    state->Stb.has_preferred_x=0;state->CursorFollow=true;state->CursorAnimReset();
+    return true;
+}
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/keys.rs handle_move_key): Ctrl/Alt arrows
+// move by the Unicode alphanumeric run and keep the anchor when extending a selection.
+bool typeMoveWordCaret(ImGuiInputTextState* state,const std::string& text,int cursor,int anchor,bool hadSelection,bool forward,bool extend){
+    if(!state)return false;
+    const size_t from=typeCodepointIndex(state,cursor),to=textWordBoundary(text,from,forward);
+    const int dest=typeWcharIndex(state,to);
+    state->Stb.cursor=state->Stb.select_end=dest;
+    state->Stb.select_start=extend?(hadSelection?anchor:cursor):dest;
+    state->Stb.has_preferred_x=0;state->CursorFollow=true;state->CursorAnimReset();
+    return true;
+}
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/keys.rs handle_move_key): Command/Ctrl+Up
+// and Down move to the beginning or end of the text, preserving the selection anchor with Shift.
+bool typeMoveDocumentEdge(ImGuiInputTextState* state,bool end,int cursor,int anchor,bool hadSelection,bool extend){
+    if(!state)return false;
+    const int dest=end?state->CurLenW:0;
+    state->Stb.cursor=state->Stb.select_end=dest;
+    state->Stb.select_start=extend?(hadSelection?anchor:cursor):dest;
+    state->Stb.has_preferred_x=0;state->CursorFollow=true;state->CursorAnimReset();
+    return true;
+}
+unsigned typeNextClickCount(unsigned previous,unsigned imguiCount){
+    if(imguiCount<=1)return 1;
+    if(previous==0)return std::min(imguiCount,5u);
+    return previous%5+1;
+}
+static size_t typeCodepointsBeforeByte(const std::string& text,size_t bytes){
+    size_t at=0,count=0;bytes=std::min(bytes,text.size());
+    while(at<bytes){const unsigned char c=(unsigned char)text[at];at+=c<0x80?1:c<0xe0?2:c<0xf0?3:4;if(at<=bytes)++count;}
+    return count;
+}
+static std::pair<size_t,size_t> typeParagraphSelection(const std::string& text,size_t caret){
+    const size_t byte=typeByteOffset(text,caret);
+    const size_t foundStart=byte?text.rfind('\n',byte-1):std::string::npos;
+    const size_t start=foundStart==std::string::npos?0:foundStart+1;
+    size_t end=text.find('\n',byte);if(end==std::string::npos)end=text.size();
+    while(end>start&&text[end-1]=='\r')--end;
+    return {typeCodepointsBeforeByte(text,start),typeCodepointsBeforeByte(text,end)};
+}
+bool typeApplyClickSelection(ImGuiInputTextState* state,const std::string& text,unsigned count){
+    if(!state||count<2||count>5)return false;
+    const size_t caret=typeCodepointIndex(state,state->GetCursorPos());
+    if(count==3&&state->Ctx){
+        state->Stb.cursor=state->Stb.select_start=state->Stb.select_end=state->GetCursorPos();
+        state->OnKeyPressed(0x200004);
+        state->OnKeyPressed(0x200005|0x400000);
+        return true;
+    }
+    std::pair<size_t,size_t> range;
+    if(count==2)range=textWordSelection(text,caret);
+    else if(count==3||count==4)range=typeParagraphSelection(text,caret);
+    else range={0,typeCodepointIndex(state,state->CurLenW)};
+    const int start=typeWcharIndex(state,range.first),end=typeWcharIndex(state,range.second);
+    state->Stb.cursor=end;state->Stb.select_start=start;state->Stb.select_end=end;state->Stb.has_preferred_x=0;
+    state->CursorFollow=true;state->CursorAnimReset();
+    return true;
+}
+bool typeWordNavigationShortcut(bool ctrl,bool alt,bool shift,bool mac,bool super){
+    return (!alt||shift)&&((mac?super:ctrl)||alt);
+}
+bool typeDocumentNavigationShortcut(bool ctrl,bool alt,bool mac,bool super){
+    return !alt&&(mac?super:ctrl);
+}
 // the box typed into, over the picture where the text is (the layer shows the letters as they're typed)
 static void typeEditor() {
     if (typeLayer < 0 && !typeMaskEditing) return;
@@ -2858,15 +3140,75 @@ static void typeEditor() {
     ImGui::SetNextWindowBgAlpha(0.92f);
     ImGui::Begin("##typing", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing);
     if (typeFocus) { ImGui::SetKeyboardFocusHere(); typeFocus = false; }
+    const ImGuiID typeInputId=ImGui::GetID("##tb");
+    ImGuiInputTextState* movementState=ImGui::GetInputTextState(typeInputId);
+    const bool wordModifier=typeWordNavigationShortcut(ImGui::GetIO().KeyCtrl,ImGui::GetIO().KeyAlt,ImGui::GetIO().KeyShift,ImGui::GetIO().ConfigMacOSXBehaviors,ImGui::GetIO().KeySuper);
+    const bool documentModifier=typeDocumentNavigationShortcut(ImGui::GetIO().KeyCtrl,ImGui::GetIO().KeyAlt,ImGui::GetIO().ConfigMacOSXBehaviors,ImGui::GetIO().KeySuper);
+    const bool moveWordLeft=ImGui::IsWindowFocused()&&ImGui::IsKeyPressed(ImGuiKey_LeftArrow)&&wordModifier;
+    const bool moveWordRight=ImGui::IsWindowFocused()&&ImGui::IsKeyPressed(ImGuiKey_RightArrow)&&wordModifier;
+    const bool moveDocumentStart=ImGui::IsWindowFocused()&&ImGui::IsKeyPressed(ImGuiKey_UpArrow)&&documentModifier;
+    const bool moveDocumentEnd=ImGui::IsWindowFocused()&&ImGui::IsKeyPressed(ImGuiKey_DownArrow)&&documentModifier;
+    const int movementCursor=movementState?movementState->GetCursorPos():0,movementAnchor=movementState?movementState->GetSelectionStart():0;
+    const bool movementSelected=movementState&&movementState->HasSelection(),movementExtend=ImGui::GetIO().KeyShift;
+    ImGuiIO& typeIo=ImGui::GetIO();
+    const bool modifiedDelete=ImGui::IsWindowFocused()&&(ImGui::IsKeyPressed(ImGuiKey_Backspace)||ImGui::IsKeyPressed(ImGuiKey_Delete))&&
+        typePrepareModifiedDelete(movementState,typeBuf,ImGui::IsKeyPressed(ImGuiKey_Backspace),typeIo.KeyCtrl,typeIo.KeyAlt,typeIo.ConfigMacOSXBehaviors,typeIo.KeySuper);
+    const bool savedCtrl=typeIo.KeyCtrl,savedAlt=typeIo.KeyAlt,savedSuper=typeIo.KeySuper;
+    if(modifiedDelete){typeIo.KeyCtrl=typeIo.KeyAlt=typeIo.KeySuper=false;}
+    if(typeSmartQuoteScriptStage==2){ImGuiIO& io=ImGui::GetIO();io.InputQueueCharacters.clear();for(ImWchar c:{'h','i',' ','"','y','o','u','"'})io.InputQueueCharacters.push_back(c);typeSmartQuoteScriptStage=3;}
+    if(ImGui::IsWindowFocused())typeMapQueuedSmartQuotes(ImGui::GetInputTextState(typeInputId));
     if (ImGui::InputTextMultiline("##tb", typeBuf, sizeof typeBuf, ImVec2(360, ImGui::GetTextLineHeight() * 4 + 8))) {
-        if (!typeMaskEditing) { Layer& L = doc.layers[typeLayer]; L.text.str = typeBuf; renderFill(doc, L); changed();
+        if (!typeMaskEditing) { typeRemember("Edit Text");Layer& L = doc.layers[typeLayer]; L.text.str = typeBuf; renderFill(doc, L); changed();
             L.name = textLayerName(L.text.str); }
         else typeMask.str = typeBuf;
     }
+    if(modifiedDelete){typeIo.KeyCtrl=savedCtrl;typeIo.KeyAlt=savedAlt;typeIo.KeySuper=savedSuper;}
+    if(ImGui::IsItemHovered()&&ImGui::IsMouseClicked(ImGuiMouseButton_Left)){
+        const int owner=typeMaskEditing?-2:typeLayer;
+        const unsigned previous=typeClickOwner==owner?typeClickRun:0;
+        typeClickRun=typeNextClickCount(previous,(unsigned)typeIo.MouseClickedCount[ImGuiMouseButton_Left]);typeClickOwner=owner;
+        if(typeClickRun>1)typeApplyClickSelection(ImGui::GetInputTextState(typeInputId),typeBuf,typeClickRun);
+    }
+    if(moveWordLeft||moveWordRight)typeMoveWordCaret(ImGui::GetInputTextState(typeInputId),typeBuf,movementCursor,movementAnchor,movementSelected,moveWordRight,movementExtend);
+    if(moveDocumentStart||moveDocumentEnd)typeMoveDocumentEdge(ImGui::GetInputTextState(typeInputId),moveDocumentEnd,movementCursor,movementAnchor,movementSelected,movementExtend);
+    if(typeWordNavigationScriptStage==1){
+        if(ImGuiInputTextState* state=ImGui::GetInputTextState(typeInputId)){
+            state->Stb.cursor=state->Stb.select_start=state->Stb.select_end=2;
+            typeMoveWordCaret(state,typeBuf,2,2,false,true,false);const bool forward=state->GetCursorPos()==6&&!state->HasSelection();
+            state->Stb.cursor=state->Stb.select_start=state->Stb.select_end=6;
+            typeMoveWordCaret(state,typeBuf,6,6,false,false,false);const bool backward=state->GetCursorPos()==4&&!state->HasSelection();
+            state->Stb.cursor=state->Stb.select_start=state->Stb.select_end=2;
+            typeMoveWordCaret(state,typeBuf,2,2,false,true,true);const bool extended=state->GetCursorPos()==6&&state->GetSelectionStart()==2;
+            typeMoveDocumentEdge(state,false,4,1,true,true);const bool documentStart=state->GetCursorPos()==0&&state->GetSelectionStart()==1;
+            typeMoveDocumentEdge(state,true,0,0,false,false);const bool documentEnd=state->GetCursorPos()==6&&!state->HasSelection();
+            state->Stb.cursor=state->Stb.select_start=state->Stb.select_end=6;const bool deleteBack=typePrepareModifiedDelete(state,typeBuf,true,false,true,false,false)&&state->Stb.select_end==4;
+            state->Stb.cursor=state->Stb.select_start=state->Stb.select_end=2;const bool deleteForward=typePrepareModifiedDelete(state,typeBuf,false,false,true,false,false)&&state->Stb.select_end==6;
+            state->Stb.cursor=state->Stb.select_start=state->Stb.select_end=4;const bool deleteLine=typePrepareModifiedDelete(state,typeBuf,true,true,false,false,false)&&state->Stb.select_start==4&&state->Stb.select_end==0;
+            fprintf(stderr,"type-word-navigation: %s; word arrows/extension, document edges, Alt deletion back/forward, Ctrl line deletion=%d/%d/%d/%d/%d/%d/%d/%d\n",forward&&backward&&extended&&documentStart&&documentEnd&&deleteBack&&deleteForward&&deleteLine?"passed":"failed",forward,backward,extended,documentStart,documentEnd,deleteBack,deleteForward,deleteLine);typeWordNavigationScriptStage=2;
+        }
+    }
+    if(typeMultiClickScriptStage==1){
+        if(ImGuiInputTextState* state=ImGui::GetInputTextState(typeInputId)){
+            state->Stb.cursor=state->Stb.select_start=state->Stb.select_end=1;
+            const bool word=typeApplyClickSelection(state,typeBuf,2)&&state->Stb.select_start==0&&state->Stb.select_end==2;
+            state->Stb.cursor=state->Stb.select_start=state->Stb.select_end=8;
+            const bool line=typeApplyClickSelection(state,typeBuf,3)&&state->Stb.select_start==7&&state->Stb.select_end==11;
+            state->Stb.cursor=state->Stb.select_start=state->Stb.select_end=8;
+            const bool paragraph=typeApplyClickSelection(state,typeBuf,4)&&state->Stb.select_start==7&&state->Stb.select_end==11;
+            const bool all=typeApplyClickSelection(state,typeBuf,5)&&state->Stb.select_start==0&&state->Stb.select_end==11;
+            const bool cycle=typeNextClickCount(3,3)==4&&typeNextClickCount(4,3)==5&&typeNextClickCount(5,3)==1;
+            fprintf(stderr,"type-multiclick: %s; word/visual-line/paragraph/all/cycle=%d/%d/%d/%d/%d\n",word&&line&&paragraph&&all&&cycle?"passed":"failed",word,line,paragraph,all,cycle);typeMultiClickScriptStage=2;
+        }
+    }
+    if(typeSelectPlaceholder){if(ImGuiInputTextState* state=ImGui::GetInputTextState(typeInputId)){state->SelectAll();typeSelectPlaceholder=false;}}
+    if(typeSmartQuoteScriptStage==1){if(ImGuiInputTextState* state=ImGui::GetInputTextState(typeInputId)){typeSmartQuoteScriptSelection=state->GetSelectionStart()==0&&state->GetSelectionEnd()==state->CurLenW;typeSmartQuoteScriptStage=2;}}
+    const bool finishTypeScript=typeSmartQuoteScriptStage==3&&typeLayer>=0&&typeLayer<(int)doc.layers.size()&&doc.layers[typeLayer].text.str=="hi \xe2\x80\x9cyou\xe2\x80\x9d";
+    if(typeSmartQuoteScriptStage==3){fprintf(stderr,"type-smart-quotes: %s; keyboard quotes transform and replace selected placeholder\n",finishTypeScript&&typeSmartQuoteScriptSelection?"passed":"failed");typeSmartQuoteScriptStage=4;}
     ImGui::TextDisabled("Ctrl+Enter or click away to finish, Esc too");
-    const bool done = ImGui::IsKeyPressed(ImGuiKey_Escape) || (ImGui::GetIO().KeyCtrl && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter)));
+    const bool cancel = ImGui::IsKeyPressed(ImGuiKey_Escape);
+    const bool done = ImGui::GetIO().KeyCtrl && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter));
     ImGui::End();
-    if (done) typeCommit();
+    if(cancel)typeCancel();else if(done||finishTypeScript)typeCommit();
 }
 
 // ---------- the marking tools: Color Sampler, Ruler, Note, Count (PhotoCraft's) ----------
@@ -3091,12 +3433,20 @@ static void canvasInput() {
         if (hovered && dx * dx + dy * dy < 14 * 14 && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) { viewRotation = 0.0f; dragging = false; return; }
     }
     if (tool == T_ROTATE && ImGui::IsKeyPressed(ImGuiKey_Escape)) viewRotation = 0.0f;
+    // Space can temporarily take over an active Crop handle drag; returning to Crop resumes it.
+    if (space && tool == T_CROP && dragging && cropDragPart >= 0 && cropDragPart < 8 && ImGui::IsMouseDown(ImGuiMouseButton_Left) && !cropSpacePanning) {
+        cropSpacePanning = panning = true; panStart = m; originStart = origin;
+    } else if (cropSpacePanning && !space) {
+        cropSpacePanning = panning = false;
+    }
     // middle button always pans
     if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Middle)) { panning = true; panStart = m; originStart = origin; }
     if (panning) {
         const float a = viewRotation * 0.017453292519943295f, cs = std::cos(a), sn = std::sin(a);
         const float dx = m.x - panStart.x, dy = m.y - panStart.y;
+        const ImVec2 oldOrigin = origin;
         origin = ImVec2(originStart.x + cs * dx + sn * dy, originStart.y - sn * dx + cs * dy);
+        if (cropSpacePanning) cropCompensatePan(ImVec2(origin.x - oldOrigin.x, origin.y - oldOrigin.y));
         if (!ImGui::IsMouseDown(ImGuiMouseButton_Middle) && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) panning = false;
     }
 
@@ -3113,12 +3463,9 @@ static void canvasInput() {
         }
         case T_MOVE: {
             moveTextLayer = false;
-            int textHit = -1;
-            for (int i = (int)doc.layers.size() - 1; i >= 0; --i) {
-                const Layer& layer = doc.layers[i];
-                if (!layer.isText() || !layer.visible) continue;
-                const float* b = layer.text.box;
-                if (c.x >= b[0] - 3 && c.x <= b[2] + 3 && c.y >= b[1] - 3 && c.y <= b[3] + 3) { textHit = i; break; }
+            const int textHit = typeHitLayer(doc, c, false);
+            if(textHit>=0&&ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)){
+                moveEditTextAt(c);dragging=false;break;
             }
             if (textHit >= 0) selectLayer(textHit);
             if (groupLocked(doc, doc.cur().groupId)) { say("This layer is locked by its group"); dragging = false; break; }
@@ -3156,7 +3503,7 @@ static void canvasInput() {
         case T_CROP:
             if(straightenArmed||io.KeyCtrl){straightenLine=true;straightenFit=straightenArmed;straightenStart=straightenEnd=c;}
             else if (cropPending && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) { applyCrop(); dragging = false; }
-            else cropBegin(c);
+            else {cropBegin(c);if(cropDragPart==8&&!cropClassicMode)beginCropImageMove(m);}
             break;
         case T_PCROP:
             pcropDragPart = -1;
@@ -3289,7 +3636,7 @@ static void canvasInput() {
                 const int handle = typeBoxHandleAt(activeText, c);
                 if (handle >= 0) {
                     if (groupLocked(doc, doc.cur().groupId)) { say("This layer is locked by its group"); dragging = false; break; }
-                    remember("Resize Text Box"); typeResizeHandle = handle;
+                    typeRemember("Resize Text Box"); typeResizeHandle = handle;
                     typeBoxX0 = activeText.x; typeBoxY0 = activeText.y; typeBoxW0 = activeText.boxWidth; typeBoxH0 = activeText.boxHeight;
                     typeBoxAnchorX0 = activeText.x; typeBoxAnchorY0 = activeText.y;
                     typeBoxScaleX0 = activeText.scaleX; typeBoxScaleY0 = activeText.scaleY; typeBoxRotation0 = activeText.rotation;
@@ -3298,7 +3645,7 @@ static void canvasInput() {
                 const int pointHandle = io.KeyCtrl ? typePointHandleAt(activeText, c) : -1;
                 if (pointHandle >= 0) {
                     if (groupLocked(doc, doc.cur().groupId)) { say("This layer is locked by its group"); dragging = false; break; }
-                    remember("Transform Text"); typeScaleHandle = pointHandle;
+                    typeRemember("Transform Text"); typeScaleHandle = pointHandle;
                     std::copy(activeText.box, activeText.box + 4, typePointBox0);
                     typeScaleX0 = activeText.scaleX; typeScaleY0 = activeText.scaleY;
                     typePointAnchorX0 = activeText.x; typePointAnchorY0 = activeText.y; typePointRotation0 = activeText.rotation;
@@ -3314,7 +3661,7 @@ static void canvasInput() {
                 const float outsideDistance = std::hypot(dx, dy) * zoom;
                 if (io.KeyCtrl && !inside && !insideParagraph && outsideDistance <= 28.0f) {
                     if (groupLocked(doc, doc.cur().groupId)) { say("This layer is locked by its group"); dragging = false; break; }
-                    remember("Rotate Text"); typeRotating = true;
+                    typeRemember("Rotate Text"); typeRotating = true;
                     typeRotatePivotX = activeText.x; typeRotatePivotY = activeText.y;
                     typeRotateStartAngle = std::atan2(c.y - typeRotatePivotY, c.x - typeRotatePivotX);
                     typeRotation0 = activeText.rotation;
@@ -3322,7 +3669,7 @@ static void canvasInput() {
                 }
                 if (io.KeyCtrl || (!inside && !insideParagraph && outsideDistance <= 38.0f)) {
                     if (groupLocked(doc, doc.cur().groupId)) { say("This layer is locked by its group"); dragging = false; break; }
-                    remember("Move Text"); typeMoving = true;
+                    typeRemember("Move Text"); typeMoving = true;
                     typeMoveX = doc.cur().text.x; typeMoveY = doc.cur().text.y;
                     break;
                 }
@@ -3335,7 +3682,7 @@ static void canvasInput() {
                 int pathIndex = -1;
                 const float along = typePathNearest(doc.workPath, c.x, c.y, &distance, &pathIndex);
                 if (!typeIsMask() && typePathLength(doc.workPath) > 0 && distance * zoom <= 8.0f) typeBeginOnPath(c, along, pathIndex);
-                else typeBegin(c);
+                else typeBegin(c, io.KeyShift && !typeIsMask());
                 typeBoxDrag = typeLayer >= 0 && !doc.cur().text.pathText;
             }
             break;
@@ -3415,7 +3762,7 @@ static void canvasInput() {
             break;
         case T_LASSO: if (std::hypot(c.x - lasso[lasso.size() - 2], c.y - lasso.back()) * zoom > 2) { lasso.push_back(c.x); lasso.push_back(c.y); } break;
         case T_DROPPER: pickColour(c, io.KeyAlt); break;
-        case T_CROP: if(straightenLine)straightenEnd=c;else cropDragTo(c, io.KeyShift); break;
+        case T_CROP: if(straightenLine)straightenEnd=c;else if(cropMoveImage)cropImageMoveTo(m);else cropDragTo(c, io.KeyShift, io.KeyAlt); break;
         case T_PCROP:
             if (pcropDragPart >= 0) { pcropQ[pcropDragPart * 2] = c.x; pcropQ[pcropDragPart * 2 + 1] = c.y; }
             else if (pcropDragPart == -2) {
@@ -3497,7 +3844,8 @@ static void canvasInput() {
         case T_CROP:
             if(straightenLine){straightenCrop(straightenStart,c,straightenFit);straightenLine=false;if(straightenFit)straightenArmed=false;}
             else if (std::fabs(cropR[2] - cropR[0]) < 2 || std::fabs(cropR[3] - cropR[1]) < 2) cropPending = false;
-            cropDragPart=-1; break;
+            else if(cropDragPart==9&&!cropClassicMode&&cropAutoCenter)centerCropAtScreen(ImVec2(canvasPos.x+canvasSize.x*.5f,canvasPos.y+canvasSize.y*.5f));
+            cropMoveImage=false;cropDragPart=-1;cropSpacePanning=false; break;
         case T_PCROP:
             if (pcropDragPart == -1) {
                 if (std::hypot(c.x - dragStart.x, c.y - dragStart.y) * zoom >= 3) {
@@ -3605,6 +3953,11 @@ static void canvasInput() {
         else if (ImGui::IsKeyPressed(ImGuiKey_Escape)) { cropPending = false;straightenArmed=false;straightenLine=false; }
         else if (ImGui::IsKeyPressed(ImGuiKey_H) && (cropR[0]!=0 || cropR[1]!=0 || cropR[2]!=doc.w || cropR[3]!=doc.h)) cropShowArea=!cropShowArea;
         else if (ImGui::IsKeyPressed(ImGuiKey_P) && (cropR[0]!=0 || cropR[1]!=0 || cropR[2]!=doc.w || cropR[3]!=doc.h || std::fabs(cropAngle)>.001f)) toggleCropMode();
+        else if (ImGui::IsKeyPressed(ImGuiKey_LeftArrow,true)) nudgeCrop(-1,0,ImGui::GetIO().KeyShift);
+        else if (ImGui::IsKeyPressed(ImGuiKey_RightArrow,true)) nudgeCrop(1,0,ImGui::GetIO().KeyShift);
+        else if (ImGui::IsKeyPressed(ImGuiKey_UpArrow,true)) nudgeCrop(0,-1,ImGui::GetIO().KeyShift);
+        else if (ImGui::IsKeyPressed(ImGuiKey_DownArrow,true)) nudgeCrop(0,1,ImGui::GetIO().KeyShift);
+        else if (ImGui::IsKeyPressed(ImGuiKey_X)) swapCropOrientation();
         else if (ImGui::IsKeyPressed(ImGuiKey_O)) {
             if (ImGui::GetIO().KeyShift) cropOverlayOrientation = (cropOverlayOrientation + 1) % (cropOverlay == 3 ? 2 : cropOverlay == 5 ? 4 : 1);
             else { cropOverlay = (cropOverlay + 1) % 6; cropOverlayOrientation = 0; }
@@ -3844,11 +4197,36 @@ static void drawCanvas() {
         const float cx=(x0+x1)*.5f,cy=(y0+y1)*.5f,cs=std::cos(cropAngle),sn=std::sin(cropAngle);
         auto turnCrop=[&](float x,float y){const float dx=x-cx,dy=y-cy;return toScreen(cx+cs*dx-sn*dy,cy+sn*dx+cs*dy);};
         const ImVec2 q0 = turnCrop(x0,y0), q1 = turnCrop(x1,y0), q2 = turnCrop(x1,y1), q3 = turnCrop(x0,y1);
-        if(std::fabs(cropAngle)<.001f && (!cropShowArea || cropShieldEnabled)) {
+        if(!cropShowArea||cropShieldEnabled) {
             const int alpha=cropShowArea?(int)std::lround(cropShieldOpacity*2.55f*(cropShieldAuto&&dragging?.5f:1.0f)):255;
-            const ImU32 dim = cropShowArea?IM_COL32((int)std::lround(cropShieldColor[0]*255),(int)std::lround(cropShieldColor[1]*255),(int)std::lround(cropShieldColor[2]*255),std::clamp(alpha,0,255)):C_BG;
-            dl->AddRectFilled(d0,ImVec2(d1.x,q0.y),dim);dl->AddRectFilled(ImVec2(d0.x,q0.y),q3,dim);
-            dl->AddRectFilled(q1,ImVec2(d1.x,q2.y),dim);dl->AddRectFilled(ImVec2(d3.x,q3.y),d2,dim);
+            const ImU32 dim=cropShowArea?IM_COL32((int)std::lround(cropShieldColor[0]*255),(int)std::lround(cropShieldColor[1]*255),(int)std::lround(cropShieldColor[2]*255),std::clamp(alpha,0,255)):C_BG;
+            const ImVec2 canvasQuad[4]={d0,d1,d2,d3};
+            dl->AddConvexPolyFilled(canvasQuad,4,dim);
+            struct CropShieldVertex{ImVec2 pos;float x,y;};
+            std::vector<CropShieldVertex> visible={{q0,cx+cs*(x0-cx)-sn*(y0-cy),cy+sn*(x0-cx)+cs*(y0-cy)},
+                {q1,cx+cs*(x1-cx)-sn*(y0-cy),cy+sn*(x1-cx)+cs*(y0-cy)},
+                {q2,cx+cs*(x1-cx)-sn*(y1-cy),cy+sn*(x1-cx)+cs*(y1-cy)},
+                {q3,cx+cs*(x0-cx)-sn*(y1-cy),cy+sn*(x0-cx)+cs*(y1-cy)}};
+            auto cross=[](ImVec2 a,ImVec2 b,ImVec2 p){return (b.x-a.x)*(p.y-a.y)-(b.y-a.y)*(p.x-a.x);};
+            float area=0;for(int i=0;i<4;++i)area+=canvasQuad[i].x*canvasQuad[(i+1)%4].y-canvasQuad[(i+1)%4].x*canvasQuad[i].y;
+            const float sign=area>=0?1.0f:-1.0f;
+            for(int edge=0;edge<4&&!visible.empty();++edge){
+                const ImVec2 a=canvasQuad[edge],b=canvasQuad[(edge+1)%4];std::vector<CropShieldVertex> clipped;
+                CropShieldVertex prev=visible.back();float pv=sign*cross(a,b,prev.pos);bool pin=pv>=-1e-4f;
+                for(const CropShieldVertex& cur:visible){const float cv=sign*cross(a,b,cur.pos);const bool cin=cv>=-1e-4f;
+                    if(cin!=pin){const float t=pv/(pv-cv);clipped.push_back({ImVec2(prev.pos.x+(cur.pos.x-prev.pos.x)*t,prev.pos.y+(cur.pos.y-prev.pos.y)*t),prev.x+(cur.x-prev.x)*t,prev.y+(cur.y-prev.y)*t});}
+                    if(cin)clipped.push_back(cur);prev=cur;pv=cv;pin=cin;
+                }visible.swap(clipped);
+            }
+            auto restoreTexture=[&](ImTextureID tex,bool checker){
+                if(visible.size()<3)return;
+                for(size_t i=1;i+1<visible.size();++i){const CropShieldVertex v[3]={visible[0],visible[i],visible[i+1]};ImVec2 pos[4]={v[0].pos,v[1].pos,v[2].pos,v[0].pos},uv[4];
+                    for(int j=0;j<3;++j)uv[j]=checker?ImVec2(v[j].x/16.0f,v[j].y/16.0f):ImVec2(v[j].x/std::max(1,doc.w),v[j].y/std::max(1,doc.h));uv[3]=uv[0];
+                    dl->AddImageQuad(tex,pos[0],pos[1],pos[2],pos[3],uv[0],uv[1],uv[2],uv[3]);
+                }
+            };
+            restoreTexture((ImTextureID)(intptr_t)checkerTex,true);
+            restoreTexture((ImTextureID)(intptr_t)viewTex,false);
         }
         const ImVec2 outline[4] = {q0,q1,q2,q3}; dl->AddPolyline(outline, 4, IM_COL32(255, 255, 255, 230), ImDrawFlags_Closed, 1.5f);
         if (cropOverlayShow == 1 || (cropOverlayShow == 0 && dragging)) {
@@ -4375,7 +4753,7 @@ static void optionsBar() {
         const bool live = L.isText() && !typeIsMask();
         Text& t = live ? L.text : (typeMaskEditing ? typeMask : typeNext);
         bool ch = false;
-        auto edited = [&](bool c) { if (live && ImGui::IsItemActivated()) remember("Text"); ch |= c; };
+        auto edited = [&](bool c) { if (live && ImGui::IsItemActivated()) typeRemember("Text"); ch |= c; };
         // the font: the fonts on this PC, by name
         const auto& fonts = systemFonts();
         const std::string cur = t.font.empty() ? defaultFont() : t.font;
@@ -4389,11 +4767,12 @@ static void optionsBar() {
             if (!q.empty()) ImGui::SeparatorText("Recent");
             else if (!recentTypeFonts.empty()) {
                 ImGui::TextDisabled("Recent");
-                for (const std::string& path : recentTypeFonts) {
+                const auto recent=recentTypeFonts;
+                for (const std::string& path : recent) {
                     auto it=std::find_if(fonts.begin(),fonts.end(),[&](const FontFile& f){return f.path==path;});
                     if(it!=fonts.end() && ImGui::Selectable(it->name.c_str(),path==cur)) {
-                        if(live) remember("Font"); t.font=path; ch=true;
-                        noteRecentFont(recentTypeFonts,path,recentTypeFontCap);
+                        if(live) typeRemember("Font"); t.font=path; ch=true;
+                        noteRecentFont(recentTypeFonts,path,(size_t)recentTypeFontCap);saveTypePreferences();
                     }
                 }
                 ImGui::Separator();
@@ -4402,7 +4781,7 @@ static void optionsBar() {
                 std::string n = f.name; for (auto& c : n) c = (char)tolower((unsigned char)c);
                 if (!q.empty() && n.find(q) == std::string::npos) continue;
                 if (!q.empty() && std::find(recentTypeFonts.begin(),recentTypeFonts.end(),f.path)!=recentTypeFonts.end()) continue;
-                if (ImGui::Selectable(f.name.c_str(), f.path == cur)) { if (live) remember("Font"); t.font = f.path; ch = true; noteRecentFont(recentTypeFonts,f.path,recentTypeFontCap); }
+                if (ImGui::Selectable(f.name.c_str(), f.path == cur)) { if (live) typeRemember("Font"); t.font = f.path; ch = true; noteRecentFont(recentTypeFonts,f.path,(size_t)recentTypeFontCap); saveTypePreferences(); }
             }
             ImGui::EndCombo();
         }
@@ -4410,7 +4789,7 @@ static void optionsBar() {
             ImGui::SameLine(0, 8);
             if (ImGui::Button("Path...")) ImGui::OpenPopup("##typePathSettings");
             if (ImGui::BeginPopup("##typePathSettings")) {
-                if (ImGui::Button("Remove Path")) { remember("Remove Text Path"); t.pathText = false; t.path.clear(); t.pathStart = 0; ch = true; ImGui::CloseCurrentPopup(); }
+                if (ImGui::Button("Remove Path")) { typeRemember("Remove Text Path"); t.pathText = false; t.path.clear(); t.pathStart = 0; ch = true; ImGui::CloseCurrentPopup(); }
                 edited(ImGui::Checkbox("Flip Side", &t.pathFlip));
                 const float length = typePathLength(t.path);
                 if (length > 0) { ImGui::SetNextItemWidth(240); edited(sliderF("Path Start", &t.pathStart, 0, length, "%.0f px")); }
@@ -4420,7 +4799,7 @@ static void optionsBar() {
             ImGui::SameLine(0, 8);
             if (ImGui::Button("Type on Path")) {
                 int pathIndex = -1;
-                remember("Type on Path"); t.pathStart = typePathNearest(doc.workPath, t.x, t.y, nullptr, &pathIndex);
+                typeRemember("Type on Path"); t.pathStart = typePathNearest(doc.workPath, t.x, t.y, nullptr, &pathIndex);
                 t.path = pathIndex >= 0 && pathIndex < (int)doc.workPath.size() ? BezierPath{doc.workPath[pathIndex]} : doc.workPath;
                 t.pathText = true; t.pathFlip = false; ch = true;
             }
@@ -4433,7 +4812,7 @@ static void optionsBar() {
             if (k) ImGui::SameLine(0, 2);
             const bool on = t.align == k;
             if (on) ImGui::PushStyleColor(ImGuiCol_Button, col4(C_PINK));
-            if (ImGui::Button(al[k])) { if (live) remember("Align"); t.align = k; ch = true; }
+            if (ImGui::Button(al[k])) { if (live) typeRemember("Align"); t.align = k; ch = true; }
             if (on) ImGui::PopStyleColor();
         }
         ImGui::SameLine(0, 14); edited(sliderF("Tracking", &t.tracking, -200, 1000, "%.0f"));
@@ -5033,6 +5412,10 @@ static void menus() {
         if (item("Quit", "Ctrl+Q")) requestQuit();
         ImGui::EndMenu();
     }
+    if (ImGui::BeginMenu("Preferences")) {
+        if (item("Type...")) ImGui::OpenPopup("Type Preferences");
+        ImGui::EndMenu();
+    }
     if (ImGui::BeginMenu("Edit", !noDoc)) {
         if (item(hist.canUndo() ? ("Undo " + hist.undoNames.back()).c_str() : "Undo", "Ctrl+Z", hist.canUndo())) { hist.doUndo(doc); changed(); selChanged(); }
         if (item(hist.canRedo() ? ("Redo " + hist.redoNames.back()).c_str() : "Redo", "Ctrl+Shift+Z", hist.canRedo())) { hist.doRedo(doc); changed(); selChanged(); }
@@ -5057,6 +5440,11 @@ static void menus() {
         if (item("Free Transform...", "Ctrl+T")) openDlg(D_TRANSFORM);
         if (item("Flip Horizontal")) { remember("Flip"); flipLayer(doc, true); changed(); }
         if (item("Flip Vertical")) { remember("Flip"); flipLayer(doc, false); changed(); }
+        ImGui::Separator();
+        if (ImGui::BeginMenu("Preferences")) {
+            if (item("Type...")) ImGui::OpenPopup("Type Preferences");
+            ImGui::EndMenu();
+        }
         ImGui::EndMenu();
     }
     if (ImGui::BeginMenu("Image", !noDoc)) {
@@ -5204,6 +5592,19 @@ static void menus() {
     ImGui::EndMainMenuBar();
 }
 
+static void typePreferencesDialog(){
+    if(typePreferencesScriptOpen){ImGui::OpenPopup("Type Preferences");typePreferencesScriptOpen=false;}
+    if(!ImGui::BeginPopupModal("Type Preferences",nullptr,ImGuiWindowFlags_AlwaysAutoResize))return;
+    ImGui::TextUnformatted("Type");ImGui::Separator();
+    bool changedPrefs=false;
+    changedPrefs|=ImGui::Checkbox("Use Smart Quotes",&typeSmartQuotesEnabled);
+    changedPrefs|=ImGui::Checkbox("Fill new Type layers with placeholder text",&typePlaceholderEnabled);
+    if(ImGui::SliderInt("Recent fonts",&recentTypeFontCap,0,50)){trimRecentFonts(recentTypeFonts,(size_t)recentTypeFontCap);changedPrefs=true;}
+    if(changedPrefs)saveTypePreferences();
+    ImGui::Separator();if(ImGui::Button("Close",ImVec2(100,0)))ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+
 // ---------- keys (Photoshop's) ----------
 static void keys() {
     ImGuiIO& io = ImGui::GetIO();
@@ -5294,6 +5695,7 @@ void frame() {
     const float W = io.DisplaySize.x, H = io.DisplaySize.y;
     if (scriptDlg != D_NONE) { openDlg(scriptDlg); if (dlg == D_REFINE) { pi[0] = scriptView; p[0] = 12; } if (scriptSize[0] > 0) { pi[0] = scriptSize[0]; pi[1] = scriptSize[1]; scriptSize[0] = 0; scriptOk = true; } scriptDlg = D_NONE; }
     menus();
+    typePreferencesDialog();
     const float top = ImGui::GetFrameHeight(), optH = 38, statusH = 26, leftW = Toolbar::width(), rightW = 310;
     const ImGuiWindowFlags fixed = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus;
 
@@ -5441,7 +5843,7 @@ void requestQuit() {
 
 void init(SDL_Window* win, const std::string& prefDir, void (*status)(const char* what, float progress)) {
     auto step = [status](const char* what, float progress) { if (status) status(what, progress); };
-    window = win; prefs = prefDir; cropLoadUserPresets();
+    window = win; prefs = prefDir; cropLoadUserPresets(); loadTypePreferences();
     step("Applying the theme...", 0.2f);
     applyStyle();
     {   // Filter > Changeling: find Changeling Studio and ask it for the steps now, so the menu is ready
@@ -5517,6 +5919,11 @@ void script(const std::string& what) {
         const bool ok=idle==191 && edit==96 && std::lround(cropShieldColor[0]*255)==204 && std::lround(cropShieldColor[1]*255)==31 && std::lround(cropShieldColor[2]*255)==56;
         fprintf(stderr,"crop-shield: %s; canvas/custom colors, opacity, auto-adjust and visibility\n",ok?"passed":"failed");return;
     }
+    if (what == "crop-shield-rotated") {
+        Toolbar::select(Toolbar::CROP);syncTool();cropR[0]=doc.w*.2f;cropR[1]=doc.h*.18f;cropR[2]=doc.w*.8f;cropR[3]=doc.h*.82f;cropAngle=.31f;cropShowArea=true;cropShieldEnabled=true;cropShieldAuto=false;cropShieldMatchCanvas=false;cropShieldOpacity=70;cropShieldColor[0]=.1f;cropShieldColor[1]=.3f;cropShieldColor[2]=.6f;cropClassicMode=false;syncCropView();
+        const bool ok=std::fabs(viewRotation+cropAngle*57.2957795f)<.01f&&cropPending;
+        fprintf(stderr,"crop-shield-rotated: %s; canvas tint with crop interior restored\n",ok?"passed":"failed");return;
+    }
     if (what == "crop-preset") {
         Toolbar::select(Toolbar::CROP);syncTool();cropPreset=8;strcpy_s(cropWidth,"4 in");strcpy_s(cropHeight,"5 in");strcpy_s(cropResolution,"300");cropResolutionCm=false;cropAngle=0;fitCropAspect();
         int w=0,h=0;float dpi=0;cropSizeTarget(w,h,dpi);const bool target=w==1200&&h==1500&&dpi==300;
@@ -5560,6 +5967,105 @@ void script(const std::string& what) {
         Toolbar::select(Toolbar::CROP);syncTool();cropPending=true;cropR[0]=doc.w*.2f;cropR[1]=doc.h*.2f;cropR[2]=doc.w*.8f;cropR[3]=doc.h*.8f;cropAngle=.2f;cropClassicMode=false;syncCropView();
         toggleCropMode();const bool classic= cropClassicMode&&std::fabs(viewRotation)<.01f;toggleCropMode();const bool back=!cropClassicMode&&std::fabs(viewRotation+cropAngle*57.2957795f)<.01f;
         fprintf(stderr,"crop-mode-shortcut: %s; P toggles Classic Mode and restores default view rotation\n",classic&&back?"passed":"failed");return;
+    }
+    if (what == "crop-move-image") {
+        Toolbar::select(Toolbar::CROP);syncTool();cropR[0]=doc.w*.18f;cropR[1]=doc.h*.18f;cropR[2]=doc.w*.82f;cropR[3]=doc.h*.82f;cropAngle=.17f;cropClassicMode=false;syncCropView();
+        const ImVec2 center((cropR[0]+cropR[2])*.5f,(cropR[1]+cropR[3])*.5f),screen=toScreen(center.x,center.y);cropBegin(toCanvas(screen));const bool hit=cropDragPart==8;beginCropImageMove(screen);cropImageMoveTo(ImVec2(screen.x+24,screen.y+9));
+        const ImVec2 after=toScreen((cropR[0]+cropR[2])*.5f,(cropR[1]+cropR[3])*.5f);const bool fixed=std::hypot(after.x-screen.x,after.y-screen.y)<.01f;
+        fprintf(stderr,"crop-move-image: %s; default-mode drag shifts image under a screen-fixed frame\n",hit&&fixed&&cropMoveImage?"passed":"failed");return;
+    }
+    if (what == "crop-nudge") {
+        Toolbar::select(Toolbar::CROP);syncTool();cropPending=true;cropR[0]=doc.w*.2f;cropR[1]=doc.h*.2f;cropR[2]=doc.w*.8f;cropR[3]=doc.h*.8f;cropAngle=.13f;cropAutoCenter=true;cropPreset=0;
+        cropClassicMode=false;syncCropView();const ImVec2 a=toScreen((cropR[0]+cropR[2])*.5f,(cropR[1]+cropR[3])*.5f);nudgeCrop(1,0,false);
+        const ImVec2 b=toScreen((cropR[0]+cropR[2])*.5f,(cropR[1]+cropR[3])*.5f);const bool defaultFixed=std::hypot(a.x-b.x,a.y-b.y)<.01f;
+        cropClassicMode=true;syncCropView();const ImVec2 c=toScreen((cropR[0]+cropR[2])*.5f,(cropR[1]+cropR[3])*.5f);nudgeCrop(1,0,false);
+        const ImVec2 d=toScreen((cropR[0]+cropR[2])*.5f,(cropR[1]+cropR[3])*.5f);const bool classicMoves=std::hypot(c.x-d.x,c.y-d.y)>.9f;
+        cropAngle=0;cropR[0]=doc.w*.2f;cropR[1]=doc.h*.2f;cropR[2]=doc.w*.8f;cropR[3]=doc.h*.8f;cropClassicMode=false;cropAutoCenter=true;syncCropView();
+        const float cy=(cropR[1]+cropR[3])*.5f,initialWidth=cropR[2]-cropR[0];const ImVec2 edge=toScreen(cropR[2],cy),midBefore=toScreen((cropR[0]+cropR[2])*.5f,cy);
+        cropBegin(toCanvas(edge));const bool hitRight=cropDragPart==3;cropDragTo(toCanvas(ImVec2(edge.x+10,edge.y)));
+        const ImVec2 midAfter=toScreen((cropR[0]+cropR[2])*.5f,cy);const bool autoResize=hitRight&&std::fabs((cropR[2]-cropR[0])-initialWidth-20/std::max(.01f,zoom))<.1f&&std::hypot(midAfter.x-midBefore.x,midAfter.y-midBefore.y)<.1f;
+        cropR[0]=doc.w*.2f;cropR[1]=doc.h*.2f;cropR[2]=doc.w*.8f;cropR[3]=doc.h*.8f;const float panCy=(cropR[1]+cropR[3])*.5f;const ImVec2 panHandle=toScreen(cropR[2],panCy),panCenter=toScreen((cropR[0]+cropR[2])*.5f,panCy);cropBegin(toCanvas(panHandle));const ImVec2 panDelta(37,-19),panOrigin=origin;origin=ImVec2(origin.x+panDelta.x,origin.y+panDelta.y);cropCompensatePan(panDelta);const ImVec2 panCenterAfter=toScreen((cropR[0]+cropR[2])*.5f,(cropR[1]+cropR[3])*.5f);const bool panAnchored=cropDragPart==3&&std::hypot(panCenterAfter.x-panCenter.x,panCenterAfter.y-panCenter.y)<.1f;const float panWidth=cropR[2]-cropR[0];const ImVec2 resumedPointer(panHandle.x+10,panHandle.y);cropDragTo(toCanvas(resumedPointer));const float resumedWidth=cropR[2]-cropR[0];const bool panResumed=std::fabs(resumedWidth-(panWidth+20/std::max(.01f,zoom)))<.2f;origin=panOrigin;cropDragPart=-1;
+        const float ratioBefore=(cropR[2]-cropR[0])/(cropR[3]-cropR[1]);const ImVec2 ratioEdge=toScreen(cropR[2],(cropR[1]+cropR[3])*.5f);
+        cropBegin(toCanvas(ratioEdge));cropDragTo(toCanvas(ImVec2(ratioEdge.x+10,ratioEdge.y)),true);
+        const bool shiftRatio=std::fabs((cropR[2]-cropR[0])/(cropR[3]-cropR[1])-ratioBefore)<.01f;
+        const float oldW=cropR[2]-cropR[0],oldH=cropR[3]-cropR[1];swapCropOrientation();
+        const bool swapped=std::fabs((cropR[2]-cropR[0])-oldH)<.01f&&std::fabs((cropR[3]-cropR[1])-oldW)<.01f;
+        fprintf(stderr,"crop-nudge: %s; fixed/classic/resize/pan-anchor/pan-resume/ratio/swap %d/%d/%d/%d/%d/%d/%d\n",defaultFixed&&classicMoves&&autoResize&&panAnchored&&panResumed&&shiftRatio&&swapped?"passed":"failed",defaultFixed,classicMoves,autoResize,panAnchored,panResumed,shiftRatio,swapped);return;
+    }
+    if (what == "type-hidden-groups") {
+        auto variants=[](){Doc d=newDoc(256,256,false);Text t;t.str="Visible text";t.x=40;t.y=96;t.size=48;Fill f;f.kind=FILL_SOLID;for(int i=0;i<3;++i)addTextLayer(d,t,f);return d;};
+        Doc siblings=variants();const ImVec2 point((siblings.layers[1].text.box[0]+siblings.layers[1].text.box[2])*.5f,(siblings.layers[1].text.box[1]+siblings.layers[1].text.box[3])*.5f);
+        bool hiddenSiblings=groupLayers(siblings,{2,3});if(hiddenSiblings){siblings.groups.back().visible=false;hiddenSiblings=typeHitLayer(siblings,point)==1;}
+        Doc nested=variants();nested.layers[2].visible=false;bool hiddenNested=groupLayers(nested,{3});if(hiddenNested){const int inner=nested.groups.back().id;LayerGroup outer;outer.id=inner+1;outer.stackIndex=3;outer.name="Outer";outer.visible=false;nested.groups.back().parentId=outer.id;nested.groups.push_back(outer);hiddenNested=typeHitLayer(nested,point)==1;}
+        Doc own=variants();own.layers[2].visible=false;own.layers[3].visible=false;const bool hiddenAbove=typeHitLayer(own,point)==1;own.layers[1].visible=false;own.layers[2].visible=false;own.layers[3].visible=true;const bool hiddenBelow=typeHitLayer(own,point)==3;
+        doc=std::move(siblings);doc.active=0;typeLayer=-1;typeMaskEditing=false;Toolbar::select(Toolbar::TYPE_H);syncTool();typeBegin(point);
+        const bool editShown=typeLayer==1&&doc.active==1;
+        typeCancel();Toolbar::select(Toolbar::MOVE);syncTool();doc.active=0;
+        const bool moveEditShown=moveEditTextAt(point)&&typeLayer==1&&Toolbar::current()==Toolbar::TYPE_H&&typeReturnToolbar==Toolbar::MOVE;
+        fprintf(stderr,"type-hidden-groups: %s; hidden sibling/nested groups, hidden variants above/below, Type/Move edit shown layer=%d/%d/%d/%d/%d/%d\n",hiddenSiblings&&hiddenNested&&hiddenAbove&&hiddenBelow&&editShown&&moveEditShown?"passed":"failed",hiddenSiblings,hiddenNested,hiddenAbove,hiddenBelow,editShown,moveEditShown);return;
+    }
+    if (what == "type-shift-click") {
+        doc=newDoc(480,320,false);hist=History();Text existing;existing.str="Existing words";existing.x=60;existing.y=140;existing.size=52;Fill fill;fill.kind=FILL_SOLID;for(int i=0;i<3;++i)fill.colour[i]=fg[i]/255.0f;addTextLayer(doc,existing,fill);
+        const ImVec2 point((doc.cur().text.box[0]+doc.cur().text.box[2])*.5f,(doc.cur().text.box[1]+doc.cur().text.box[3])*.5f);Toolbar::select(Toolbar::TYPE_H);syncTool();typeLayer=-1;typeBegin(point);
+        const bool plainEdits=typeLayer==1&&doc.layers.size()==2&&doc.active==1;typeCommit();typeBegin(point,true);
+        const bool shiftCreates=plainEdits&&typeLayer==2&&doc.layers.size()==3&&doc.active==2&&doc.cur().text.str=="Lorem Ipsum"&&typeSelectPlaceholder;fitNext=true;
+        fprintf(stderr,"type-shift-click: %s; ordinary click edits existing text and Shift-click creates a selected placeholder layer\n",shiftCreates?"passed":"failed");return;
+    }
+    if (what == "type-move-double-click") {
+        doc=newDoc(480,320,false);hist=History();Text existing;existing.str="Move edits this";existing.x=64;existing.y=140;existing.size=52;Fill fill;fill.kind=FILL_SOLID;for(int i=0;i<3;++i)fill.colour[i]=fg[i]/255.0f;addTextLayer(doc,existing,fill);
+        const ImVec2 point((doc.cur().text.box[0]+doc.cur().text.box[2])*.5f,(doc.cur().text.box[1]+doc.cur().text.box[3])*.5f);Toolbar::select(Toolbar::MOVE);syncTool();
+        const size_t historyBefore=hist.undo.size();const bool opened=moveEditTextAt(point)&&Toolbar::current()==Toolbar::TYPE_H&&typeLayer==1&&typeReturnToolbar==Toolbar::MOVE;
+        doc.cur().text.str="Cancelled edit";renderFill(doc,doc.cur());typeCancel();const bool cancelled=Toolbar::current()==Toolbar::MOVE&&tool==T_MOVE&&doc.cur().text.str=="Move edits this"&&typeReturnToolbar<0&&hist.undo.size()==historyBefore;
+        const bool reopened=moveEditTextAt(point)&&typeLayer==1;const size_t undoBefore=hist.undo.size();typeRemember("Edit Text");typeRemember("Edit Text");const bool coalesced=hist.undo.size()==undoBefore&&typeEditUndoPushed;doc.cur().text.str="Committed edit";renderFill(doc,doc.cur());typeCommit();const bool committed=Toolbar::current()==Toolbar::MOVE&&tool==T_MOVE&&doc.cur().text.str=="Committed edit"&&typeReturnToolbar<0&&coalesced&&hist.undo.size()==undoBefore+1&&hist.undoNames.back()=="Edit Text";
+        hist.doUndo(doc);changed();const bool undoRestores=doc.cur().text.str=="Move edits this";hist.doRedo(doc);changed();const bool redoRestores=doc.cur().text.str=="Committed edit";
+        const bool reopenedAgain=moveEditTextAt(point);Toolbar::select(Toolbar::ERASER);syncTool();const bool explicitTool=Toolbar::current()==Toolbar::ERASER&&tool==T_ERASER&&typeReturnToolbar<0&&typeLayer<0;
+        Toolbar::select(Toolbar::MOVE);syncTool();const bool reopenedForCapture=moveEditTextAt(point);typeCommit();const bool restoredForCapture=Toolbar::current()==Toolbar::MOVE&&tool==T_MOVE;fitNext=true;
+        fprintf(stderr,"type-move-double-click: %s; open/cancel/reopen/commit/undo/redo/reopen/tool-change/capture %d/%d/%d/%d/%d/%d/%d/%d/%d\n",opened&&cancelled&&reopened&&committed&&undoRestores&&redoRestores&&reopenedAgain&&explicitTool&&reopenedForCapture&&restoredForCapture?"passed":"failed",opened,cancelled,reopened,committed,undoRestores,redoRestores,reopenedAgain,explicitTool,restoredForCapture);return;
+    }
+    if (what == "type-word-navigation") {
+        doc=newDoc(480,320,false);hist=History();Text text;text.str="ab, cd";text.x=64;text.y=140;text.size=52;Fill fill;fill.kind=FILL_SOLID;for(int i=0;i<3;++i)fill.colour[i]=fg[i]/255.0f;addTextLayer(doc,text,fill);
+        const ImVec2 point((doc.cur().text.box[0]+doc.cur().text.box[2])*.5f,(doc.cur().text.box[1]+doc.cur().text.box[3])*.5f);Toolbar::select(Toolbar::TYPE_H);syncTool();typeLayer=-1;typeBegin(point);typeWordNavigationScriptStage=1;fitNext=true;return;
+    }
+    if (what == "type-multiclick") {
+        doc=newDoc(480,320,false);hist=History();Text text;text.str="ab, cd\nnext";text.x=64;text.y=140;text.size=52;Fill fill;fill.kind=FILL_SOLID;for(int i=0;i<3;++i)fill.colour[i]=fg[i]/255.0f;addTextLayer(doc,text,fill);
+        const ImVec2 point((doc.cur().text.box[0]+doc.cur().text.box[2])*.5f,(doc.cur().text.box[1]+doc.cur().text.box[3])*.5f);Toolbar::select(Toolbar::TYPE_H);syncTool();typeLayer=-1;typeBegin(point);typeClickOwner=-1;typeClickRun=0;typeMultiClickScriptStage=1;fitNext=true;return;
+    }
+    if (what == "type-smart-quotes") {
+        Toolbar::select(Toolbar::TYPE_H);syncTool();typeSmartQuotesEnabled=true;typePlaceholderEnabled=true;typeSmartQuoteScriptStage=1;typeSmartQuoteScriptSelection=false;
+        typeBegin(ImVec2(doc.w*.3f,doc.h*.45f));
+        return;
+    }
+    if (what == "type-preferences") {
+        const bool oldSmart=typeSmartQuotesEnabled,oldPlaceholder=typePlaceholderEnabled;const auto file=typePreferencesFile();const bool hadFile=std::filesystem::exists(file);std::string oldFile;
+        if(hadFile){std::ifstream f(file,std::ios::binary);oldFile.assign(std::istreambuf_iterator<char>(f),{});}
+        const auto oldRecent=recentTypeFonts;const int oldRecentCap=recentTypeFontCap;
+        recentTypeFonts={"Font A","Font B","Font C"};recentTypeFontCap=2;trimRecentFonts(recentTypeFonts,(size_t)recentTypeFontCap);
+        typeSmartQuotesEnabled=false;typePlaceholderEnabled=false;const bool wrote=saveTypePreferences();typeSmartQuotesEnabled=true;typePlaceholderEnabled=true;recentTypeFonts.clear();recentTypeFontCap=10;loadTypePreferences();
+        const bool loadedSmart=typeSmartQuotesEnabled,loadedPlaceholder=typePlaceholderEnabled;const bool stored=wrote&&!loadedSmart&&!loadedPlaceholder;
+        const bool recentStored=recentTypeFontCap==2&&recentTypeFonts==std::vector<std::string>({"Font A","Font B"});
+        typeSmartQuotesEnabled=oldSmart;typePlaceholderEnabled=true;
+        const Doc savedDoc=doc;const History savedHist=hist;const int savedLayer=typeLayer,savedToolbar=Toolbar::current();const bool savedMask=typeMaskEditing;const Text savedTypeMask=typeMask;const bool savedFocus=typeFocus,savedSelect=typeSelectPlaceholder;char savedBuf[sizeof(typeBuf)];memcpy(savedBuf,typeBuf,sizeof(typeBuf));
+        Toolbar::select(Toolbar::TYPE_H);syncTool();typePlaceholderEnabled=true;typeBegin(ImVec2(doc.w*.5f,doc.h*.5f));
+        const bool placeholder=typeLayer>=0&&doc.layers[typeLayer].text.str=="Lorem Ipsum"&&typeSelectPlaceholder;
+        doc=savedDoc;hist=savedHist;typeLayer=savedLayer;typeMaskEditing=savedMask;typeMask=savedTypeMask;typeFocus=savedFocus;typeSelectPlaceholder=savedSelect;memcpy(typeBuf,savedBuf,sizeof(typeBuf));
+        typePlaceholderEnabled=false;Toolbar::select(Toolbar::TYPE_H);syncTool();typeBegin(ImVec2(doc.w*.5f,doc.h*.5f));
+        const bool placeholderOff=typeLayer>=0&&doc.layers[typeLayer].text.str.empty()&&!typeSelectPlaceholder;
+        doc=savedDoc;hist=savedHist;typeLayer=savedLayer;typeMaskEditing=savedMask;typeMask=savedTypeMask;typeFocus=savedFocus;typeSelectPlaceholder=savedSelect;memcpy(typeBuf,savedBuf,sizeof(typeBuf));
+        typePlaceholderEnabled=true;Toolbar::select(Toolbar::TYPE_V_MASK);syncTool();typeBegin(ImVec2(doc.w*.5f,doc.h*.5f));
+        const bool verticalMaskEmpty=typeMaskEditing&&typeMask.str.empty();
+        doc=savedDoc;hist=savedHist;typeLayer=savedLayer;typeMaskEditing=savedMask;typeMask=savedTypeMask;typeFocus=savedFocus;typeSelectPlaceholder=savedSelect;memcpy(typeBuf,savedBuf,sizeof(typeBuf));
+        Toolbar::select(savedToolbar);syncTool();
+        if(hadFile){std::ofstream f(file,std::ios::binary|std::ios::trunc);f.write(oldFile.data(),(std::streamsize)oldFile.size());}else{std::error_code ec;std::filesystem::remove(file,ec);}
+        typeSmartQuotesEnabled=oldSmart;typePlaceholderEnabled=oldPlaceholder;recentTypeFonts=oldRecent;recentTypeFontCap=oldRecentCap;
+        const bool quotes=textSmartQuotesTyped(" ","\"you\"")=="\xe2\x80\x9cyou\xe2\x80\x9d"&&textSmartQuotesTyped("x","\"you\"")=="\xe2\x80\x9dyou\xe2\x80\x9d";
+        ImGuiIO& io=ImGui::GetIO();std::vector<ImWchar> queued;for(int i=0;i<io.InputQueueCharacters.Size;++i)queued.push_back(io.InputQueueCharacters[i]);io.InputQueueCharacters.clear();
+        ImGuiInputTextState fake;fake.TextW.push_back('x');fake.CurLenW=1;fake.Stb.cursor=1;io.InputQueueCharacters.push_back('"');typeSmartQuotesEnabled=true;typeMapQueuedSmartQuotes(&fake);
+        const bool queueMapped=io.InputQueueCharacters.Size==1&&io.InputQueueCharacters[0]==0x201d;io.InputQueueCharacters.clear();for(ImWchar ch:queued)io.InputQueueCharacters.push_back(ch);
+        io.InputQueueCharacters.clear();io.InputQueueCharacters.push_back('"');typeSmartQuotesEnabled=false;typeMapQueuedSmartQuotes(&fake);
+        const bool disabledKeepsStraight=io.InputQueueCharacters.Size==1&&io.InputQueueCharacters[0]=='"';io.InputQueueCharacters.clear();for(ImWchar ch:queued)io.InputQueueCharacters.push_back(ch);
+        typeSmartQuotesEnabled=oldSmart;typePlaceholderEnabled=oldPlaceholder;
+        typePreferencesScriptOpen=true;
+        fprintf(stderr,"type-preferences: %s (stored=%d recent=%d placeholder=%d off=%d vertical-mask=%d quotes-on=%d quotes-off=%d); preference and Type creation rules\n",stored&&recentStored&&placeholder&&placeholderOff&&verticalMaskEmpty&&quotes&&queueMapped&&disabledKeepsStraight?"passed":"failed",stored?1:0,recentStored?1:0,placeholder?1:0,placeholderOff?1:0,verticalMaskEmpty?1:0,quotes&&queueMapped?1:0,disabledKeepsStraight?1:0);return;
     }
     if (what == "text-empty") {
         Toolbar::select(Toolbar::TYPE_H); syncTool();
@@ -5784,7 +6290,7 @@ void script(const std::string& what) {
         curve.knots = {p0, p1}; doc.workPath = {curve};
         typeBeginOnPath(ImVec2(p0.ax, p0.ay), typePathNearest(doc.workPath, p0.ax, p0.ay));
         doc.cur().text.str = "Text follows a curved path"; snprintf(typeBuf, sizeof typeBuf, "%s", doc.cur().text.str.c_str()); renderFill(doc, doc.cur()); changed();
-        std::vector<float> pathCoverage; float pathBox[4]; const bool pathRendered = textCoverage(doc.cur().text, doc.w, doc.h, pathCoverage, pathBox);
+        std::vector<float> pathCoverage; float pathBox[4]; const bool pathRendered = textCoverage(doc.cur().text, doc.w, doc.h, pathCoverage, pathBox, doc.dpi);
         const bool pathOk = pathRendered && std::count_if(pathCoverage.begin(), pathCoverage.end(), [](float a) { return a > 0.1f; }) > 100;
         const float startBefore = doc.cur().text.pathStart;
         const bool markerPicked = typePathMarkerPress(ImVec2(p0.ax, p0.ay));
@@ -6012,6 +6518,22 @@ void script(const std::string& what) {
         combineSel(doc, pathSelection(), SEL_NEW); selChanged();
         fprintf(stderr, "pen: %d subpaths, %d knots in the second; shape layer %s\n", (int)doc.workPath.size(), (int)doc.workPath[1].knots.size(), doc.cur().name.c_str());
         changed();
+    }
+    if (what == "type-rich-runs") {
+        doc=newDoc(520,400,false);hist=History();Text text;text.str="Small Large\nNormal leading\nExpanded leading\nAfter spacing";text.font=defaultFont();text.size=42;text.x=28;text.y=40;
+        TextStyle small;small.font=text.font;small.size=28;small.leading=text.leading;
+        TextStyle large=small;large.size=64;large.tracking=80;
+        TextStyle normal=small;normal.size=34;
+        TextStyle expanded=normal;expanded.leading=2.4f;
+        TextStyle transformed=normal;transformed.horizontalScale=1.35f;transformed.verticalScale=1.2f;transformed.baselineShift=8;
+        text.runs={{6,small},{6,large},{15,normal},{17,expanded},{13,transformed}};Fill fill;fill.kind=FILL_SOLID;for(int k=0;k<3;++k)fill.colour[k]=fg[k]/255.0f;
+        addTextLayer(doc,text,fill);
+        Text effects;effects.str="Bold italic underline strike";effects.font=defaultFont();effects.size=32;effects.x=28;effects.y=270;
+        TextStyle effect;effect.font=effects.font;effect.size=effects.size;effect.leading=effects.leading;
+        TextStyle bold=effect;bold.bold=true;TextStyle italic=effect;italic.italic=true;TextStyle underline=effect;underline.underline=true;TextStyle strike=effect;strike.strikethrough=true;
+        effects.runs={{5,bold},{7,italic},{10,underline},{6,strike}};addTextLayer(doc,effects,fill);Toolbar::select(Toolbar::TYPE_H);syncTool();fitNext=true;
+        std::vector<float> coverage;float box[4];const bool rendered=textCoverage(doc.cur().text,doc.w,doc.h,coverage,box,doc.dpi);
+        fprintf(stderr,"type-rich-runs: %s; per-run font/size/tracking/leading/scale/baseline/weight/italic/decorations\n",rendered?"rendered":"failed");return;
     }
     if (what == "text") {   // tests: horizontal and vertical text layers, centred, a Type Mask selection
         Toolbar::select(Toolbar::TYPE_H); syncTool();

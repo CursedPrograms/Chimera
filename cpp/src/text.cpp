@@ -4,6 +4,7 @@
 #include "text.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -14,11 +15,38 @@
 #include <map>
 #include <mutex>
 #include <sstream>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <locale>
+#endif
 
 namespace fs = std::filesystem;
 
+// Rust char::is_alphanumeric uses Unicode properties; the C locale does not classify non-ASCII
+// letters. Ask Windows' Unicode tables on this platform and use the user's Unicode locale elsewhere.
+static bool unicodeAlphanumeric(uint32_t cp) {
+#ifdef _WIN32
+    wchar_t units[2]; int count=1;
+    if(cp<=0xffff) units[0]=(wchar_t)cp;
+    else { cp-=0x10000; units[0]=(wchar_t)(0xd800+(cp>>10)); units[1]=(wchar_t)(0xdc00+(cp&0x3ff)); count=2; }
+    WORD types[2]={};
+    if(!GetStringTypeW(CT_CTYPE1,units,count,types))return false;
+    for(int i=0;i<count;++i)if(types[i]&(C1_ALPHA|C1_DIGIT))return true;
+    return false;
+#else
+    if(cp>static_cast<uint32_t>(WCHAR_MAX))return false;
+    static const std::locale unicodeLocale("");
+    return std::use_facet<std::ctype<wchar_t>>(unicodeLocale).is(std::ctype_base::alnum,(wchar_t)cp);
+#endif
+}
+
 // after PhotoCraft (crates/text/src/layout/navigate.rs word_boundary): skip separators then
 // consume the adjacent alphanumeric run, counting Unicode code points rather than UTF-8 bytes.
+static uint32_t utf8CodePoint(const std::string& text,size_t i,size_t& bytes);
 size_t textWordBoundary(const std::string& text, size_t index, bool forward) {
     std::vector<std::pair<size_t, uint32_t>> chars;
     for (size_t i=0; i<text.size();) {
@@ -28,31 +56,60 @@ size_t textWordBoundary(const std::string& text, size_t index, bool forward) {
         else if (c>=0xC0 && i<text.size()) { cp=(c&31u)<<6; cp|=static_cast<unsigned char>(text[i++])&63u; }
         chars.push_back({start,cp});
     }
-    auto alnum=[](uint32_t cp) {
-        if (cp<128) return std::isalnum(static_cast<unsigned char>(cp))!=0;
-        if (cp<=static_cast<uint32_t>(WCHAR_MAX)) return std::iswalnum(static_cast<wint_t>(cp))!=0;
-        return false;
-    };
     size_t i=std::min(index,chars.size());
-    if(forward) { while(i<chars.size()&&!alnum(chars[i].second))++i; while(i<chars.size()&&alnum(chars[i].second))++i; }
-    else { while(i>0&&!alnum(chars[i-1].second))--i; while(i>0&&alnum(chars[i-1].second))--i; }
+    if(forward) { while(i<chars.size()&&!unicodeAlphanumeric(chars[i].second))++i; while(i<chars.size()&&unicodeAlphanumeric(chars[i].second))++i; }
+    else { while(i>0&&!unicodeAlphanumeric(chars[i-1].second))--i; while(i>0&&unicodeAlphanumeric(chars[i-1].second))--i; }
     return i;
 }
+std::pair<size_t,size_t> textWordSelection(const std::string& text,size_t caret){
+    std::vector<uint32_t> chars;
+    for(size_t i=0;i<text.size();){size_t bytes=1;const uint32_t cp=utf8CodePoint(text,i,bytes);chars.push_back(cp);i+=bytes;}
+    size_t a=std::min(caret,chars.size()),b=a;
+    while(a>0&&unicodeAlphanumeric(chars[a-1]))--a;
+    while(b<chars.size()&&unicodeAlphanumeric(chars[b]))++b;
+    return {a,b};
+}
 
-// after PhotoCraft (crates/ui-egui/src/tools/type_tool/keys.rs smart_quotes): quotes open after
-// whitespace, brackets and dashes; elsewhere they close. Existing non-ASCII text is preserved.
-std::string textSmartQuotes(const std::string& text) {
+static uint32_t utf8CodePoint(const std::string& text,size_t i,size_t& bytes){
+    const unsigned char c=(unsigned char)text[i];bytes=1;
+    if((c&0xe0)==0xc0&&i+1<text.size()){bytes=2;return ((c&0x1f)<<6)|((unsigned char)text[i+1]&0x3f);}
+    if((c&0xf0)==0xe0&&i+2<text.size()){bytes=3;return ((c&0x0f)<<12)|(((unsigned char)text[i+1]&0x3f)<<6)|((unsigned char)text[i+2]&0x3f);}
+    if((c&0xf8)==0xf0&&i+3<text.size()){bytes=4;return ((c&7)<<18)|(((unsigned char)text[i+1]&0x3f)<<12)|(((unsigned char)text[i+2]&0x3f)<<6)|((unsigned char)text[i+3]&0x3f);}
+    return c;
+}
+static bool quoteOpensAfter(uint32_t c){
+    const bool ws=(c>=9&&c<=13)||c==32||c==0x85||c==0xa0||c==0x1680||(c>=0x2000&&c<=0x200a)||c==0x2028||c==0x2029||c==0x202f||c==0x205f||c==0x3000;
+    return !c||ws||c=='('||c=='['||c=='{'||c=='-'||c==0x2013||c==0x2014;
+}
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/editing.rs smart_quotes): map one typed quote in its left context.
+uint32_t textSmartQuoteCharacter(uint32_t previous,uint32_t character){
+    if(character=='"')return quoteOpensAfter(previous)?0x201c:0x201d;
+    if(character=='\'')return quoteOpensAfter(previous)?0x2018:0x2019;
+    return character;
+}
+static std::string mapSmartQuotes(const std::string& text,uint32_t previous){
     std::string out; out.reserve(text.size());
-    auto opening = [](unsigned char c) { return std::isspace(c) || c=='(' || c=='[' || c=='{' || c=='-' || c=='/'; };
-    for(size_t i=0;i<text.size();++i) {
-        const char c=text[i];
-        if(c=='"' || c=='\'') {
-            const bool open=out.empty() || opening(static_cast<unsigned char>(out.back()));
-            if(c=='"') out += open ? "\xe2\x80\x9c" : "\xe2\x80\x9d";
-            else out += open ? "\xe2\x80\x98" : "\xe2\x80\x99";
-        } else out.push_back(c);
+    for(size_t i=0;i<text.size();) {
+        const unsigned char c=(unsigned char)text[i];
+        if(c=='"'||c=='\''){
+            previous=textSmartQuoteCharacter(previous,c);
+            if(c=='"')out+=previous==0x201c?"\xe2\x80\x9c":"\xe2\x80\x9d";
+            else out+=previous==0x2018?"\xe2\x80\x98":"\xe2\x80\x99";
+            ++i;continue;
+        }
+        size_t n=1;const uint32_t cp=utf8CodePoint(text,i,n);
+        out.append(text,i,n);previous=cp;i+=n;
     }
     return out;
+}
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/keys.rs smart_quotes): quotes open after
+// whitespace, brackets, or hyphens/dashes; elsewhere they close. Existing UTF-8 stays unchanged.
+std::string textSmartQuotes(const std::string& text){return mapSmartQuotes(text,0);}
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/editing.rs insert_typed): pasted text is not rewritten.
+std::string textSmartQuotesTyped(const std::string& prefix,const std::string& typed){
+    uint32_t previous=0;
+    for(size_t i=0;i<prefix.size();){size_t n=1;previous=utf8CodePoint(prefix,i,n);i+=n;}
+    return mapSmartQuotes(typed,previous);
 }
 
 // after PhotoCraft (crates/ui-egui/src/tools/type_tool/defaults.rs type_unit): points are the
@@ -155,6 +212,24 @@ std::vector<TextRun> Text::normalizedRuns() const {
     return out;
 }
 
+// after PhotoCraft (crates/doc/src/lib.rs TextLayer::char_runs): byte run lengths map to the
+// character indices used by the editor and layout, not one entry per UTF-8 byte.
+std::vector<TextStyle> Text::characterStyles() const {
+    std::vector<TextStyle> out;
+    size_t at = 0;
+    for (const TextRun& run : normalizedRuns()) {
+        const size_t end = std::min(str.size(), at + run.bytes);
+        while (at < end) {
+            size_t length = 0;
+            utf8CodePoint(str, at, length);
+            if (!length || at + length > end) break;
+            out.push_back(run.style);
+            at += length;
+        }
+    }
+    return out;
+}
+
 // after PhotoCraft (crates/doc/src/lib.rs TextLayer::paragraph_runs): paragraph runs cover text bytes.
 std::vector<ParagraphRun> Text::normalizedParagraphs() const {
     std::vector<ParagraphRun> out; size_t raw=0,at=0;
@@ -249,44 +324,82 @@ static Loaded* fontFor(const std::string& path) {
     L.ok = off >= 0 && stbtt_InitFont(&L.info, L.data.data(), off);
     return L.ok ? &L : nullptr;
 }
+// The OS/2 table stores strikeout size and position in font units. stb exposes the matching
+// underline metrics from the post table, so both decorations use the font's own measurements.
+static std::pair<int,int> strikeMetrics(Loaded& loaded) {
+    const stbtt_uint32 table=stbtt__find_table(loaded.info.data,loaded.info.fontstart,"OS/2");
+    if(!table||table+30>loaded.data.size())return {0,0};
+    return {ttSHORT(loaded.data.data()+table+28),ttUSHORT(loaded.data.data()+table+26)};
+}
 
-static std::vector<std::vector<int>> linesOf(const std::string& s) {   // UTF-8 to code points, by line
-    std::vector<std::vector<int>> lines(1);
+// Keep the source character index with each glyph; wrapped lines must still resolve the
+// character style that was attached before layout.
+struct TextGlyph { int codepoint = 0; size_t character = 0; };
+static const TextStyle& styleForCharacter(const std::vector<TextStyle>& styles, size_t character, const TextStyle& fallback) {
+    return character < styles.size() ? styles[character] : fallback;
+}
+static Loaded* fontForStyle(const TextStyle& style, const std::string& fallback) {
+    const std::string& font = style.font.empty() ? fallback : style.font;
+    return fontFor(font.empty() ? defaultFont() : font);
+}
+static float glyphAdvance(const TextGlyph& glyph, const TextGlyph* next, const std::vector<TextStyle>& styles,
+                          const TextStyle& fallback, const std::string& fallbackFont) {
+    const TextStyle& style = styleForCharacter(styles, glyph.character, fallback);
+    Loaded* loaded = fontForStyle(style, fallbackFont);
+    if (!loaded) return 0;
+    const float size = std::max(1.0f, style.size);
+    const float scale = stbtt_ScaleForPixelHeight(&loaded->info, size);
+    int advance = 0, bearing = 0;
+    stbtt_GetCodepointHMetrics(&loaded->info, glyph.codepoint, &advance, &bearing);
+    float kern = 0;
+    if (next) {
+        const TextStyle& nextStyle = styleForCharacter(styles, next->character, fallback);
+        const std::string& font = style.font.empty() ? fallbackFont : style.font;
+        const std::string& nextFont = nextStyle.font.empty() ? fallbackFont : nextStyle.font;
+        if (font == nextFont && style.size == nextStyle.size)
+            kern = stbtt_GetCodepointKernAdvance(&loaded->info, glyph.codepoint, next->codepoint) * scale;
+    }
+    const float horizontalScale=std::isfinite(style.horizontalScale)&&style.horizontalScale>0?style.horizontalScale:1.0f;
+    return (advance * scale + kern + style.tracking / 1000.0f * size) * horizontalScale;
+}
+static std::vector<std::vector<TextGlyph>> linesOf(const std::string& s) {   // UTF-8 to code points, by line
+    std::vector<std::vector<TextGlyph>> lines(1);
+    size_t character = 0;
     for (size_t i = 0; i < s.size();) {
         const unsigned char c = s[i];
         int cp = c, n = 1;
         if (c >= 0xF0) { cp = c & 7; n = 4; } else if (c >= 0xE0) { cp = c & 15; n = 3; } else if (c >= 0xC0) { cp = c & 31; n = 2; }
         for (int k = 1; k < n && i + k < s.size(); ++k) cp = (cp << 6) | (s[i + k] & 63);
         i += n;
-        if (cp == '\n') lines.emplace_back(); else if (cp != '\r') lines.back().push_back(cp);
+        if (cp == '\n') lines.emplace_back(); else if (cp != '\r') lines.back().push_back({cp, character});
+        ++character;
     }
     return lines;
 }
 
 // after PhotoCraft (crates/text paragraph layout): wrap at whitespace without splitting a word.
-static void wrapLines(std::vector<std::vector<int>>& lines, const stbtt_fontinfo* fi, float scale, float track, float width) {
+static void wrapLines(std::vector<std::vector<TextGlyph>>& lines, const std::vector<TextStyle>& styles,
+                      const TextStyle& fallback, const std::string& fallbackFont, float width) {
     if (width <= 0) return;
-    auto advance = [&](int cp, int next) {
-        int adv = 0, lsb = 0; stbtt_GetCodepointHMetrics(fi, cp, &adv, &lsb);
-        return adv * scale + (next ? stbtt_GetCodepointKernAdvance(fi, cp, next) * scale : 0) + track;
-    };
-    std::vector<std::vector<int>> wrapped;
+    std::vector<std::vector<TextGlyph>> wrapped;
     for (const auto& source : lines) {
-        std::vector<int> line;
+        std::vector<TextGlyph> line;
         size_t at = 0;
         while (at < source.size()) {
-            while (at < source.size() && (source[at] == ' ' || source[at] == '\t')) ++at;
+            const size_t separator = at;
+            while (at < source.size() && (source[at].codepoint == ' ' || source[at].codepoint == '\t')) ++at;
             if (at == source.size()) break;
             size_t end = at;
-            while (end < source.size() && source[end] != ' ' && source[end] != '\t') ++end;
-            std::vector<int> word(source.begin() + at, source.begin() + end);
+            while (end < source.size() && source[end].codepoint != ' ' && source[end].codepoint != '\t') ++end;
+            std::vector<TextGlyph> word(source.begin() + at, source.begin() + end);
             float used = 0;
-            for (size_t i = 0; i < line.size(); ++i) used += advance(line[i], i + 1 < line.size() ? line[i + 1] : (word.empty() ? 0 : word[0]));
+            for (size_t i = 0; i < line.size(); ++i) used += glyphAdvance(line[i], i + 1 < line.size() ? &line[i + 1] : (word.empty() ? nullptr : &word[0]), styles, fallback, fallbackFont);
             float wordWidth = 0;
-            for (size_t i = 0; i < word.size(); ++i) wordWidth += advance(word[i], i + 1 < word.size() ? word[i + 1] : 0);
-            const float space = line.empty() ? 0 : advance(' ', word.empty() ? 0 : word[0]);
+            for (size_t i = 0; i < word.size(); ++i) wordWidth += glyphAdvance(word[i], i + 1 < word.size() ? &word[i + 1] : nullptr, styles, fallback, fallbackFont);
+            TextGlyph spaceGlyph{' ', source[separator].character};
+            const float space = line.empty() ? 0 : glyphAdvance(spaceGlyph, word.empty() ? nullptr : &word[0], styles, fallback, fallbackFont);
             if (!line.empty() && used + space + wordWidth > width) { wrapped.push_back(std::move(line)); line.clear(); }
-            else if (!line.empty()) line.push_back(' ');
+            else if (!line.empty()) line.push_back({' ', source[separator].character});
             line.insert(line.end(), word.begin(), word.end());
             at = end;
         }
@@ -343,22 +456,17 @@ static TextPathMetric pathMetric(const Text& t) {
 }
 
 float textAdvance(const Text& t) {
-    Loaded* loaded = fontFor(t.font.empty() ? defaultFont() : t.font);
-    if (!loaded) return 0;
-    const float scale = stbtt_ScaleForPixelHeight(&loaded->info, std::max(1.0f, t.size));
-    const float tracking = t.tracking / 1000.0f * t.size;
+    const auto styles = t.characterStyles();
+    TextStyle fallback; fallback.font=t.font; fallback.size=t.size; fallback.tracking=t.tracking; fallback.leading=t.leading;
     const auto lines = linesOf(t.str);
     if (lines.empty() || t.vertical) return 0;
     const auto& line = lines.front(); float width = 0;
-    for (size_t i = 0; i < line.size(); ++i) {
-        int advance = 0, bearing = 0;
-        stbtt_GetCodepointHMetrics(&loaded->info, line[i], &advance, &bearing);
-        width += advance * scale + (i + 1 < line.size() ? stbtt_GetCodepointKernAdvance(&loaded->info, line[i], line[i + 1]) * scale : 0) + tracking;
-    }
+    for (size_t i = 0; i < line.size(); ++i)
+        width += glyphAdvance(line[i], i + 1 < line.size() ? &line[i + 1] : nullptr, styles, fallback, t.font);
     return std::max(0.0f, width);
 }
 
-bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float box[4]) {
+bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float box[4], float dpi) {
     cov.assign((size_t)w * h, 0.0f);
     box[0] = t.x; box[1] = t.y; box[2] = t.x; box[3] = t.y;
     Loaded* F = fontFor(t.font.empty() ? defaultFont() : t.font);
@@ -368,26 +476,113 @@ bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float bo
     const float transformX = std::clamp(std::isfinite(t.scaleX) ? t.scaleX : 1.0f, 0.01f, 100.0f);
     const float transformY = std::clamp(std::isfinite(t.scaleY) ? t.scaleY : 1.0f, 0.01f, 100.0f);
     const float rotation = std::isfinite(t.rotation) ? t.rotation : 0.0f;
+    const float pointsToPixels=std::isfinite(dpi)&&dpi>0?dpi/72.0f:1.0f;
     int asc, desc, gap; stbtt_GetFontVMetrics(fi, &asc, &desc, &gap);
-    const float lineH = t.size * std::max(0.5f, t.leading), track = t.tracking / 1000.0f * t.size;
+    const auto styles = t.characterStyles();
+    TextStyle fallback; fallback.font=t.font; fallback.size=t.size; fallback.tracking=t.tracking; fallback.leading=t.leading;
     auto lines = linesOf(t.str);
-    if (!t.vertical) wrapLines(lines, fi, scale, track, t.boxWidth);
+    if (!t.vertical) wrapLines(lines, styles, fallback, t.font, t.boxWidth);
     const TextPathMetric path = t.pathText ? pathMetric(t) : TextPathMetric();
     const bool pathOn = t.pathText && !t.vertical && path.length > 0;
     float minX = 1e9f, minY = 1e9f, maxX = -1e9f, maxY = -1e9f;
-    auto blit = [&](int cp, float gx, float gy, float pathCenter = std::numeric_limits<float>::quiet_NaN()) {   // one glyph, its origin at (gx, gy) (the baseline)
+    auto blit = [&](int cp, float gx, float gy, const stbtt_fontinfo* glyphFi, float glyphScale, float fontSize,
+                    size_t characterIndex,float advanceWidth,int strikePosition,int strikeSize,
+                    float horizontalScale, float verticalScale, float baselineShift, bool shiftAlongX,
+                    bool fauxBold, bool fauxItalic, bool underline, bool strikethrough,
+                    float pathCenter = std::numeric_limits<float>::quiet_NaN()) {   // one glyph, its origin at (gx, gy) (the baseline)
         const float sx = gx - std::floor(gx);
         int x0, y0, x1, y1;
-        stbtt_GetCodepointBitmapBoxSubpixel(fi, cp, scale, scale, sx, 0, &x0, &y0, &x1, &y1);
+        const float rasterScaleX=glyphScale*horizontalScale,rasterScaleY=glyphScale*verticalScale;
+        stbtt_GetCodepointBitmapBoxSubpixel(glyphFi, cp, rasterScaleX, rasterScaleY, sx, 0, &x0, &y0, &x1, &y1);
         const int bw = x1 - x0, bh = y1 - y0;
         if (bw <= 0 || bh <= 0) return;
         std::vector<unsigned char> bm((size_t)bw * bh);
-        stbtt_MakeCodepointBitmapSubpixel(fi, bm.data(), bw, bh, bw, scale, scale, sx, 0, cp);
-        const int ox = (int)std::floor(gx) + x0, oy = (int)std::round(gy) + y0;
+        stbtt_MakeCodepointBitmapSubpixel(glyphFi, bm.data(), bw, bh, bw, rasterScaleX, rasterScaleY, sx, 0, cp);
+        int italicLeft=0,italicRight=0;
+        const float shear=fauxItalic?std::tan(12.0f*0.017453292519943295f):0.0f;
+        if(fauxItalic){
+            const float a=-shear*y0,b=-shear*(y0+bh);
+            italicLeft=(int)std::ceil(std::max(0.0f,-std::min(a,b)));
+            italicRight=(int)std::ceil(std::max(0.0f,std::max(a,b)));
+        }
+        std::vector<unsigned char> sheared;
+        int shearedW=bw+italicLeft+italicRight;
+        if(fauxItalic){
+            sheared.assign((size_t)shearedW*bh,0);
+            for(int yy=0;yy<bh;++yy){
+                const int move=italicLeft+(int)std::lround(-shear*(y0+yy));
+                for(int xx=0;xx<bw;++xx){const unsigned char a=bm[(size_t)yy*bw+xx];unsigned char& b=sheared[(size_t)yy*shearedW+move+xx];b=std::max(a,b);}
+            }
+            bm=std::move(sheared);
+        }
+        const float baseBoldRadius=std::max(fontSize/72.0f,std::min(fontSize/40.0f,.45f));
+        const float radiusX=fauxBold?baseBoldRadius*horizontalScale:0.0f;
+        const float radiusY=fauxBold?baseBoldRadius*verticalScale:0.0f;
+        const int boldPadX=fauxBold?(int)std::ceil(radiusX):0;
+        const int boldPadY=fauxBold?(int)std::ceil(radiusY):0;
+        if(fauxBold){
+            const int sourceW=shearedW,sourceH=bh,outW=sourceW+2*boldPadX,outH=sourceH+2*boldPadY;
+            std::vector<unsigned char> bold((size_t)outW*outH,0);
+            auto sample=[&](float x,float y){
+                const int x0=(int)std::floor(x),y0=(int)std::floor(y);const float fx=x-x0,fy=y-y0;
+                auto at=[&](int px,int py){return px<0||px>=sourceW||py<0||py>=sourceH?0.0f:(float)bm[(size_t)py*sourceW+px];};
+                const float top=at(x0,y0)*(1-fx)+at(x0+1,y0)*fx,bottom=at(x0,y0+1)*(1-fx)+at(x0+1,y0+1)*fx;
+                return top*(1-fy)+bottom*fy;
+            };
+            for(int yy=0;yy<outH;++yy)for(int xx=0;xx<outW;++xx){
+                float alpha=sample((float)(xx-boldPadX),(float)(yy-boldPadY));
+                for(int ring=1;ring<=4;++ring){
+                    const float radius=ring*.25f;
+                    for(int angle=0;angle<24;++angle){
+                        const float theta=angle*6.28318530718f/24.0f;
+                        const float dx=std::cos(theta)*radiusX*radius,dy=std::sin(theta)*radiusY*radius;
+                        alpha=std::max(alpha,sample(xx-boldPadX-dx,yy-boldPadY-dy));
+                    }
+                }
+                bold[(size_t)yy*outW+xx]=(unsigned char)std::clamp((int)std::lround(alpha),0,255);
+            }
+            bm=std::move(bold);
+        }
+        const int drawW=bw+italicLeft+italicRight+2*boldPadX,drawH=bh+2*boldPadY;
+        if(shiftAlongX)gx+=baselineShift;else if(!pathOn)gy-=baselineShift;
+        const int ox = (int)std::floor(gx) + x0-italicLeft-boldPadX, oy = (int)std::round(gy) + y0-boldPadY;
         const float angle = rotation * 0.017453292519943295f, cs = std::cos(angle), sn = std::sin(angle);
         auto transform = [&](float x, float y) {
             const float dx = (x - t.x) * transformX, dy = (y - t.y) * transformY;
             return std::pair<float, float>(t.x + cs * dx - sn * dy, t.y + sn * dx + cs * dy);
+        };
+        auto paintQuad = [&](const std::array<std::pair<float,float>,4>& p) {
+            float left=p[0].first,right=left,top=p[0].second,bottom=top;
+            for(const auto& q:p){left=std::min(left,q.first);right=std::max(right,q.first);top=std::min(top,q.second);bottom=std::max(bottom,q.second);}
+            minX=std::min(minX,left);maxX=std::max(maxX,right);minY=std::min(minY,top);maxY=std::max(maxY,bottom);
+            const auto e1=std::pair<float,float>{p[1].first-p[0].first,p[1].second-p[0].second};
+            const auto e2=std::pair<float,float>{p[3].first-p[0].first,p[3].second-p[0].second};
+            const float det=e1.first*e2.second-e1.second*e2.first;if(std::fabs(det)<1e-8f)return;
+            for(int py=std::max(0,(int)std::floor(top));py<std::min(h,(int)std::ceil(bottom));++py)
+                for(int px=std::max(0,(int)std::floor(left));px<std::min(w,(int)std::ceil(right));++px){
+                    int inside=0;
+                    for(float oySample:{.125f,.375f,.625f,.875f})for(float oxSample:{.125f,.375f,.625f,.875f}){
+                        const float qx=px+oxSample-p[0].first,qy=py+oySample-p[0].second;
+                        const float u=(qx*e2.second-qy*e2.first)/det,v=(e1.first*qy-e1.second*qx)/det;
+                        if(u>=0&&u<=1&&v>=0&&v<=1)++inside;
+                    }
+                    if(inside){float& out=cov[(size_t)py*w+px];out=std::max(out,inside/16.0f);}
+                }
+        };
+        auto decoration = [&](float offset, float thickness) {
+            const float down=offset-(pathOn?baselineShift:0.0f);
+            std::array<std::pair<float,float>,4> quad;
+            if(pathOn&&std::isfinite(pathCenter)){
+                float cx=0,cy=0,tx=0,ty=0;
+                if(!path.sample(t.pathStart+pathCenter,cx,cy,tx,ty))return;
+                const float nx=-ty,ny=tx,half=advanceWidth*.5f;
+                auto point=[&](float along,float localDown){return transform(cx+tx*along+nx*localDown,cy+ty*along+ny*localDown);};
+                quad={point(-half,down),point(half,down),point(half,down+thickness),point(-half,down+thickness)};
+            }else{
+                const float y=gy+down;
+                quad={transform(gx,y),transform(gx+advanceWidth,y),transform(gx+advanceWidth,y+thickness),transform(gx,y+thickness)};
+            }
+            paintQuad(quad);
         };
         if (pathOn && std::isfinite(pathCenter)) {
             const float naturalSpan = path.closed ? path.length : std::max(0.0f, path.length - t.pathStart);
@@ -395,27 +590,34 @@ bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float bo
             if (pathCenter < 0 || pathCenter > allowedSpan) return;
             float cx = 0, cy = 0, tx = 0, ty = 0;
             if (!path.sample(t.pathStart + pathCenter, cx, cy, tx, ty)) return;
-            const float nx = -ty, ny = tx, centerX = (ox + ox + bw) * 0.5f;
+            const float nx = -ty, ny = tx, centerX = (ox + ox + drawW) * 0.5f;
             float left = 1e9f, top = 1e9f, right = -1e9f, bottom = -1e9f;
-            for (int yy : {0, bh}) for (int xx : {0, bw}) {
-                const float along = ox + xx - centerX, down = oy + yy - gy;
+            for (int yy : {0, drawH}) for (int xx : {0, drawW}) {
+                const float along = ox + xx - centerX, down = oy + yy - gy - (shiftAlongX?0:baselineShift);
                 const auto transformed = transform(cx + tx * along + nx * down, cy + ty * along + ny * down);
                 const float px = transformed.first, py = transformed.second;
                 left = std::min(left, px); top = std::min(top, py); right = std::max(right, px); bottom = std::max(bottom, py);
             }
             minX = std::min(minX, left); minY = std::min(minY, top); maxX = std::max(maxX, right); maxY = std::max(maxY, bottom);
-            for (int yy = 0; yy < bh; ++yy) for (int xx = 0; xx < bw; ++xx) {
-                const float along = ox + xx + 0.5f - centerX, down = oy + yy + 0.5f - gy;
+            for (int yy = 0; yy < drawH; ++yy) for (int xx = 0; xx < drawW; ++xx) {
+                const float along = ox + xx + 0.5f - centerX, down = oy + yy + 0.5f - gy - (shiftAlongX?0:baselineShift);
                 const auto transformed = transform(cx + tx * along + nx * down, cy + ty * along + ny * down);
                 const int px = (int)std::floor(transformed.first), py = (int)std::floor(transformed.second);
                 if (px < 0 || px >= w || py < 0 || py >= h) continue;
-                const unsigned char alpha = bm[(size_t)yy * bw + xx]; if (!alpha) continue;
+                const unsigned char alpha = bm[(size_t)yy * drawW + xx]; if (!alpha) continue;
                 float& out = cov[(size_t)py * w + px]; out = std::min(1.0f, out + alpha / 255.0f);
+            }
+            if(!shiftAlongX&&(underline||strikethrough)){
+                int underlinePos=0,underlineSize=0;
+                const bool hasUnderline=stbtt_GetFontUnderlineMetrics(glyphFi,&underlinePos,&underlineSize)!=0;
+                const float underlineScale=glyphScale*verticalScale;
+                if(underline&&hasUnderline)decoration(-underlinePos*underlineScale,std::max(1.0f,underlineSize*underlineScale));
+                if(strikethrough&&strikeSize>0)decoration(-strikePosition*underlineScale-strikeSize*underlineScale*.5f,strikeSize*underlineScale);
             }
             return;
         }
-        const auto corners = {transform((float)ox, (float)oy), transform((float)(ox + bw), (float)oy),
-                              transform((float)(ox + bw), (float)(oy + bh)), transform((float)ox, (float)(oy + bh))};
+        const auto corners = {transform((float)ox, (float)oy), transform((float)(ox + drawW), (float)oy),
+                              transform((float)(ox + drawW), (float)(oy + drawH)), transform((float)ox, (float)(oy + drawH))};
         float left = 1e9f, top = 1e9f, right = -1e9f, bottom = -1e9f;
         for (const auto& p : corners) { left = std::min(left, p.first); top = std::min(top, p.second); right = std::max(right, p.first); bottom = std::max(bottom, p.second); }
         minX = std::min(minX, left); minY = std::min(minY, top); maxX = std::max(maxX, right); maxY = std::max(maxY, bottom);
@@ -427,47 +629,95 @@ bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float bo
                 const float sourceX = t.x + (cs * px + sn * py) / transformX;
                 const float sourceY = t.y + (-sn * px + cs * py) / transformY;
                 const int bx = (int)std::floor(sourceX - ox), by = (int)std::floor(sourceY - oy);
-                if (bx < 0 || bx >= bw || by < 0 || by >= bh) continue;
-                const unsigned char alpha = bm[(size_t)by * bw + bx];
+                if (bx < 0 || bx >= drawW || by < 0 || by >= drawH) continue;
+                const unsigned char alpha = bm[(size_t)by * drawW + bx];
                 if (!alpha) continue;
                 float& o = cov[(size_t)cy * w + cx];
                 o = std::min(1.0f, o + alpha / 255.0f);
             }
         }
+        if(!shiftAlongX&&(underline||strikethrough)){
+            int underlinePos=0,underlineSize=0;
+            const bool hasUnderline=stbtt_GetFontUnderlineMetrics(glyphFi,&underlinePos,&underlineSize)!=0;
+            const float underlineScale=glyphScale*verticalScale;
+            if(underline&&hasUnderline)decoration(-underlinePos*underlineScale,std::max(1.0f,underlineSize*underlineScale));
+            if(strikethrough&&strikeSize>0)decoration(-strikePosition*underlineScale-strikeSize*underlineScale*.5f,strikeSize*underlineScale);
+        }
     };
-    auto advanceOf = [&](int cp, int next) {
-        int adv, lsb; stbtt_GetCodepointHMetrics(fi, cp, &adv, &lsb);
-        return adv * scale + (next ? stbtt_GetCodepointKernAdvance(fi, cp, next) * scale : 0) + track;
+    auto loadedForGlyph = [&](const TextGlyph& glyph) {
+        return fontForStyle(styleForCharacter(styles, glyph.character, fallback), t.font);
     };
+    auto scaleForGlyph = [&](const TextGlyph& glyph) {
+        return stbtt_ScaleForPixelHeight(&loadedForGlyph(glyph)->info,
+            std::max(1.0f, styleForCharacter(styles, glyph.character, fallback).size));
+    };
+    struct LineMetrics { float ascent=0, descent=0, step=0; };
+    std::vector<LineMetrics> metrics(lines.size());
+    std::vector<float> baselines(lines.size());
+    float lineTop=t.y;
+    for(size_t li=0;li<lines.size();++li){
+        LineMetrics& m=metrics[li];
+        for(const TextGlyph& glyph:lines[li]){
+            const TextStyle& style=styleForCharacter(styles,glyph.character,fallback);
+            Loaded* loaded=loadedForGlyph(glyph);if(!loaded)continue;
+            int fontAsc=0,fontDesc=0,fontGap=0;stbtt_GetFontVMetrics(&loaded->info,&fontAsc,&fontDesc,&fontGap);
+            const float glyphScale=scaleForGlyph(glyph);
+            const float verticalScale=std::isfinite(style.verticalScale)&&style.verticalScale>0?style.verticalScale:1.0f;
+            m.ascent=std::max(m.ascent,fontAsc*glyphScale*verticalScale);
+            m.descent=std::max(m.descent,-fontDesc*glyphScale*verticalScale);
+            m.step=std::max(m.step,std::max(.5f,style.leading)*style.size*verticalScale);
+        }
+        if(lines[li].empty()){
+            m.ascent=asc*scale;m.descent=-desc*scale;m.step=std::max(.5f,fallback.leading)*fallback.size;
+        }
+        m.step=std::max(m.step,m.ascent+m.descent);
+        baselines[li]=lineTop+m.ascent;
+        lineTop+=m.step;
+    }
     if (!t.vertical) {
         // each line's width, for centring / right
         for (size_t li = 0; li < lines.size(); ++li) {
             const auto& L = lines[li];
-            float wsum = 0; for (size_t i = 0; i < L.size(); ++i) wsum += advanceOf(L[i], i + 1 < L.size() ? L[i + 1] : 0);
+            float wsum = 0; for (size_t i = 0; i < L.size(); ++i) wsum += glyphAdvance(L[i], i + 1 < L.size() ? &L[i + 1] : nullptr, styles, fallback, t.font);
             float gx = t.x - (t.align == 1 ? wsum / 2 : t.align == 2 ? wsum : 0);
-            const float gy = t.y + asc * scale + li * lineH;
+            const float gy = baselines[li];
             for (size_t i = 0; i < L.size(); ++i) {
-                const float adv = advanceOf(L[i], i + 1 < L.size() ? L[i + 1] : 0);
-                blit(L[i], gx, gy, pathOn ? gx - t.x + adv * 0.5f : std::numeric_limits<float>::quiet_NaN());
+                const float adv = glyphAdvance(L[i], i + 1 < L.size() ? &L[i + 1] : nullptr, styles, fallback, t.font);
+                Loaded* glyphFont=loadedForGlyph(L[i]);
+                if(!glyphFont)continue;
+                const TextStyle& style=styleForCharacter(styles,L[i].character,fallback);
+                const float horizontalScale=std::isfinite(style.horizontalScale)&&style.horizontalScale>0?style.horizontalScale:1.0f;
+                const float verticalScale=std::isfinite(style.verticalScale)&&style.verticalScale>0?style.verticalScale:1.0f;
+                const auto strike=strikeMetrics(*glyphFont);
+                blit(L[i].codepoint, gx, gy, &glyphFont->info, scaleForGlyph(L[i]),style.size,L[i].character,adv,strike.first,strike.second,horizontalScale,verticalScale,
+                     style.baselineShift*pointsToPixels,false,style.bold,style.italic,style.underline,style.strikethrough,
+                     pathOn ? gx - t.x + adv * 0.5f : std::numeric_limits<float>::quiet_NaN());
                 gx += adv;
             }
             // an empty line still takes room in the box
-            if (!pathOn) { minX = std::min(minX, t.x); maxY = std::max(maxY, gy - desc * scale); }
+            if (!pathOn) { minX = std::min(minX, t.x); maxY = std::max(maxY, gy - metrics[li].descent); }
         }
     } else {
         // letters top to bottom, each centred on its column; lines right to left from x
-        const float colW = lineH;
+        float colX=t.x;
         for (size_t li = 0; li < lines.size(); ++li) {
             const auto& L = lines[li];
-            const float step = t.size * 1.0f + track;
-            const float total = L.size() * step;
-            float gy = t.y - (t.align == 1 ? total / 2 : t.align == 2 ? total : 0) + asc * scale;
-            const float cx = t.x - li * colW;
+            float total = 0; for(const TextGlyph& glyph:L){const TextStyle& style=styleForCharacter(styles,glyph.character,fallback);const float hs=std::isfinite(style.horizontalScale)&&style.horizontalScale>0?style.horizontalScale:1.0f;total+=(style.size+style.tracking/1000.0f*style.size)*hs;}
+            float gy = t.y - (t.align == 1 ? total / 2 : t.align == 2 ? total : 0) + metrics[li].ascent;
+            const float cx = colX;
             for (size_t i = 0; i < L.size(); ++i) {
-                int adv, lsb; stbtt_GetCodepointHMetrics(fi, L[i], &adv, &lsb);
-                blit(L[i], cx - adv * scale / 2, gy);
-                gy += step;
+                Loaded* glyphFont=loadedForGlyph(L[i]);if(!glyphFont)continue;
+                const float glyphScale=scaleForGlyph(L[i]);int adv=0,lsb=0;stbtt_GetCodepointHMetrics(&glyphFont->info,L[i].codepoint,&adv,&lsb);
+                const TextStyle& style=styleForCharacter(styles,L[i].character,fallback);
+                const float hs=std::isfinite(style.horizontalScale)&&style.horizontalScale>0?style.horizontalScale:1.0f;
+                const float vs=std::isfinite(style.verticalScale)&&style.verticalScale>0?style.verticalScale:1.0f;
+                const auto strike=strikeMetrics(*glyphFont);
+                const float step=style.size*vs+style.tracking/1000.0f*style.size*hs;
+                blit(L[i].codepoint, cx - adv * glyphScale * hs / 2, gy,&glyphFont->info,glyphScale,style.size,L[i].character,step,strike.first,strike.second,hs,vs,
+                     style.baselineShift*pointsToPixels,true,style.bold,style.italic,style.underline,style.strikethrough);
+                gy+=style.size*vs+style.tracking/1000.0f*style.size*hs;
             }
+            colX-=metrics[li].step;
         }
     }
     if (minX <= maxX) { box[0] = minX; box[1] = minY; box[2] = maxX; box[3] = maxY; }

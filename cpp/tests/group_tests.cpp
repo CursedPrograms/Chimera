@@ -2,6 +2,7 @@
 #include "doc.h"
 #include "blend.h"
 #include "text.h"
+#include "imgui_internal.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -10,6 +11,16 @@
 #include <limits>
 #include <numeric>
 #include <vector>
+
+namespace App {
+bool typeMoveDocumentEdge(ImGuiInputTextState* state, bool end, int cursor, int anchor, bool hadSelection, bool extend);
+bool typeMoveWordCaret(ImGuiInputTextState* state, const std::string& text, int cursor, int anchor, bool hadSelection, bool forward, bool extend);
+bool typeWordNavigationShortcut(bool ctrl, bool alt, bool shift, bool mac, bool super);
+bool typeDocumentNavigationShortcut(bool ctrl, bool alt, bool mac, bool super);
+bool typePrepareModifiedDelete(ImGuiInputTextState* state, const std::string& text, bool backspace, bool ctrl, bool alt, bool mac, bool super);
+bool typeApplyClickSelection(ImGuiInputTextState* state, const std::string& text, unsigned count);
+unsigned typeNextClickCount(unsigned previous, unsigned imguiCount);
+}
 
 static Layer solidLayer(const Doc& d, const char* name, uint8_t r, uint8_t g, uint8_t b, uint8_t a = 255) {
     Layer layer = emptyLayer(d, name);
@@ -257,12 +268,194 @@ static bool richTextRunsNormalizeAndPersist() {
     return result;
 }
 
+// after PhotoCraft (crates/doc/src/lib.rs TextLayer::char_runs): a style run remains attached
+// to its Unicode characters when the UTF-8 text is split into visual lines.
+static bool richTextStylesMapToUnicodeCharacters() {
+    Text t; t.str = "A\xc3\xa9\nZ";
+    TextStyle first; first.size = 18; first.bold = true;
+    TextStyle second; second.size = 27; second.italic = true;
+    t.runs = {{3, first}, {2, second}};
+    const auto styles = t.characterStyles();
+    return styles.size() == 4 && styles[0] == first && styles[1] == first &&
+        styles[2] == second && styles[3] == second;
+}
+
+// after PhotoCraft (crates/text/src/layout.rs): character-run size and tracking participate in
+// glyph advances and rasterization instead of being ignored in favor of layer defaults.
+static bool richTextRunMetricsAffectLayoutAndInk() {
+    Text base; base.str = "AB"; base.font = defaultFont(); base.size = 32;
+    Text same = base; TextStyle ordinary; ordinary.font=base.font; ordinary.size=base.size; ordinary.leading=base.leading;
+    same.runs = {{1, ordinary}, {1, ordinary}};
+    std::vector<float> plainCoverage, sameCoverage; float plainBox[4], sameBox[4];
+    if(!textCoverage(base,180,100,plainCoverage,plainBox)||!textCoverage(same,180,100,sameCoverage,sameBox))return false;
+    if(plainCoverage!=sameCoverage)return false;
+    Text varied=base;TextStyle first=ordinary,second=ordinary;second.size=54;second.tracking=500;
+    varied.runs={{1,first},{1,second}};
+    std::vector<float> variedCoverage;float variedBox[4];
+    if(!textCoverage(varied,180,100,variedCoverage,variedBox))return false;
+    const float plainInk=std::accumulate(plainCoverage.begin(),plainCoverage.end(),0.0f);
+    const float variedInk=std::accumulate(variedCoverage.begin(),variedCoverage.end(),0.0f);
+    return variedInk>plainInk*1.15f && variedBox[2]-variedBox[0]>plainBox[2]-plainBox[0]+4 && textAdvance(varied)>textAdvance(base)+4;
+}
+static bool richTextRunLeadingControlsSubsequentLineBaseline() {
+    Text plain;plain.str="A\nB\nC";plain.font=defaultFont();plain.size=24;plain.x=20;plain.y=10;
+    std::vector<float> plainCoverage;float plainBox[4];
+    if(!textCoverage(plain,160,180,plainCoverage,plainBox))return false;
+    Text spaced=plain;TextStyle first;first.font=plain.font;first.size=plain.size;first.leading=plain.leading;
+    TextStyle second=first;second.leading=2.8f;
+    spaced.runs={{2,first},{2,second},{1,first}};
+    std::vector<float> spacedCoverage;float spacedBox[4];
+    if(!textCoverage(spaced,160,180,spacedCoverage,spacedBox))return false;
+    return spacedBox[3]-spacedBox[1]>plainBox[3]-plainBox[1]+20;
+}
+static bool richTextRunTransformsMatchPhotoCraft() {
+    Text base;base.str="Hi";base.font=defaultFont();base.size=30;base.x=20;base.y=80;
+    std::vector<float> plain;float plainBox[4];if(!textCoverage(base,240,180,plain,plainBox))return false;
+    TextStyle style;style.font=base.font;style.size=base.size;style.leading=base.leading;
+    auto runText=[&](TextStyle run){Text t=base;t.runs={{t.str.size(),run}};return t;};
+    Text shifted=runText(style);shifted.runs[0].style.baselineShift=10;
+    std::vector<float> shiftInk;float shiftBox[4];if(!textCoverage(shifted,240,180,shiftInk,shiftBox,72))return false;
+    float highDpiBox[4];if(!textCoverage(shifted,240,180,shiftInk,highDpiBox,144))return false;
+    Text wide=runText(style);wide.runs[0].style.horizontalScale=2;
+    std::vector<float> wideInk;float wideBox[4];if(!textCoverage(wide,240,180,wideInk,wideBox))return false;
+    Text tall=runText(style);tall.runs[0].style.verticalScale=2;
+    std::vector<float> tallInk;float tallBox[4];if(!textCoverage(tall,240,180,tallInk,tallBox))return false;
+    Text wrap=base;wrap.str="HO HO HO";wrap.boxWidth=80;Text plainWrap=wrap;plainWrap.runs={{8,style}};
+    TextStyle compressed=style;compressed.horizontalScale=1.7f;Text scaledWrap=wrap;scaledWrap.runs={{8,compressed}};
+    std::vector<float> plainWrapInk,scaledWrapInk;float plainWrapBox[4],scaledWrapBox[4];
+    if(!textCoverage(plainWrap,240,180,plainWrapInk,plainWrapBox)||!textCoverage(scaledWrap,240,180,scaledWrapInk,scaledWrapBox))return false;
+    return std::fabs((plainBox[1]-shiftBox[1])-10)<1.1f && std::fabs((plainBox[1]-highDpiBox[1])-20)<1.1f &&
+        wideBox[2]-wideBox[0]>(plainBox[2]-plainBox[0])*1.7f && tallBox[3]-tallBox[1]>(plainBox[3]-plainBox[1])*1.7f &&
+        scaledWrapBox[3]-scaledWrapBox[1]>plainWrapBox[3]-plainWrapBox[1];
+}
+static bool richTextFauxBoldAndItalicAffectInk() {
+    Text text;text.str="Hi";text.font=defaultFont();text.size=30;text.x=20;text.y=80;
+    TextStyle style;style.font=text.font;style.size=text.size;style.leading=text.leading;
+    auto render=[&](TextStyle run,std::vector<float>& ink,float box[4]){Text t=text;t.runs={{2,run}};return textCoverage(t,240,180,ink,box);};
+    std::vector<float> plain,bold,italic;float plainBox[4],boldBox[4],italicBox[4];
+    if(!render(style,plain,plainBox))return false;
+    TextStyle boldStyle=style;boldStyle.bold=true;
+    TextStyle italicStyle=style;italicStyle.italic=true;
+    if(!render(boldStyle,bold,boldBox)||!render(italicStyle,italic,italicBox))return false;
+    const float plainInk=std::accumulate(plain.begin(),plain.end(),0.0f),boldInk=std::accumulate(bold.begin(),bold.end(),0.0f);
+    return boldInk>plainInk*1.1f&&italicBox[2]>plainBox[2];
+}
+static bool richTextUnderlineAndStrikeUseFontMetrics() {
+    Text text;text.str="Hi";text.font=defaultFont();text.size=30;text.x=20;text.y=80;
+    TextStyle style;style.font=text.font;style.size=text.size;style.leading=text.leading;
+    auto render=[&](TextStyle run,std::vector<float>& ink,float box[4]){Text t=text;t.runs={{2,run}};return textCoverage(t,240,180,ink,box);};
+    std::vector<float> plain,under,strike;float plainBox[4],underBox[4],strikeBox[4];
+    if(!render(style,plain,plainBox))return false;
+    TextStyle underStyle=style;underStyle.underline=true;TextStyle strikeStyle=style;strikeStyle.strikethrough=true;
+    if(!render(underStyle,under,underBox)||!render(strikeStyle,strike,strikeBox))return false;
+    const float plainInk=std::accumulate(plain.begin(),plain.end(),0.0f);
+    return std::accumulate(under.begin(),under.end(),0.0f)>plainInk&&underBox[3]>plainBox[3]&&
+        std::accumulate(strike.begin(),strike.end(),0.0f)>plainInk;
+}
+
 // after PhotoCraft (crates/ui-egui/src/tools/type_tool/tests.rs word_boundaries).
 static bool typeWordBoundariesMatchPhotoCraft() {
     const std::string text="hello big world";
     return textWordBoundary(text,0,true)==5 && textWordBoundary(text,7,false)==6 &&
         textWordBoundary(text,15,false)==10 && textWordBoundary("hello",99,true)==5 &&
-        textWordBoundary("hello",0,false)==0;
+        textWordBoundary("hello",0,false)==0 && textWordBoundary("",4,true)==0 &&
+        textWordBoundary("ab, cd",0,true)==2 && textWordBoundary("ab, cd",2,true)==6 &&
+        textWordBoundary("Größe",0,true)==5;
+}
+static bool typeDoubleClickWordRangesMatchPhotoCraft() {
+    return textWordSelection("ab, cd",2)==std::pair<size_t,size_t>{0,2}&&
+        textWordSelection("ab, cd",3)==std::pair<size_t,size_t>{3,3}&&
+        textWordSelection("ab, cd",6)==std::pair<size_t,size_t>{4,6}&&
+        textWordSelection("Gr\xc3\xb6\xc3\x9f" "e ok",3)==std::pair<size_t,size_t>{0,5}&&
+        textWordSelection("one",99)==std::pair<size_t,size_t>{0,3};
+}
+
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/keys.rs handle_move_key).
+static bool typeDocumentEdgeMovementMatchesPhotoCraft() {
+    ImGuiInputTextState state; state.CurLenW = 6;
+    if (!App::typeMoveDocumentEdge(&state, false, 4, 1, true, true) || state.Stb.cursor != 0 || state.Stb.select_start != 1 || state.Stb.select_end != 0) return false;
+    if (!App::typeMoveDocumentEdge(&state, true, 0, 0, false, false) || state.Stb.cursor != 6 || state.Stb.select_start != 6 || state.Stb.select_end != 6) return false;
+    return App::typeMoveDocumentEdge(&state, false, 5, 2, true, false) && state.Stb.cursor == 0 && state.Stb.select_start == 0 && state.Stb.select_end == 0;
+}
+static bool typeNavigationShortcutsMatchPhotoCraft() {
+    using App::typeDocumentNavigationShortcut; using App::typeWordNavigationShortcut;
+    return typeWordNavigationShortcut(true,false,false,false,false) &&
+        typeWordNavigationShortcut(false,true,true,false,false) &&
+        typeWordNavigationShortcut(false,false,false,true,true) &&
+        !typeWordNavigationShortcut(false,true,false,false,false) &&
+        !typeWordNavigationShortcut(true,true,false,false,false) &&
+        typeDocumentNavigationShortcut(true,false,false,false) &&
+        typeDocumentNavigationShortcut(false,false,true,true) &&
+        !typeDocumentNavigationShortcut(true,true,false,false);
+}
+static bool typeModifiedDeletionMatchesPhotoCraft() {
+    ImGuiInputTextState state; const std::string text="ab, cd";
+    for(char c:text)state.TextW.push_back((ImWchar)c);state.CurLenW=(int)text.size();
+    state.Stb.cursor=state.Stb.select_start=state.Stb.select_end=6;
+    if(!App::typePrepareModifiedDelete(&state,text,true,false,true,false,false)||state.Stb.select_start!=6||state.Stb.select_end!=4)return false;
+    state.Stb.cursor=state.Stb.select_start=state.Stb.select_end=2;
+    if(!App::typePrepareModifiedDelete(&state,text,false,false,true,false,false)||state.Stb.select_start!=2||state.Stb.select_end!=6)return false;
+    state.Stb.cursor=state.Stb.select_start=state.Stb.select_end=2;
+    if(!App::typePrepareModifiedDelete(&state,text,false,true,false,false,false)||state.Stb.select_end!=3)return false;
+    const std::string lines="ab\ncd";state.TextW.clear();for(char c:lines)state.TextW.push_back((ImWchar)c);state.CurLenW=(int)lines.size();
+    state.Stb.cursor=state.Stb.select_start=state.Stb.select_end=4;
+    return App::typePrepareModifiedDelete(&state,lines,true,true,false,false,false)&&state.Stb.select_end==3;
+}
+static bool typeMultiClickCountsMatchPhotoCraft() {
+    using App::typeNextClickCount;
+    return typeNextClickCount(0,0)==1&&typeNextClickCount(0,1)==1&&typeNextClickCount(0,2)==2&&
+        typeNextClickCount(0,3)==3&&typeNextClickCount(3,3)==4&&typeNextClickCount(4,3)==5&&
+        typeNextClickCount(5,3)==1&&typeNextClickCount(4,1)==1;
+}
+static bool typeMultiClickRangesMatchPhotoCraft() {
+    const std::string text="ab, cd\nnext";ImGuiInputTextState state;
+    for(char c:text)state.TextW.push_back((ImWchar)c);state.CurLenW=(int)text.size();
+    state.Stb.cursor=state.Stb.select_start=state.Stb.select_end=1;
+    if(!App::typeApplyClickSelection(&state,text,2)||state.Stb.select_start!=0||state.Stb.select_end!=2)return false;
+    state.Stb.cursor=state.Stb.select_start=state.Stb.select_end=9;
+    if(!App::typeApplyClickSelection(&state,text,3)||state.Stb.select_start!=7||state.Stb.select_end!=11)return false;
+    if(!App::typeApplyClickSelection(&state,text,4)||state.Stb.select_start!=7||state.Stb.select_end!=11)return false;
+    return App::typeApplyClickSelection(&state,text,5)&&state.Stb.select_start==0&&state.Stb.select_end==11;
+}
+static bool typeCaretActionsRestartBlink() {
+    ImGuiInputTextState state;const std::string text="one two";
+    for(char c:text)state.TextW.push_back((ImWchar)c);state.CurLenW=(int)text.size();
+    state.CursorAnim=0;state.Stb.cursor=state.Stb.select_start=state.Stb.select_end=1;
+    if(!App::typeMoveWordCaret(&state,text,1,1,false,true,false)||state.CursorAnim>=0)return false;
+    state.CursorAnim=0;state.Stb.cursor=state.Stb.select_start=state.Stb.select_end=1;
+    if(!App::typeMoveDocumentEdge(&state,false,1,1,false,false)||state.CursorAnim>=0)return false;
+    state.CursorAnim=0;state.Stb.cursor=state.Stb.select_start=state.Stb.select_end=4;
+    if(!App::typeApplyClickSelection(&state,text,2)||state.CursorAnim>=0)return false;
+    state.CursorAnim=0;state.Stb.cursor=state.Stb.select_start=state.Stb.select_end=4;
+    return App::typePrepareModifiedDelete(&state,text,true,false,true,false,false)&&state.CursorAnim<0;
+}
+
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/tests.rs type_click_skips_*): a hidden
+// layer or any hidden group ancestor removes its text from Type and Move hit testing.
+static bool typeHitVisibilityFollowsNestedGroups() {
+    auto variants=[](){
+        Doc d=newDoc(256,256,false); Text t; t.str="Visible text"; t.x=40; t.y=96; t.size=48;
+        Fill f; f.kind=FILL_SOLID;
+        for(int i=0;i<3;++i)addTextLayer(d,t,f);
+        return d;
+    };
+    Doc d=variants();
+    if(!groupLayers(d,{2,3})||d.layers.size()!=4)return false;
+    d.groups.back().visible=false;
+    if(!layerShown(d,1)||layerShown(d,2)||layerShown(d,3))return false;
+
+    d=variants();
+    d.layers[2].visible=false;
+    if(!groupLayers(d,{3}))return false;
+    const int inner=d.groups.back().id;
+    LayerGroup outer;outer.id=inner+1;outer.stackIndex=3;outer.name="Outer";outer.visible=false;outer.expanded=true;
+    d.groups.back().parentId=outer.id;d.groups.push_back(outer);
+    if(!layerShown(d,1)||layerShown(d,3))return false;
+
+    d=variants(); d.layers[2].visible=false; d.layers[3].visible=false;
+    if(!layerShown(d,1)||layerShown(d,2)||layerShown(d,3))return false;
+    d.layers[1].visible=false; d.layers[2].visible=false; d.layers[3].visible=true;
+    return !layerShown(d,1)&&!layerShown(d,2)&&layerShown(d,3)&&!layerShown(d,-1);
 }
 
 // after PhotoCraft (crates/ui-egui/src/tools/type_tool/tests.rs a_name_from_text_after_blank_lines_keeps_following_the_text).
@@ -280,7 +473,20 @@ static bool smartQuotesMapOpeningAndClosingContext() {
         textSmartQuotes("don't")=="don\xe2\x80\x99t" &&
         textSmartQuotes("(\"x\")")=="(\xe2\x80\x9cx\xe2\x80\x9d)" &&
         textSmartQuotes("--'x'")=="--\xe2\x80\x98x\xe2\x80\x99" &&
-        textSmartQuotes("\"\"")=="\xe2\x80\x9c\xe2\x80\x9d";
+        textSmartQuotes("\"\"")=="\xe2\x80\x9c\xe2\x80\x9d" &&
+        textSmartQuotes("/\"x\"")=="/\xe2\x80\x9dx\xe2\x80\x9d" &&
+        textSmartQuotes("\xe2\x80\x94\"x\"")=="\xe2\x80\x94\xe2\x80\x9cx\xe2\x80\x9d" &&
+        textSmartQuotesTyped("a","\"b")=="\xe2\x80\x9d" "b" &&
+        textSmartQuotesTyped(" ","\"you\"")=="\xe2\x80\x9cyou\xe2\x80\x9d" &&
+        textSmartQuoteCharacter(0x2014,'"')==0x201c && textSmartQuoteCharacter('/','"')==0x201d;
+}
+
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/tests.rs smart_quotes_preference_controls_typed_quotes).
+static bool typedSmartQuotesUseTheExistingCaretContext() {
+    const std::string prefix="keep /";
+    const std::string typed="\"new\"";
+    return prefix=="keep /" && textSmartQuotesTyped(prefix,typed)=="\xe2\x80\x9dnew\xe2\x80\x9d" &&
+        textSmartQuotesTyped(" ","\"new\"")=="\xe2\x80\x9cnew\xe2\x80\x9d";
 }
 
 // after PhotoCraft (crates/ui-egui/src/tools/type_tool/tests.rs type_unit_follows_the_units_and_rulers_preference).
@@ -354,9 +560,24 @@ int runSelfTests() {
         {"type follows and saves a Bezier path", textFollowsBezierPathAndPersists},
         {"text path placement respects open ends and closed seams", textPathPlacementRangeBehaves},
         {"rich text runs normalize UTF-8 and persist", richTextRunsNormalizeAndPersist},
+        {"rich text run styles map by Unicode character", richTextStylesMapToUnicodeCharacters},
+        {"rich text run size and tracking affect layout and rasterization", richTextRunMetricsAffectLayoutAndInk},
+        {"rich text run leading affects line baselines", richTextRunLeadingControlsSubsequentLineBaseline},
+        {"rich text run scale and baseline shift affect glyph geometry", richTextRunTransformsMatchPhotoCraft},
+        {"rich text faux bold and italic affect rasterized glyphs", richTextFauxBoldAndItalicAffectInk},
+        {"rich text underline and strikethrough use font metrics", richTextUnderlineAndStrikeUseFontMetrics},
         {"type tool word boundaries", typeWordBoundariesMatchPhotoCraft},
+        {"type double-click word selection uses Unicode alphanumeric runs", typeDoubleClickWordRangesMatchPhotoCraft},
+        {"type document-edge movement preserves Shift anchor", typeDocumentEdgeMovementMatchesPhotoCraft},
+        {"type navigation shortcuts respect spacing modifiers", typeNavigationShortcutsMatchPhotoCraft},
+        {"type modified deletion uses PhotoCraft boundaries", typeModifiedDeletionMatchesPhotoCraft},
+        {"type multi-click count cycle matches PhotoCraft", typeMultiClickCountsMatchPhotoCraft},
+        {"type multi-click selects word, line, paragraph and all", typeMultiClickRangesMatchPhotoCraft},
+        {"type caret actions restart blink phase", typeCaretActionsRestartBlink},
+        {"type hit testing follows nested group visibility", typeHitVisibilityFollowsNestedGroups},
         {"text layer name skips leading blank lines", textLayerNameSkipsLeadingBlankLines},
         {"smart quotes use opening and closing context", smartQuotesMapOpeningAndClosingContext},
+        {"typed smart quotes use caret context", typedSmartQuotesUseTheExistingCaretContext},
         {"type unit conversion follows document resolution", typeUnitsFollowResolution},
         {"text summary follows first character run", textSummaryFollowsFirstStyleRun},
         {"rich text runs survive project round trip", richTextRunsSurviveProjectRoundTrip},

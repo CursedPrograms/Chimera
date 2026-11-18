@@ -139,6 +139,7 @@ bool ungroupActiveLayer(Doc& d);
 std::vector<LayerTreeEntry> layerTreeWalk(const Doc& d);
 std::vector<int> layerPath(const Doc& d, int layerIndex);
 std::vector<int> groupPath(const Doc& d, int groupId);
+bool layerShown(const Doc& d, int layerIndex); // the layer and each containing group are visible
 int maxGroupDepth(const Doc& d);
 bool groupLocked(const Doc& d, int groupId);
 void moveGroupContents(Doc& d, int groupId, int dx, int dy);

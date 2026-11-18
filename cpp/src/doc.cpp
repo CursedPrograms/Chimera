@@ -167,6 +167,21 @@ std::vector<int> groupPath(const Doc& d, int id) {
     return {};
 }
 
+// after PhotoCraft (crates/doc/src/lib.rs Document::shown_at): hidden ancestors hide their layers.
+bool layerShown(const Doc& d, int index) {
+    if(index<0||index>=(int)d.layers.size())return false;
+    const Layer& layer=d.layers[index];if(!layer.visible)return false;
+    std::vector<int> seen;
+    for(int id=layer.groupId;id;){
+        if(std::find(seen.begin(),seen.end(),id)!=seen.end())return false;
+        seen.push_back(id);
+        const auto group=std::find_if(d.groups.begin(),d.groups.end(),[id](const LayerGroup& g){return g.id==id;});
+        if(group==d.groups.end()||!group->visible)return false;
+        id=group->parentId;
+    }
+    return true;
+}
+
 // after PhotoCraft (crates/doc/src/lib.rs Document::max_group_depth): count nonempty nesting without recursion.
 int maxGroupDepth(const Doc& d) {
     int maximum = 0;
@@ -280,7 +295,7 @@ void renderFill(const Doc& d, Layer& l) {
     }
     if (l.isText()) {   // text: the fill only where its letters are
         std::vector<float> tc;
-        textCoverage(l.text, d.w, d.h, tc, l.text.box);
+        textCoverage(l.text, d.w, d.h, tc, l.text.box, d.dpi);
         for (size_t i = 0; i < tc.size(); ++i) l.img.px[i * 4 + 3] = to8(tc[i]);
         return;
     }

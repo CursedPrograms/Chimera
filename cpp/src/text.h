@@ -4,6 +4,7 @@
 #pragma once
 #include "shape.h"
 #include <string>
+#include <utility>
 #include <vector>
 
 // after PhotoCraft (crates/doc/src/text.rs CharStyle): per-run settings stay editable even
@@ -45,6 +46,9 @@ struct Text {
     std::string save() const;
     bool load(const std::string& blob);
     std::vector<TextRun> normalizedRuns() const;
+    // after PhotoCraft (crates/doc/src/lib.rs TextLayer::char_runs): resolve the run active at
+    // each Unicode character index, including multi-byte UTF-8 characters.
+    std::vector<TextStyle> characterStyles() const;
     std::vector<ParagraphRun> normalizedParagraphs() const;
     // after PhotoCraft (crates/doc/src/lib.rs TextLayer::sync_summary).
     void syncSummary();
@@ -56,12 +60,18 @@ const std::vector<FontFile>& systemFonts();
 std::string defaultFont();
 
 // coverage (0..1) of the text over a w x h canvas; box: where it is (x0, y0, x1, y1), for picking and outlines
-bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float box[4]);
+bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float box[4], float dpi = 72.0f);
 float textAdvance(const Text& t);     // the first line's advance in pixels, for path placement markers
 // after PhotoCraft (crates/text/src/layout/navigate.rs word_boundary): returns a character index.
 size_t textWordBoundary(const std::string& text, size_t index, bool forward);
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/pointer.rs click_selection): the
+// contiguous Unicode alphanumeric selection under a double-click caret.
+std::pair<size_t,size_t> textWordSelection(const std::string& text, size_t caret);
 // after PhotoCraft (crates/ui-egui/src/tools/type_tool/keys.rs smart_quotes).
 std::string textSmartQuotes(const std::string& text);
+uint32_t textSmartQuoteCharacter(uint32_t previous,uint32_t character);
+// after PhotoCraft (crates/ui-egui/src/tools/type_tool/editing.rs insert_typed): map only new input using its left context.
+std::string textSmartQuotesTyped(const std::string& prefix,const std::string& typed);
 struct TextUnit { float scale; const char* label; };
 // after PhotoCraft (crates/ui-egui/src/tools/type_tool/defaults.rs type_unit).
 TextUnit textUnit(int units, float dpi);
