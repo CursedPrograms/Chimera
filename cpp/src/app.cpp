@@ -3840,7 +3840,14 @@ static int ltTool(int id) {
 }
 static void syncTool() {
     const int t = ltTool(Toolbar::current());
-    if (t != tool) { if (tool == T_TYPE) typeCommit(); if (tool == T_MAGNETIC) magneticClear(); tool = t; poly.clear(); }
+    if (t != tool) {
+        if (tool == T_TYPE) typeCommit();
+        if (tool == T_MAGNETIC) magneticClear();
+        tool = t; poly.clear();
+        // after PhotoCraft (crates/ui-egui/src/tools/crop_ui.rs): selecting Crop opens a full-canvas frame.
+        if (tool == T_CROP) { cropPending=true; cropR[0]=cropR[1]=0; cropR[2]=(float)doc.w; cropR[3]=(float)doc.h; }
+        else if (tool != T_CROP) cropPending=false;
+    }
 }
 static bool toolbarToolWorks(int id) { return ltTool(id) != T_NONE; }
 
@@ -5239,6 +5246,12 @@ static bool jobRunning() { return !clOut.empty() || !btOut.empty() || !mmRun.out
 bool busy() { return jobRunning() || Changeling::stepsLoading(); }
 
 void script(const std::string& what) {
+    if (what == "crop-frame") {
+        Toolbar::select(Toolbar::CROP); syncTool();
+        const bool ok=cropPending && cropR[0]==0 && cropR[1]==0 && cropR[2]==doc.w && cropR[3]==doc.h;
+        fprintf(stderr,"crop-frame: %s; full-canvas crop frame appears on tool selection\n",ok?"passed":"failed");
+        return;
+    }
     if (what == "text-empty") {
         Toolbar::select(Toolbar::TYPE_H); syncTool();
         const size_t before = doc.layers.size();
