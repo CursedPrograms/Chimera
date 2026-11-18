@@ -13,10 +13,13 @@ struct TextStyle {
     std::string font;
     float size = 48, tracking = 0, leading = 1.2f;
     float baselineShift = 0, horizontalScale = 1, verticalScale = 1;
+    float kern = 0;
+    bool kerningOff = false;
     bool bold = false, italic = false, underline = false, strikethrough = false;
     bool operator==(const TextStyle& o) const {
         return font == o.font && size == o.size && tracking == o.tracking && leading == o.leading &&
             baselineShift == o.baselineShift && horizontalScale == o.horizontalScale && verticalScale == o.verticalScale &&
+            kern == o.kern && kerningOff == o.kerningOff &&
             bold == o.bold && italic == o.italic && underline == o.underline && strikethrough == o.strikethrough;
     }
 };
@@ -78,3 +81,5 @@ TextUnit textUnit(int units, float dpi);
 // after PhotoCraft (crates/ui-egui/src/tools/type_tool.rs note_recent_font/sync_recent_fonts).
 void noteRecentFont(std::vector<std::string>& recent, const std::string& font, size_t cap);
 void trimRecentFonts(std::vector<std::string>& recent, size_t cap);
+// after PhotoCraft (crates/engine/src/cmd/type_cmds.rs type.edit kernPair): adjust the pair before a caret.
+bool textAdjustKerningPair(Text& text, size_t caret, float by);

@@ -440,6 +440,20 @@ static bool typeCharacterMetricsStepPerRun() {
     Text empty;empty.size=48;
     return App::typeStepCharacterMetric(empty,0,0,0,2,72,1)&&std::fabs(empty.normalizedRuns()[0].style.leading-(1.2f+2.0f/48))<0.001f;
 }
+// after PhotoCraft (crates/engine/src/cmd/type_cmds.rs type.edit kernPair): manual kerning starts
+// at the font's current pair spacing, persists per character, and rejects line edges.
+static bool typeManualPairKerningStartsFromMetrics() {
+    Text text;text.str="AV";text.size=40;TextStyle style;style.size=40;text.runs={{text.str.size(),style}};
+    const float before=textAdvance(text);
+    if(!textAdjustKerningPair(text,1,100))return false;
+    auto styles=text.characterStyles();if(styles.size()!=2||!styles[0].kerningOff||styles[0].kern<=0||styles[1].kerningOff)return false;
+    const float after=textAdvance(text);if(after-before<3.5f||after-before>4.5f)return false;
+    Text decoded;if(!decoded.load(text.save()))return false;styles=decoded.characterStyles();
+    if(styles.size()!=2||!styles[0].kerningOff||styles[0].kern!=text.characterStyles()[0].kern)return false;
+    if(!textAdjustKerningPair(decoded,1,20000)||decoded.characterStyles()[0].kern!=10000)return false;
+    Text lines;lines.str="A\nV";lines.size=40;
+    return !textAdjustKerningPair(lines,0,20)&&!textAdjustKerningPair(lines,1,20)&&!textAdjustKerningPair(lines,2,20);
+}
 static bool typeModifiedDeletionMatchesPhotoCraft() {
     ImGuiInputTextState state; const std::string text="ab, cd";
     for(char c:text)state.TextW.push_back((ImWchar)c);state.CurLenW=(int)text.size();
@@ -625,6 +639,7 @@ int runSelfTests() {
         {"vertical Type arrow keys follow columns", verticalTypeArrowsFollowTextColumns},
         {"Type Home and End follow visual editor rows", typeEditorHomeEndFollowVisualRows},
         {"Type metric shortcuts step each selected character", typeCharacterMetricsStepPerRun},
+        {"manual Type pair kerning starts from font metrics", typeManualPairKerningStartsFromMetrics},
         {"type modified deletion uses PhotoCraft boundaries", typeModifiedDeletionMatchesPhotoCraft},
         {"type multi-click count cycle matches PhotoCraft", typeMultiClickCountsMatchPhotoCraft},
         {"type multi-click selects word, line, paragraph and all", typeMultiClickRangesMatchPhotoCraft},

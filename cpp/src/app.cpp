@@ -2688,6 +2688,19 @@ static void typeRemember(const char* what){
     }
     remember(what?what:"Text");
 }
+// PhotoCraft commits formatting and kerning keys as independent commands while a Type editor stays open.
+static void typeRememberDiscrete(const char* what){
+    const std::string name=what?what:"Text";
+    if(!typeEditHasSnapshot){remember(name);return;}
+    if(typeEditCreated){
+        hist.push(typeEditOriginalDoc,typeEditUndoName);
+        typeEditCreated=false;
+    }else if(typeEditUndoPushed){
+        hist.push(typeEditOriginalDoc,typeEditUndoName);
+    }
+    hist.push(doc,name);
+    typeEditOriginalDoc=doc;typeEditUndoName="Edit Text";typeEditUndoPushed=false;
+}
 // Map a canvas point into the text frame so paragraph handles follow rotation and scale.
 static ImVec2 typeToTextPoint(const Text& t, ImVec2 p) {
     const float angle = t.rotation * 0.017453292519943295f, cs = std::cos(angle), sn = std::sin(angle);
@@ -3234,15 +3247,17 @@ static void typeEditor() {
     ImGuiInputTextState* movementState=ImGui::GetInputTextState(typeInputId);
     const bool wordModifier=typeWordNavigationShortcut(ImGui::GetIO().KeyCtrl,ImGui::GetIO().KeyAlt,ImGui::GetIO().KeyShift,ImGui::GetIO().ConfigMacOSXBehaviors,ImGui::GetIO().KeySuper);
     const bool documentModifier=typeDocumentNavigationShortcut(ImGui::GetIO().KeyCtrl,ImGui::GetIO().KeyAlt,ImGui::GetIO().ConfigMacOSXBehaviors,ImGui::GetIO().KeySuper);
-    const bool moveWordLeft=ImGui::IsWindowFocused()&&ImGui::IsKeyPressed(ImGuiKey_LeftArrow)&&wordModifier;
-    const bool moveWordRight=ImGui::IsWindowFocused()&&ImGui::IsKeyPressed(ImGuiKey_RightArrow)&&wordModifier;
+    const bool altTypeMetricArrow=ImGui::GetIO().KeyAlt&&!ImGui::GetIO().KeyShift&&(ImGui::IsKeyPressed(ImGuiKey_LeftArrow)||ImGui::IsKeyPressed(ImGuiKey_RightArrow));
+    const bool moveWordLeft=ImGui::IsWindowFocused()&&ImGui::IsKeyPressed(ImGuiKey_LeftArrow)&&wordModifier&&!altTypeMetricArrow;
+    const bool moveWordRight=ImGui::IsWindowFocused()&&ImGui::IsKeyPressed(ImGuiKey_RightArrow)&&wordModifier&&!altTypeMetricArrow;
     const bool moveDocumentStart=ImGui::IsWindowFocused()&&ImGui::IsKeyPressed(ImGuiKey_UpArrow)&&documentModifier;
     const bool moveDocumentEnd=ImGui::IsWindowFocused()&&ImGui::IsKeyPressed(ImGuiKey_DownArrow)&&documentModifier;
     const bool moveLineStart=ImGui::IsWindowFocused()&&ImGui::IsKeyPressed(ImGuiKey_Home,true);
     const bool moveLineEnd=ImGui::IsWindowFocused()&&ImGui::IsKeyPressed(ImGuiKey_End,true);
     ImGuiIO& typeIo=ImGui::GetIO();
     const int movementCursor=movementState?movementState->GetCursorPos():0,movementAnchor=movementState?movementState->GetSelectionStart():0;
-    const int movementSelectionEnd=movementState?movementState->GetSelectionEnd():0;
+    const int movementRangeStart=movementState?std::min(movementState->Stb.select_start,movementState->Stb.select_end):0;
+    const int movementRangeEnd=movementState?std::max(movementState->Stb.select_start,movementState->Stb.select_end):0;
     const int movementSelectionAnchor=movementState?movementState->Stb.select_start:0;
     const int movementSelectionActive=movementState?movementState->Stb.select_end:0;
     const bool movementSelected=movementState&&movementState->HasSelection(),movementExtend=ImGui::GetIO().KeyShift;
@@ -3253,12 +3268,18 @@ static void typeEditor() {
         else if(ImGui::IsKeyPressed(ImGuiKey_LeftArrow,true))verticalDirection=2;
         else if(ImGui::IsKeyPressed(ImGuiKey_RightArrow,true))verticalDirection=-2;
     }
-    int typeMetric=-1;float typeMetricBy=0;
+    int typeMetric=-1;float typeMetricBy=0;int pairKerningDirection=0;float pairKerningBy=0;
     const bool typeCommand=typeIo.ConfigMacOSXBehaviors?typeIo.KeySuper:typeIo.KeyCtrl;
     if(ImGui::IsWindowFocused()&&typeIo.KeyAlt&&
        (ImGui::IsKeyPressed(ImGuiKey_UpArrow,true)||ImGui::IsKeyPressed(ImGuiKey_DownArrow,true))){
         const bool up=ImGui::IsKeyPressed(ImGuiKey_UpArrow,true);const float amount=typeCommand?10.0f:2.0f;
         typeMetric=typeIo.KeyShift?1:0;typeMetricBy=typeIo.KeyShift?(up?amount:-amount):(up?-amount:amount);
+    }
+    if(ImGui::IsWindowFocused()&&typeIo.KeyAlt&&!typeIo.KeyShift&&
+       (ImGui::IsKeyPressed(ImGuiKey_LeftArrow,true)||ImGui::IsKeyPressed(ImGuiKey_RightArrow,true))){
+        const bool right=ImGui::IsKeyPressed(ImGuiKey_RightArrow,true);const float amount=typeCommand?100.0f:20.0f;
+        if(movementSelected){typeMetric=2;typeMetricBy=right?amount:-amount;}
+        else {pairKerningDirection=right?1:-1;pairKerningBy=amount;}
     }
     const bool modifiedDelete=ImGui::IsWindowFocused()&&(ImGui::IsKeyPressed(ImGuiKey_Backspace)||ImGui::IsKeyPressed(ImGuiKey_Delete))&&
         typePrepareModifiedDelete(movementState,typeBuf,ImGui::IsKeyPressed(ImGuiKey_Backspace),typeIo.KeyCtrl,typeIo.KeyAlt,typeIo.ConfigMacOSXBehaviors,typeIo.KeySuper);
@@ -3272,14 +3293,26 @@ static void typeEditor() {
         else typeMask.str = typeBuf;
     }
     if(modifiedDelete){typeIo.KeyCtrl=savedCtrl;typeIo.KeyAlt=savedAlt;typeIo.KeySuper=savedSuper;}
-    if(verticalDirection)typeMoveVerticalCaret(ImGui::GetInputTextState(typeInputId),typeBuf,movementCursor,movementAnchor,movementSelectionEnd,movementSelectionAnchor,movementSelected,verticalDirection,movementExtend);
+    if(verticalDirection)typeMoveVerticalCaret(ImGui::GetInputTextState(typeInputId),typeBuf,movementCursor,movementRangeStart,movementRangeEnd,movementSelectionAnchor,movementSelected,verticalDirection,movementExtend);
     if(typeMetric>=0){
         if(ImGuiInputTextState* state=ImGui::GetInputTextState(typeInputId)){
             state->Stb.cursor=movementCursor;state->Stb.select_start=movementSelectionAnchor;state->Stb.select_end=movementSelectionActive;
-            const size_t start=typeCodepointIndex(state,state->GetSelectionStart()),end=typeCodepointIndex(state,state->GetSelectionEnd());
+            const size_t start=typeCodepointIndex(state,std::min(state->Stb.select_start,state->Stb.select_end));
+            const size_t end=typeCodepointIndex(state,std::max(state->Stb.select_start,state->Stb.select_end));
             Text* target=typeMaskEditing?&typeMask:(typeLayer>=0&&typeLayer<(int)doc.layers.size()&&doc.layers[typeLayer].isText()?&doc.layers[typeLayer].text:nullptr);
             if(target){Text updated=*target;if(typeStepCharacterMetric(updated,start,end,typeMetric,typeMetricBy,doc.dpi,updated.scaleY)){
-                typeRemember(typeMetric==0?"Leading":"Baseline Shift");*target=std::move(updated);
+                if(!typeMaskEditing)typeRememberDiscrete(typeMetric==0?"Leading":"Baseline Shift");*target=std::move(updated);
+                if(!typeMaskEditing){renderFill(doc,doc.layers[typeLayer]);changed();}
+            }}
+        }
+    }
+    if(pairKerningDirection){
+        if(ImGuiInputTextState* state=ImGui::GetInputTextState(typeInputId)){
+            state->Stb.cursor=movementCursor;state->Stb.select_start=movementSelectionAnchor;state->Stb.select_end=movementSelectionActive;
+            Text* target=typeMaskEditing?&typeMask:(typeLayer>=0&&typeLayer<(int)doc.layers.size()&&doc.layers[typeLayer].isText()?&doc.layers[typeLayer].text:nullptr);
+            const size_t caret=typeCodepointIndex(state,movementCursor);
+            if(target){Text updated=*target;if(textAdjustKerningPair(updated,caret,pairKerningDirection*pairKerningBy)){
+                if(!typeMaskEditing)typeRememberDiscrete("Kerning");*target=std::move(updated);
                 if(!typeMaskEditing){renderFill(doc,doc.layers[typeLayer]);changed();}
             }}
         }
@@ -6149,9 +6182,20 @@ void script(const std::string& what) {
         TextStyle selected;selected.font=sample.font;selected.size=sample.size;selected.leading=sample.leading;sample.runs={{sample.str.size(),selected}};
         Text updated=sample;const bool leading=typeStepCharacterMetric(updated,0,updated.str.size(),0,2,doc.dpi,updated.scaleY);
         const bool baseline=typeStepCharacterMetric(updated,0,updated.str.size(),1,2,doc.dpi,updated.scaleY);
+        const bool tracking=typeStepCharacterMetric(updated,0,updated.str.size(),2,20,doc.dpi,updated.scaleY);
+        Text pair;pair.str="AV";pair.size=40;const float pairBefore=textAdvance(pair);const bool kern=textAdjustKerningPair(pair,1,20)&&textAdvance(pair)>pairBefore;
         Fill fill;fill.kind=FILL_SOLID;for(int i=0;i<3;++i)fill.colour[i]=fg[i]/255.0f;addTextLayer(doc,updated,fill);doc.active=0;
+        typeLayer=0;typeSnapshotStart(false);const float tracked=doc.cur().text.runs.front().style.tracking;
+        Text oneStep=doc.cur().text;const bool stepped=typeStepCharacterMetric(oneStep,0,oneStep.str.size(),2,20,doc.dpi,oneStep.scaleY);
+        if(stepped){typeRememberDiscrete("Tracking");doc.cur().text=std::move(oneStep);renderFill(doc,doc.cur());changed();}
+        const bool historyStep=stepped&&hist.undo.size()==1&&hist.undoNames.back()=="Tracking";
+        if(historyStep)hist.doUndo(doc);
+        const bool separateUndo=historyStep&&doc.cur().text.runs.front().style.tracking==tracked;
+        if(separateUndo)hist.doRedo(doc);
+        const bool separateRedo=separateUndo&&doc.cur().text.runs.front().style.tracking>tracked;
+        typeEditHasSnapshot=typeEditCreated=typeEditUndoPushed=false;typeLayer=-1;
         Toolbar::select(Toolbar::TYPE_H);syncTool();fitNext=true;
-        fprintf(stderr,"type-metric-shortcuts: %s; selected text stores per-character leading and baseline steps\n",leading&&baseline?"passed":"failed");return;
+        fprintf(stderr,"type-metric-shortcuts: %s; selected-run leading/baseline/tracking, collapsed pair kerning and discrete metric undo\n",leading&&baseline&&tracking&&kern&&separateUndo&&separateRedo?"passed":"failed");return;
     }
     if (what == "type-shift-click") {
         doc=newDoc(480,320,false);hist=History();Text existing;existing.str="Existing words";existing.x=60;existing.y=140;existing.size=52;Fill fill;fill.kind=FILL_SOLID;for(int i=0;i<3;++i)fill.colour[i]=fg[i]/255.0f;addTextLayer(doc,existing,fill);

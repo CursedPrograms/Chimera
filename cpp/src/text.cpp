@@ -142,18 +142,19 @@ std::string Text::save() const {
     snprintf(b, sizeof b, " %g %g %g %d %d %g %g %g %g %g %g %g %g %d %d %g", size, x, y, align, vertical ? 1 : 0, tracking, leading, boxWidth, boxHeight, scaleX, scaleY, rotation, pathStart, pathText ? 1 : 0, pathFlip ? 1 : 0, pathEnd);
     std::string runData, paraData;
     for (const TextRun& r : runs) {
-        char q[256]; snprintf(q, sizeof q, "%zu,%g,%g,%g,%g,%g,%g,%d,%d,%d,%d,", r.bytes, r.style.size, r.style.tracking, r.style.leading,
-            r.style.baselineShift, r.style.horizontalScale, r.style.verticalScale, r.style.bold, r.style.italic, r.style.underline, r.style.strikethrough);
+        char q[256]; snprintf(q, sizeof q, "%zu,%g,%g,%g,%g,%g,%g,%d,%d,%d,%d,%d,%g,", r.bytes, r.style.size, r.style.tracking, r.style.leading,
+            r.style.baselineShift, r.style.horizontalScale, r.style.verticalScale, r.style.bold, r.style.italic, r.style.underline, r.style.strikethrough, r.style.kerningOff, r.style.kern);
         runData += q + hex(r.style.font) + ";";
     }
     for (const ParagraphRun& r : paragraphs) { char q[180]; snprintf(q, sizeof q, "%zu,%d,%g,%g,%g,%g,%g,%g;", r.bytes, r.style.align, r.style.firstIndent, r.style.startIndent, r.style.endIndent, r.style.spaceBefore, r.style.spaceAfter, r.style.autoLeading); paraData += q; }
-    return "text3 " + hex(str) + " " + hex(font) + " " + hex(pathData) + b + " " + hex(runData) + " " + hex(paraData);
+    return "text4 " + hex(str) + " " + hex(font) + " " + hex(pathData) + b + " " + hex(runData) + " " + hex(paraData);
 }
 bool Text::load(const std::string& blob) {
     auto unhex = [](const std::string& h) { std::string o; if (h.empty() || h[0] == '-') return o; for (size_t i = 0; i + 1 < h.size(); i += 2) { char b[3] = {h[i], h[i + 1], 0}; o += (char)strtol(b, nullptr, 16); } return o; };
     std::string version, textHex, fontHex; int al = 0, v = 0;
-    if (blob.rfind("text3 ", 0) == 0 || blob.rfind("text2 ", 0) == 0) {
-        const bool v3 = blob.rfind("text3 ", 0) == 0;
+    if (blob.rfind("text4 ", 0) == 0 || blob.rfind("text3 ", 0) == 0 || blob.rfind("text2 ", 0) == 0) {
+        const bool v4 = blob.rfind("text4 ", 0) == 0;
+        const bool v3 = v4 || blob.rfind("text3 ", 0) == 0;
         std::string pathHex; int onPath = 0, flipped = 0;
         std::istringstream in(blob);
         if (!(in >> version >> textHex >> fontHex >> pathHex >> size >> x >> y >> al >> v >> tracking >> leading >> boxWidth >> boxHeight >> scaleX >> scaleY >> rotation >> pathStart >> onPath >> flipped)) return false;
@@ -166,7 +167,10 @@ bool Text::load(const std::string& blob) {
             std::string rh, ph; if (!(in >> rh >> ph)) return false;
             std::istringstream ri(unhex(rh)); std::string item;
             while (std::getline(ri, item, ';')) { if (item.empty()) continue; std::istringstream fields(item); TextRun r; std::string fhex; int bo=0,it=0,un=0,st=0; char comma;
+                int ko=0;
                 if (!(fields >> r.bytes >> comma >> r.style.size >> comma >> r.style.tracking >> comma >> r.style.leading >> comma >> r.style.baselineShift >> comma >> r.style.horizontalScale >> comma >> r.style.verticalScale >> comma >> bo >> comma >> it >> comma >> un >> comma >> st >> comma)) return false;
+                if(v4 && !(fields >> ko >> comma >> r.style.kern >> comma))return false;
+                r.style.kerningOff=ko!=0;
                 if (!(fields >> fhex)) return false; r.style.font = unhex(fhex); r.style.bold=bo!=0; r.style.italic=it!=0; r.style.underline=un!=0; r.style.strikethrough=st!=0; runs.push_back(std::move(r));
             }
             std::istringstream pi(unhex(ph));
@@ -351,13 +355,13 @@ static float glyphAdvance(const TextGlyph& glyph, const TextGlyph* next, const s
     const float scale = stbtt_ScaleForPixelHeight(&loaded->info, size);
     int advance = 0, bearing = 0;
     stbtt_GetCodepointHMetrics(&loaded->info, glyph.codepoint, &advance, &bearing);
-    float kern = 0;
-    if (next) {
+    float kern = next ? style.kern / 1000.0f * size : 0.0f;
+    if (next && !style.kerningOff) {
         const TextStyle& nextStyle = styleForCharacter(styles, next->character, fallback);
         const std::string& font = style.font.empty() ? fallbackFont : style.font;
         const std::string& nextFont = nextStyle.font.empty() ? fallbackFont : nextStyle.font;
         if (font == nextFont && style.size == nextStyle.size)
-            kern = stbtt_GetCodepointKernAdvance(&loaded->info, glyph.codepoint, next->codepoint) * scale;
+            kern += stbtt_GetCodepointKernAdvance(&loaded->info, glyph.codepoint, next->codepoint) * scale;
     }
     const float horizontalScale=std::isfinite(style.horizontalScale)&&style.horizontalScale>0?style.horizontalScale:1.0f;
     return (advance * scale + kern + style.tracking / 1000.0f * size) * horizontalScale;
@@ -723,4 +727,39 @@ bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float bo
     if (minX <= maxX) { box[0] = minX; box[1] = minY; box[2] = maxX; box[3] = maxY; }
     else { box[0] = t.x; box[1] = t.y; box[2] = t.x + t.size * 0.6f; box[3] = t.y + t.size; }
     return true;
+}
+
+// after PhotoCraft (crates/engine/src/cmd/type_cmds.rs type.edit kernPair): a manual pair value
+// starts from the current font kerning, then replaces it so the pair's appearance changes by `by`.
+bool textAdjustKerningPair(Text& text,size_t caret,float by){
+    if(!std::isfinite(by))return false;
+    const auto styles=text.characterStyles();const size_t count=styles.size();
+    if(caret==0||caret>=count)return false;
+    std::vector<uint32_t> chars;std::vector<size_t> offsets;size_t byte=0;
+    while(byte<text.str.size()){size_t len=0;chars.push_back(utf8CodePoint(text.str,byte,len));offsets.push_back(byte);byte+=std::max<size_t>(1,len);}
+    if(caret>=chars.size()||chars[caret-1]=='\n'||chars[caret]=='\n')return false;
+    const TextStyle& style=styles[caret-1];const TextStyle& nextStyle=styles[caret];
+    float current=style.kern;
+    if(!style.kerningOff){
+        const std::string& font=style.font.empty()?text.font:style.font;
+        const std::string& nextFont=nextStyle.font.empty()?text.font:nextStyle.font;
+        if(font==nextFont&&style.size==nextStyle.size){
+            Loaded* loaded=fontForStyle(style,text.font);
+            if(!loaded)return false;
+            const float scale=stbtt_ScaleForPixelHeight(&loaded->info,std::max(1.0f,style.size));
+            const float metric=stbtt_GetCodepointKernAdvance(&loaded->info,(int)chars[caret-1],(int)chars[caret])*scale;
+            current+=metric/std::max(1.0f,style.size)*1000.0f;
+        }
+    }
+    TextStyle updated=style;updated.kerningOff=true;updated.kern=std::clamp(std::round(current)+by,-1000.0f,10000.0f);
+    if(updated.kerningOff==style.kerningOff&&updated.kern==style.kern)return false;
+    std::vector<TextStyle> changed=styles;changed[caret-1]=updated;
+    text.runs.clear();byte=0;
+    for(size_t i=0;i<changed.size();++i){
+        const size_t end=i+1<offsets.size()?offsets[i+1]:text.str.size();const size_t len=end-byte;
+        if(!text.runs.empty()&&text.runs.back().style==changed[i])text.runs.back().bytes+=len;
+        else text.runs.push_back({len,changed[i]});
+        byte=end;
+    }
+    text.syncSummary();return true;
 }
