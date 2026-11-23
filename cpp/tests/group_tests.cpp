@@ -368,8 +368,12 @@ static bool typeParagraphStyleEditsSelectionAndCaret() {
         runs[1].style.spaceAfter != 4 || runs[2].style.align != 2) return false;
     if (!App::typeSetParagraphStyle(text, 13, 13, 1, 2000)) return false;
     runs = text.normalizedParagraphs();
-    return runs.size() == 3 && runs[0].style.firstIndent == 0 &&
-        runs[1].style.firstIndent == 0 && runs[2].style.firstIndent == 1296;
+    if (runs.size() != 3 || runs[0].style.firstIndent != 0 ||
+        runs[1].style.firstIndent != 0 || runs[2].style.firstIndent != 1296) return false;
+    Text vertical; vertical.str = "vertical"; vertical.vertical = true;
+    vertical.paragraphs = {{vertical.str.size(), second}};
+    if (!App::typeSetParagraphStyle(vertical, 0, 0, 0, 2)) return false;
+    return vertical.normalizedParagraphs()[0].style.align == 2;
 }
 
 // after PhotoCraft (crates/doc/src/lib.rs char_runs and paragraph_runs): styles cover UTF-8 bytes

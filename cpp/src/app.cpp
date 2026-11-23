@@ -5265,20 +5265,18 @@ static void optionsBar() {
         const char* al[] = {t.vertical ? "Top" : "Left", t.vertical ? "Middle" : "Centre", t.vertical ? "Bottom" : "Right"};
         const size_t alignStart=live&&typeStyleSelectionValid&&typeStyleSelectionLayer==typeLayer?std::min(typeStyleSelectionStart,characterStyles.size()):0;
         const size_t alignEnd=live&&typeStyleSelectionValid&&typeStyleSelectionLayer==typeLayer?std::min(typeStyleSelectionEnd,characterStyles.size()):alignStart;
-        const int paragraphAlign=live&&!t.vertical?typeParagraphStyleAt(t,alignStart).align:t.align;
+        const int paragraphAlign=live?typeParagraphStyleAt(t,alignStart).align:t.align;
         const int shownAlign=paragraphAlign>=3&&paragraphAlign<=5?paragraphAlign-3:paragraphAlign;
         for (int k = 0; k < 3; ++k) {
             if (k) ImGui::SameLine(0, 2);
             const bool on = shownAlign == k;
             if (on) ImGui::PushStyleColor(ImGuiCol_Button, col4(C_PINK));
             if (ImGui::Button(al[k])) {
-                if(!t.vertical){
-                    Text updated=t;
-                    const bool paragraphChanged=typeSetParagraphStyle(updated,alignStart,alignEnd,0,(float)k);
-                    if(paragraphChanged||t.align!=k){
-                        if(live)typeRemember("Align");updated.align=k;t=std::move(updated);ch=true;
-                    }
-                }else{if(live)typeRemember("Align");t.align=k;ch=true;}
+                Text updated=t;
+                const bool paragraphChanged=typeSetParagraphStyle(updated,alignStart,alignEnd,0,(float)k);
+                if(paragraphChanged||t.align!=k){
+                    if(live)typeRemember("Align");updated.align=k;t=std::move(updated);ch=true;
+                }
             }
             if (on) ImGui::PopStyleColor();
         }
