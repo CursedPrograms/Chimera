@@ -835,9 +835,9 @@ bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float bo
         // each line's width, for centring / right
         for (size_t li = 0; li < lines.size(); ++li) {
             const auto& L = lines[li];
-            const auto advances=glyphAdvances(L,styles,fallback,t.font,36.0f*(std::isfinite(dpi)&&dpi>0?dpi:72.0f)/72.0f);
-            const float wsum=std::accumulate(advances.begin(),advances.end(),0.0f);
-            const int align = !L.empty() && L.front().character < paragraphStyles.size()
+            auto advances=glyphAdvances(L,styles,fallback,t.font,36.0f*(std::isfinite(dpi)&&dpi>0?dpi:72.0f)/72.0f);
+            float wsum=std::accumulate(advances.begin(),advances.end(),0.0f);
+            const int paragraphAlign = !L.empty() && L.front().character < paragraphStyles.size()
                 ? paragraphStyles[L.front().character].align : t.align;
             const size_t character = L.empty() ? 0 : L.front().character;
             const ParagraphStyle paragraph = character < paragraphStyles.size() ? paragraphStyles[character] : ParagraphStyle{};
@@ -846,6 +846,19 @@ bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float bo
             const float firstIndent = firstInParagraph ? paragraph.firstIndent * pointsToPixels : 0.0f;
             const float available = std::max(0.0f, t.boxWidth - startIndent -
                 paragraph.endIndent * pointsToPixels - firstIndent);
+            int align = std::clamp(paragraphAlign, 0, 6);
+            const bool finalLine = li + 1 == lines.size() || lineParagraphs[li+1] != lineParagraphs[li];
+            const bool justify = align >= 3;
+            const bool justifyLine = justify && t.boxWidth > 0 && (align == 6 || !finalLine);
+            if (justify) align = align == 4 && finalLine ? 1 : align == 5 && finalLine ? 2 : 0;
+            if (justifyLine) {
+                const size_t spaces = (size_t)std::count_if(L.begin(), L.end(), [](const TextGlyph& glyph) { return glyph.codepoint == ' '; });
+                if (spaces) {
+                    const float extra = std::max(0.0f, available - wsum) / spaces;
+                    for (size_t i = 0; i < L.size(); ++i) if (L[i].codepoint == ' ') advances[i] += extra;
+                    wsum += extra * spaces;
+                }
+            }
             const float anchorX = t.x + startIndent + firstIndent + (t.boxWidth > 0
                 ? (align == 1 ? available * 0.5f : align == 2 ? available : 0.0f)
                 : 0.0f);

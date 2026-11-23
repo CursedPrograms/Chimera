@@ -330,6 +330,30 @@ static bool textParagraphIndentsAffectPlacementAndWrapping() {
     return std::abs(shift - 23.0f) <= 2.0f && wrappedHeight > plainHeight + 8.0f;
 }
 
+// after PhotoCraft (crates/text/src/tests.rs alignment_point_and_box): justified wrapped lines fill their frame.
+static bool textJustificationFillsWrappedLines() {
+    Text text; text.str = "one two three four five six"; text.size = 24; text.x = 20; text.y = 14; text.boxWidth = 160;
+    ParagraphStyle style; style.align = 3;
+    text.paragraphs = {{text.str.size(), style}};
+    constexpr int width = 240, height = 140;
+    std::vector<float> coverage; float box[4];
+    if (!textCoverage(text, width, height, coverage, box)) return false;
+    int firstMinY = height, firstMaxY = -1;
+    for (int y = 0; y < height; ++y) {
+        bool rowHasInk = false;
+        for (int x = 0; x < width; ++x) rowHasInk |= coverage[(size_t)y * width + x] > 0;
+        if (rowHasInk) {
+            if (firstMaxY < 0) firstMinY = y;
+            else if (y - firstMaxY > 2) break;
+            firstMaxY = y;
+        }
+    }
+    int firstMaxX = -1;
+    for (int y = firstMinY; y <= firstMaxY; ++y) for (int x = 0; x < width; ++x)
+        if (coverage[(size_t)y * width + x] > 0) firstMaxX = std::max(firstMaxX, x);
+    return firstMaxY >= firstMinY && firstMaxX >= text.x + text.boxWidth - 5;
+}
+
 // after PhotoCraft (crates/doc/src/lib.rs char_runs and paragraph_runs): styles cover UTF-8 bytes
 // without splitting a code point, and a short run list extends with the last style.
 static bool richTextRunsNormalizeAndPersist() {
@@ -910,6 +934,7 @@ int runSelfTests() {
         {"paragraph alignment applies independently", textParagraphAlignmentAppliesPerParagraph},
         {"paragraph spacing moves later paragraphs", textParagraphSpacingMovesFollowingParagraphs},
         {"paragraph indents affect placement and wrapping", textParagraphIndentsAffectPlacementAndWrapping},
+        {"Type justification fills wrapped lines", textJustificationFillsWrappedLines},
         {"rich text runs normalize UTF-8 and persist", richTextRunsNormalizeAndPersist},
         {"rich text run styles map by Unicode character", richTextStylesMapToUnicodeCharacters},
         {"rich text run size and tracking affect layout and rasterization", richTextRunMetricsAffectLayoutAndInk},
