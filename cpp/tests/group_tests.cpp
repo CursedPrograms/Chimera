@@ -298,6 +298,38 @@ static bool textParagraphSpacingMovesFollowingParagraphs() {
     return afterBox[3] > base[3] + 4.0f && beforeBox[3] > base[3] + 4.0f;
 }
 
+// after PhotoCraft (crates/text/src/layout/shaping.rs paragraph indents): indents affect placement and wrapping.
+static bool textParagraphIndentsAffectPlacementAndWrapping() {
+    Text text; text.str = "Indented"; text.size = 24; text.x = 12; text.y = 18;
+    std::vector<float> coverage; float plain[4];
+    if (!textCoverage(text, 400, 180, coverage, plain)) return false;
+    auto inkMinX = [](const std::vector<float>& pixels, int width, int height) {
+        int xMin = width;
+        for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x)
+            if (pixels[(size_t)y * width + x] > 0) xMin = std::min(xMin, x);
+        return xMin;
+    };
+    const int plainInkX = inkMinX(coverage, 400, 180);
+    ParagraphStyle indent; indent.startIndent = 8; indent.firstIndent = 15;
+    Text shifted = text; shifted.paragraphs = {{shifted.str.size(), indent}};
+    float shiftedBox[4];
+    if (!textCoverage(shifted, 400, 180, coverage, shiftedBox)) return false;
+    const int shiftedInkX = inkMinX(coverage, 400, 180);
+
+    Text line; line.str = "alpha beta gamma delta epsilon zeta"; line.size = 20; line.x = 12; line.y = 18; line.boxWidth = 280;
+    float oneLine[4];
+    if (!textCoverage(line, 400, 180, coverage, oneLine)) return false;
+    ParagraphStyle narrow; narrow.endIndent = 90;
+    line.paragraphs = {{line.str.size(), narrow}};
+    float wrapped[4];
+    if (!textCoverage(line, 400, 180, coverage, wrapped)) return false;
+    const float shift = (float)(shiftedInkX - plainInkX);
+    const float plainHeight = oneLine[3] - oneLine[1], wrappedHeight = wrapped[3] - wrapped[1];
+    if (std::abs(shift - 23.0f) > 2.0f || wrappedHeight <= plainHeight + 8.0f)
+        fprintf(stderr, "paragraph indents: shift %.2f (expected 23), heights %.2f -> %.2f\n", shift, plainHeight, wrappedHeight);
+    return std::abs(shift - 23.0f) <= 2.0f && wrappedHeight > plainHeight + 8.0f;
+}
+
 // after PhotoCraft (crates/doc/src/lib.rs char_runs and paragraph_runs): styles cover UTF-8 bytes
 // without splitting a code point, and a short run list extends with the last style.
 static bool richTextRunsNormalizeAndPersist() {
@@ -877,6 +909,7 @@ int runSelfTests() {
         {"text path placement respects open ends and closed seams", textPathPlacementRangeBehaves},
         {"paragraph alignment applies independently", textParagraphAlignmentAppliesPerParagraph},
         {"paragraph spacing moves later paragraphs", textParagraphSpacingMovesFollowingParagraphs},
+        {"paragraph indents affect placement and wrapping", textParagraphIndentsAffectPlacementAndWrapping},
         {"rich text runs normalize UTF-8 and persist", richTextRunsNormalizeAndPersist},
         {"rich text run styles map by Unicode character", richTextStylesMapToUnicodeCharacters},
         {"rich text run size and tracking affect layout and rasterization", richTextRunMetricsAffectLayoutAndInk},

@@ -495,12 +495,19 @@ static std::vector<std::vector<TextGlyph>> linesOf(const std::string& s,const st
 
 // after PhotoCraft (crates/text paragraph layout): wrap at whitespace without splitting a word.
 static void wrapLines(std::vector<std::vector<TextGlyph>>& lines, const std::vector<TextStyle>& styles,
-                      const TextStyle& fallback, const std::string& fallbackFont, float width,float tabInterval) {
+                      const TextStyle& fallback, const std::string& fallbackFont, float width,float tabInterval,
+                      const std::vector<ParagraphStyle>& paragraphs, float pointsToPixels) {
     if (width <= 0) return;
     std::vector<std::vector<TextGlyph>> wrapped;
     for (const auto& source : lines) {
+        const ParagraphStyle* paragraph = !source.empty() && source.front().character < paragraphs.size()
+            ? &paragraphs[source.front().character] : nullptr;
+        const float startIndent = paragraph ? paragraph->startIndent * pointsToPixels : 0.0f;
+        const float endIndent = paragraph ? paragraph->endIndent * pointsToPixels : 0.0f;
+        const float firstIndent = paragraph ? paragraph->firstIndent * pointsToPixels : 0.0f;
         std::vector<TextGlyph> line;
         size_t at = 0;
+        bool firstLine = true;
         while (at < source.size()) {
             const size_t separator = at;
             while (at < source.size() && (source[at].codepoint == ' ' || source[at].codepoint == '\t')) ++at;
@@ -515,7 +522,8 @@ static void wrapLines(std::vector<std::vector<TextGlyph>>& lines, const std::vec
             const float sepWidth=std::accumulate(sepAdv.begin(),sepAdv.end(),0.0f);
             const auto wordAdv=glyphAdvances(word,styles,fallback,fallbackFont,tabInterval,used+sepWidth);
             const float wordWidth=std::accumulate(wordAdv.begin(),wordAdv.end(),0.0f);
-            if (!line.empty() && used + sepWidth + wordWidth > width) { wrapped.push_back(std::move(line)); line.clear(); }
+            const float available = std::max(0.0f, width - startIndent - endIndent - (firstLine ? firstIndent : 0.0f));
+            if (!line.empty() && used + sepWidth + wordWidth > available) { wrapped.push_back(std::move(line)); line.clear(); firstLine = false; }
             else line.insert(line.end(),separators.begin(),separators.end());
             line.insert(line.end(), word.begin(), word.end());
             at = end;
@@ -597,7 +605,6 @@ bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float bo
     const auto styles = t.characterStyles();
     TextStyle fallback; fallback.font=t.font; fallback.size=t.size; fallback.tracking=t.tracking; fallback.leading=t.leading;
     auto lines = linesOf(t.str,styles);
-    if (!t.vertical) wrapLines(lines, styles, fallback, t.font, t.boxWidth,36.0f*(std::isfinite(dpi)&&dpi>0?dpi:72.0f)/72.0f);
     const auto normalizedParagraphs = t.normalizedParagraphs();
     std::vector<ParagraphStyle> paragraphStyles;
     std::vector<size_t> paragraphIndexes;
@@ -619,6 +626,8 @@ bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float bo
         byte += std::max<size_t>(1, length);
         if (cp == '\n') ++paragraphIndex;
     }
+    if (!t.vertical) wrapLines(lines, styles, fallback, t.font, t.boxWidth,
+        36.0f * (std::isfinite(dpi) && dpi > 0 ? dpi : 72.0f) / 72.0f, paragraphStyles, pointsToPixels);
     const TextPathMetric path = t.pathText ? pathMetric(t) : TextPathMetric();
     const bool pathOn = t.pathText && !t.vertical && path.length > 0;
     float minX = 1e9f, minY = 1e9f, maxX = -1e9f, maxY = -1e9f;
@@ -830,8 +839,15 @@ bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float bo
             const float wsum=std::accumulate(advances.begin(),advances.end(),0.0f);
             const int align = !L.empty() && L.front().character < paragraphStyles.size()
                 ? paragraphStyles[L.front().character].align : t.align;
-            const float anchorX = t.x + (t.boxWidth > 0
-                ? (align == 1 ? t.boxWidth * 0.5f : align == 2 ? t.boxWidth : 0.0f)
+            const size_t character = L.empty() ? 0 : L.front().character;
+            const ParagraphStyle paragraph = character < paragraphStyles.size() ? paragraphStyles[character] : ParagraphStyle{};
+            const bool firstInParagraph = li == 0 || lineParagraphs[li] != lineParagraphs[li-1];
+            const float startIndent = paragraph.startIndent * pointsToPixels;
+            const float firstIndent = firstInParagraph ? paragraph.firstIndent * pointsToPixels : 0.0f;
+            const float available = std::max(0.0f, t.boxWidth - startIndent -
+                paragraph.endIndent * pointsToPixels - firstIndent);
+            const float anchorX = t.x + startIndent + firstIndent + (t.boxWidth > 0
+                ? (align == 1 ? available * 0.5f : align == 2 ? available : 0.0f)
                 : 0.0f);
             float gx = anchorX - (align == 1 ? wsum / 2 : align == 2 ? wsum : 0);
             const float gy = baselines[li];
