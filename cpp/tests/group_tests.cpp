@@ -23,6 +23,7 @@ bool typeApplyEditorText(Text& text, const std::string& updated);
 bool typeSetCharacterSize(Text& text, size_t start, size_t end, float size);
 bool typeSetCharacterTracking(Text& text, size_t start, size_t end, float tracking);
 bool typeSetCharacterFont(Text& text, size_t start, size_t end, const std::string& font);
+bool typeSetParagraphStyle(Text& text, size_t start, size_t end, int property, float value);
 bool typeSetCharacterMetricValue(Text& text, size_t start, size_t end, int metric, float value, float dpi, float layerScaleY);
 int cropOptionKeyAction(bool pending, bool defaultFrame, bool dragging, bool shift, bool alt, bool ctrl, bool superKey, int key, bool& classicMode, bool& showArea);
 bool cropShieldShowsOutside(bool showArea, bool classicMode);
@@ -352,6 +353,23 @@ static bool textJustificationFillsWrappedLines() {
     for (int y = firstMinY; y <= firstMaxY; ++y) for (int x = 0; x < width; ++x)
         if (coverage[(size_t)y * width + x] > 0) firstMaxX = std::max(firstMaxX, x);
     return firstMaxY >= firstMinY && firstMaxX >= text.x + text.boxWidth - 5;
+}
+
+// after PhotoCraft (crates/engine/src/cmd/type_cmds.rs paragraph style range): selection and caret edit only target paragraphs.
+static bool typeParagraphStyleEditsSelectionAndCaret() {
+    Text text; text.str = "first\nsecond\nthird";
+    ParagraphStyle first; first.align = 0;
+    ParagraphStyle second; second.align = 1; second.spaceAfter = 4;
+    ParagraphStyle third; third.align = 2;
+    text.paragraphs = {{6, first}, {7, second}, {5, third}};
+    if (!App::typeSetParagraphStyle(text, 6, 12, 0, 5)) return false;
+    auto runs = text.normalizedParagraphs();
+    if (runs.size() != 3 || runs[0].style.align != 0 || runs[1].style.align != 5 ||
+        runs[1].style.spaceAfter != 4 || runs[2].style.align != 2) return false;
+    if (!App::typeSetParagraphStyle(text, 13, 13, 1, 2000)) return false;
+    runs = text.normalizedParagraphs();
+    return runs.size() == 3 && runs[0].style.firstIndent == 0 &&
+        runs[1].style.firstIndent == 0 && runs[2].style.firstIndent == 1296;
 }
 
 // after PhotoCraft (crates/doc/src/lib.rs char_runs and paragraph_runs): styles cover UTF-8 bytes
@@ -935,6 +953,7 @@ int runSelfTests() {
         {"paragraph spacing moves later paragraphs", textParagraphSpacingMovesFollowingParagraphs},
         {"paragraph indents affect placement and wrapping", textParagraphIndentsAffectPlacementAndWrapping},
         {"Type justification fills wrapped lines", textJustificationFillsWrappedLines},
+        {"Type paragraph formatting follows selection and caret", typeParagraphStyleEditsSelectionAndCaret},
         {"rich text runs normalize UTF-8 and persist", richTextRunsNormalizeAndPersist},
         {"rich text run styles map by Unicode character", richTextStylesMapToUnicodeCharacters},
         {"rich text run size and tracking affect layout and rasterization", richTextRunMetricsAffectLayoutAndInk},

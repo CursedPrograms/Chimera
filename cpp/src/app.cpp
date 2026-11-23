@@ -3284,6 +3284,65 @@ bool typeSetCharacterFont(Text& text,size_t start,size_t end,const std::string& 
         if(!text.runs.empty()&&text.runs.back().style==style)text.runs.back().bytes+=n;else text.runs.push_back({n,style});byte=std::min(text.str.size(),byte+n);}
     text.syncSummary();return true;
 }
+// after PhotoCraft (crates/engine/src/cmd/type_cmds.rs paragraph style range): formatting
+// applies to selected paragraphs, or the caret's paragraph when the range is collapsed.
+static ParagraphStyle typeParagraphStyleAt(const Text& text,size_t character){
+    const auto runs=text.normalizedParagraphs();
+    if(runs.empty())return {};
+    const size_t byte=typeByteOffset(text.str,character);
+    size_t at=0;
+    for(const ParagraphRun& run:runs){
+        if(byte<at+run.bytes||(run.bytes==0&&byte==at))return run.style;
+        at+=run.bytes;
+    }
+    return runs.back().style;
+}
+bool typeSetParagraphStyle(Text& text,size_t start,size_t end,int property,float value){
+    if(property<0||property>6||!std::isfinite(value))return false;
+    auto set=[&](ParagraphStyle& style){
+        if(property==0)style.align=(int)std::lround(std::clamp(value,0.0f,6.0f));
+        else if(property==1)style.firstIndent=std::clamp(value,-1296.0f,1296.0f);
+        else if(property==2)style.startIndent=std::clamp(value,-1296.0f,1296.0f);
+        else if(property==3)style.endIndent=std::clamp(value,-1296.0f,1296.0f);
+        else if(property==4)style.spaceBefore=std::clamp(value,0.0f,1296.0f);
+        else if(property==5)style.spaceAfter=std::clamp(value,0.0f,1296.0f);
+        else style.autoLeading=std::clamp(value,.1f,10.0f);
+    };
+    const size_t count=text.characterStyles().size();
+    start=std::min(start,count);end=std::min(end,count);
+    if(start>end)std::swap(start,end);
+    const size_t byteStart=typeByteOffset(text.str,start),byteEnd=typeByteOffset(text.str,end);
+    const auto source=text.normalizedParagraphs();
+    std::vector<std::pair<size_t,size_t>> ranges;
+    size_t paragraphStart=0;
+    for(size_t i=0;i<text.str.size();++i)if(text.str[i]=='\n'){ranges.push_back({paragraphStart,i+1});paragraphStart=i+1;}
+    ranges.push_back({paragraphStart,text.str.size()});
+    std::vector<ParagraphRun> updated;
+    bool changed=false;
+    size_t runStart=0;
+    for(const auto& range:ranges){
+        ParagraphStyle style=source.empty()?ParagraphStyle{}:source.back().style;
+        for(const ParagraphRun& run:source){
+            if(range.first<runStart+run.bytes||(run.bytes==0&&range.first==runStart)){style=run.style;break;}
+            runStart+=run.bytes;
+        }
+        runStart=0;
+        const bool selected=start==end
+            ? (byteStart>=range.first&&(byteStart<range.second||range.first==range.second))
+            : (byteStart<range.second&&byteEnd>range.first);
+        if(selected){const ParagraphStyle before=style;set(style);changed|=before.align!=style.align||before.firstIndent!=style.firstIndent||
+            before.startIndent!=style.startIndent||before.endIndent!=style.endIndent||before.spaceBefore!=style.spaceBefore||
+            before.spaceAfter!=style.spaceAfter||before.autoLeading!=style.autoLeading;}
+        const size_t bytes=range.second-range.first;
+        if(!updated.empty()&&updated.back().style.align==style.align&&updated.back().style.firstIndent==style.firstIndent&&
+           updated.back().style.startIndent==style.startIndent&&updated.back().style.endIndent==style.endIndent&&
+           updated.back().style.spaceBefore==style.spaceBefore&&updated.back().style.spaceAfter==style.spaceAfter&&
+           updated.back().style.autoLeading==style.autoLeading)updated.back().bytes+=bytes;
+        else updated.push_back({bytes,style});
+    }
+    if(!changed)return false;
+    text.paragraphs=std::move(updated);return true;
+}
 // after PhotoCraft (crates/ui-egui/src/tools/type_tool/editing.rs step_char_metric): selected
 // characters move from their own metric value, and a collapsed range in non-empty text is inert.
 bool typeStepCharacterMetric(Text& text,size_t start,size_t end,int metric,float by,float dpi,float layerScaleY){
@@ -5204,11 +5263,23 @@ static void optionsBar() {
         if (live && L.fill.kind == FILL_SOLID) { ImGui::SameLine(0, 10); edited(ImGui::ColorEdit3("##tc", L.fill.colour, ImGuiColorEditFlags_NoInputs)); }
         ImGui::SameLine(0, 14);
         const char* al[] = {t.vertical ? "Top" : "Left", t.vertical ? "Middle" : "Centre", t.vertical ? "Bottom" : "Right"};
+        const size_t alignStart=live&&typeStyleSelectionValid&&typeStyleSelectionLayer==typeLayer?std::min(typeStyleSelectionStart,characterStyles.size()):0;
+        const size_t alignEnd=live&&typeStyleSelectionValid&&typeStyleSelectionLayer==typeLayer?std::min(typeStyleSelectionEnd,characterStyles.size()):alignStart;
+        const int paragraphAlign=live&&!t.vertical?typeParagraphStyleAt(t,alignStart).align:t.align;
+        const int shownAlign=paragraphAlign>=3&&paragraphAlign<=5?paragraphAlign-3:paragraphAlign;
         for (int k = 0; k < 3; ++k) {
             if (k) ImGui::SameLine(0, 2);
-            const bool on = t.align == k;
+            const bool on = shownAlign == k;
             if (on) ImGui::PushStyleColor(ImGuiCol_Button, col4(C_PINK));
-            if (ImGui::Button(al[k])) { if (live) typeRemember("Align"); t.align = k; ch = true; }
+            if (ImGui::Button(al[k])) {
+                if(!t.vertical){
+                    Text updated=t;
+                    const bool paragraphChanged=typeSetParagraphStyle(updated,alignStart,alignEnd,0,(float)k);
+                    if(paragraphChanged||t.align!=k){
+                        if(live)typeRemember("Align");updated.align=k;t=std::move(updated);ch=true;
+                    }
+                }else{if(live)typeRemember("Align");t.align=k;ch=true;}
+            }
             if (on) ImGui::PopStyleColor();
         }
         ImGui::SameLine(0, 14);
@@ -5620,6 +5691,34 @@ static void fillPanel() {
         };
         bool allCaps=shown(TextCaps::All);if(ImGui::Checkbox("All Caps",&allCaps)){Text updated=text;if(typeToggleCharacterStyle(updated,start,end,4)){typeRememberDiscrete("All Caps");text=std::move(updated);ch=true;}}
         bool smallCaps=shown(TextCaps::Small);if(ImGui::Checkbox("Small Caps",&smallCaps)){Text updated=text;if(typeToggleCharacterStyle(updated,start,end,5)){typeRememberDiscrete("Small Caps");text=std::move(updated);ch=true;}}
+        ImGui::SeparatorText("Paragraph");
+        size_t paragraphStart=0,paragraphEnd=0;
+        if(typeLayer==doc.active&&typeStyleSelectionValid&&typeStyleSelectionLayer==typeLayer){
+            paragraphStart=std::min(typeStyleSelectionStart,styles.size());
+            paragraphEnd=std::min(typeStyleSelectionEnd,styles.size());
+        }
+        const ParagraphStyle paragraph=typeParagraphStyleAt(text,paragraphStart);
+        const char* alignments[]={"Left","Center","Right","Justify Last Left","Justify Last Center","Justify Last Right","Justify All"};
+        const int alignmentCount=text.boxWidth>0?IM_ARRAYSIZE(alignments):3;
+        int alignment=std::clamp(paragraph.align,0,alignmentCount-1);
+        if(ImGui::Combo("Alignment",&alignment,alignments,alignmentCount)){
+            Text updated=text;if(typeSetParagraphStyle(updated,paragraphStart,paragraphEnd,0,(float)alignment)){
+                typeRememberDiscrete("Paragraph Alignment");text=std::move(updated);ch=true;
+            }
+        }
+        auto paragraphSlider=[&](const char* label,int property,float value,float lo,float hi,const char* format){
+            if(sliderF(label,&value,lo,hi,format)){
+                Text updated=text;if(typeSetParagraphStyle(updated,paragraphStart,paragraphEnd,property,value)){
+                    typeRememberDiscrete(label);text=std::move(updated);ch=true;
+                }
+            }
+        };
+        paragraphSlider("First line indent",1,paragraph.firstIndent,-1296,1296,"%.1f pt");
+        paragraphSlider("Start indent",2,paragraph.startIndent,-1296,1296,"%.1f pt");
+        paragraphSlider("End indent",3,paragraph.endIndent,-1296,1296,"%.1f pt");
+        paragraphSlider("Space before",4,paragraph.spaceBefore,0,1296,"%.1f pt");
+        paragraphSlider("Space after",5,paragraph.spaceAfter,0,1296,"%.1f pt");
+        paragraphSlider("Auto leading",6,paragraph.autoLeading,.1f,10,"%.2f");
     }
     ImGui::PopItemWidth();
     if (ch) { renderFill(doc, l); changed(); }
