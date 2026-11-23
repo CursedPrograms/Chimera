@@ -373,7 +373,15 @@ static bool typeParagraphStyleEditsSelectionAndCaret() {
     Text vertical; vertical.str = "vertical"; vertical.vertical = true;
     vertical.paragraphs = {{vertical.str.size(), second}};
     if (!App::typeSetParagraphStyle(vertical, 0, 0, 0, 2)) return false;
-    return vertical.normalizedParagraphs()[0].style.align == 2;
+    Text defaults;
+    if (!App::typeSetParagraphStyle(defaults, 0, 0, 4, 36) ||
+        !App::typeSetParagraphStyle(defaults, 0, 0, 0, 1)) return false;
+    defaults.align=1;
+    Text created=defaults;created.str="new text";
+    const auto createdParagraphs=created.normalizedParagraphs();
+    return vertical.normalizedParagraphs()[0].style.align == 2 &&
+        defaults.normalizedParagraphs()[0].style.spaceBefore == 36 &&
+        createdParagraphs.size()==1&&createdParagraphs[0].style.align==1&&createdParagraphs[0].style.spaceBefore==36;
 }
 
 // after PhotoCraft (crates/doc/src/lib.rs char_runs and paragraph_runs): styles cover UTF-8 bytes

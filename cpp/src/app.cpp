@@ -5744,6 +5744,68 @@ static void fillPanel() {
     if (ch) { renderFill(doc, l); changed(); }
     ImGui::Spacing(); ImGui::Separator();
 }
+static void typeDefaultsPanel() {
+    Text& text=typeNext;
+    ImGui::TextColored(col4(C_PINK),"TYPE DEFAULTS");
+    ImGui::PushItemWidth(-1);
+    auto runs=text.normalizedRuns();
+    if(!runs.empty()){
+        ImGui::SeparatorText("Character");
+        TextStyle style=runs.front().style;
+        auto metric=[&](const char* label,int property,float value,float lo,float hi,const char* format){
+            if(sliderF(label,&value,lo,hi,format)){
+                Text updated=text;
+                if(typeSetCharacterMetricValue(updated,0,0,property,value,doc.dpi,text.scaleY))text=std::move(updated);
+            }
+        };
+        float size=style.size;
+        if(sliderF("Size",&size,4,1000,"%.0f px")){
+            Text updated=text;if(typeSetCharacterSize(updated,0,0,size))text=std::move(updated);
+        }
+        float leading=style.leading*std::max(1.0f,style.size)*std::max(.01f,style.verticalScale)*
+            std::max(.01f,text.scaleY)*72.0f/std::max(1.0f,doc.dpi);
+        metric("Leading",0,leading,.1f,5000,"%.1f pt");
+        metric("Baseline Shift",1,style.baselineShift,-1296,1296,"%.1f pt");
+        float tracking=style.tracking;
+        if(sliderF("Tracking",&tracking,-1000,10000,"%.0f")){
+            Text updated=text;if(typeSetCharacterTracking(updated,0,0,tracking))text=std::move(updated);
+        }
+        float horizontal=style.horizontalScale*100;
+        metric("Horizontal Scale",2,horizontal,1,1000,"%.0f%%");
+        float vertical=style.verticalScale*100;
+        metric("Vertical Scale",3,vertical,1,1000,"%.0f%%");
+        const char* names[]={"Faux Bold","Faux Italic","Underline","Strikethrough","All Caps","Small Caps"};
+        for(int i=0;i<6;++i){
+            const TextStyle current=text.normalizedRuns().front().style;
+            bool enabled=i==0?current.bold:i==1?current.italic:i==2?current.underline:i==3?current.strikethrough:
+                i==4?current.caps==TextCaps::All:current.caps==TextCaps::Small;
+            if(ImGui::Checkbox(names[i],&enabled)){
+                Text updated=text;if(typeToggleCharacterStyle(updated,0,0,i))text=std::move(updated);
+            }
+        }
+    }
+    ImGui::SeparatorText("Paragraph");
+    const ParagraphStyle paragraph=typeParagraphStyleAt(text,0);
+    const char* alignments[]={"Left","Center","Right","Justify Last Left","Justify Last Center","Justify Last Right","Justify All"};
+    int align=std::clamp(paragraph.align,0,2);
+    if(ImGui::Combo("Alignment",&align,alignments,3)){
+        Text updated=text;
+        if(typeSetParagraphStyle(updated,0,0,0,(float)align)){updated.align=align;text=std::move(updated);}
+    }
+    auto paragraphSlider=[&](const char* label,int property,float value,float lo,float hi,const char* format){
+        if(sliderF(label,&value,lo,hi,format)){
+            Text updated=text;if(typeSetParagraphStyle(updated,0,0,property,value))text=std::move(updated);
+        }
+    };
+    paragraphSlider("First line indent",1,paragraph.firstIndent,-1296,1296,"%.1f pt");
+    paragraphSlider("Start indent",2,paragraph.startIndent,-1296,1296,"%.1f pt");
+    paragraphSlider("End indent",3,paragraph.endIndent,-1296,1296,"%.1f pt");
+    paragraphSlider("Space before",4,paragraph.spaceBefore,0,1296,"%.1f pt");
+    paragraphSlider("Space after",5,paragraph.spaceAfter,0,1296,"%.1f pt");
+    paragraphSlider("Auto leading",6,paragraph.autoLeading,.1f,10,"%.2f");
+    ImGui::PopItemWidth();
+    ImGui::Separator();
+}
 static void newFillMenu() {
     if (ImGui::MenuItem("Solid Color...")) { remember("New Fill Layer"); Fill f; f.kind = FILL_SOLID; addFillLayer(doc, f); changed(); }
     if (ImGui::MenuItem("Gradient...")) { remember("New Fill Layer"); Fill f; f.kind = FILL_GRADIENT; f.colour[0] = f.colour[1] = f.colour[2] = 0; addFillLayer(doc, f); changed(); }
@@ -6267,6 +6329,10 @@ void frame() {
         if (doc.cur().isAdjust() || doc.cur().isFill()) {
             const float before = ImGui::GetCursorPosY();
             if (doc.cur().isFill()) fillPanel(); else propertiesPanel();
+            props = ImGui::GetCursorPosY() - before;
+        } else if (tool == T_TYPE) {
+            const float before = ImGui::GetCursorPosY();
+            typeDefaultsPanel();
             props = ImGui::GetCursorPosY() - before;
         }
         layersPanel(std::max(120.0f, H - top - optH - statusH - 130 - props));
@@ -7157,6 +7223,12 @@ void script(const std::string& what) {
         effects.runs={{5,bold},{7,italic},{10,underline},{6,strike}};addTextLayer(doc,effects,fill);Toolbar::select(Toolbar::TYPE_H);syncTool();fitNext=true;
         std::vector<float> coverage;float box[4];const bool rendered=textCoverage(doc.cur().text,doc.w,doc.h,coverage,box,doc.dpi);
         fprintf(stderr,"type-rich-runs: %s; per-run font/size/tracking/leading/scale/baseline/weight/italic/decorations\n",rendered?"rendered":"failed");return;
+    }
+    if (what == "type-defaults") {
+        doc=newDoc(520,320,false);hist=History();typeNext=Text();typeNext.font=defaultFont();typeNext.size=42;
+        const bool paragraph=typeSetParagraphStyle(typeNext,0,0,1,18)&&typeSetParagraphStyle(typeNext,0,0,4,12);
+        Toolbar::select(Toolbar::TYPE_H);syncTool();fitNext=true;
+        fprintf(stderr,"type-defaults: %s; Character and Paragraph defaults are editable without a text layer\n",paragraph?"passed":"failed");return;
     }
     if (what == "type-paragraph-alignment") {
         doc=newDoc(520,280,false);hist=History();Text text;text.str="Justified words fill a paragraph line across its text box width\nCentered paragraph\nRight aligned\nLeft aligned";text.font=defaultFont();text.size=34;text.x=30;text.y=18;text.boxWidth=460;text.boxHeight=240;
