@@ -598,6 +598,23 @@ bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float bo
     TextStyle fallback; fallback.font=t.font; fallback.size=t.size; fallback.tracking=t.tracking; fallback.leading=t.leading;
     auto lines = linesOf(t.str,styles);
     if (!t.vertical) wrapLines(lines, styles, fallback, t.font, t.boxWidth,36.0f*(std::isfinite(dpi)&&dpi>0?dpi:72.0f)/72.0f);
+    std::vector<int> paragraphAlignments;
+    if (!t.paragraphs.empty()) {
+        const auto paragraphs = t.normalizedParagraphs();
+        paragraphAlignments.reserve(styles.size());
+        size_t byte = 0, run = 0, runEnd = paragraphs.empty() ? 0 : paragraphs[0].bytes;
+        for (size_t character = 0; character < styles.size();) {
+            while (run + 1 < paragraphs.size() && byte >= runEnd) {
+                ++run;
+                runEnd += paragraphs[run].bytes;
+            }
+            paragraphAlignments.push_back(paragraphs.empty() ? t.align : paragraphs[run].style.align);
+            size_t length = 0;
+            utf8CodePoint(t.str, byte, length);
+            byte += std::max<size_t>(1, length);
+            ++character;
+        }
+    }
     const TextPathMetric path = t.pathText ? pathMetric(t) : TextPathMetric();
     const bool pathOn = t.pathText && !t.vertical && path.length > 0;
     float minX = 1e9f, minY = 1e9f, maxX = -1e9f, maxY = -1e9f;
@@ -796,7 +813,12 @@ bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float bo
             const auto& L = lines[li];
             const auto advances=glyphAdvances(L,styles,fallback,t.font,36.0f*(std::isfinite(dpi)&&dpi>0?dpi:72.0f)/72.0f);
             const float wsum=std::accumulate(advances.begin(),advances.end(),0.0f);
-            float gx = t.x - (t.align == 1 ? wsum / 2 : t.align == 2 ? wsum : 0);
+            const int align = !L.empty() && L.front().character < paragraphAlignments.size()
+                ? paragraphAlignments[L.front().character] : t.align;
+            const float anchorX = t.x + (t.boxWidth > 0
+                ? (align == 1 ? t.boxWidth * 0.5f : align == 2 ? t.boxWidth : 0.0f)
+                : 0.0f);
+            float gx = anchorX - (align == 1 ? wsum / 2 : align == 2 ? wsum : 0);
             const float gy = baselines[li];
             for (size_t i = 0; i < L.size(); ++i) {
                 const float adv=advances[i];

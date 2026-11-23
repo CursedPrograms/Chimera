@@ -7039,6 +7039,16 @@ void script(const std::string& what) {
         std::vector<float> coverage;float box[4];const bool rendered=textCoverage(doc.cur().text,doc.w,doc.h,coverage,box,doc.dpi);
         fprintf(stderr,"type-rich-runs: %s; per-run font/size/tracking/leading/scale/baseline/weight/italic/decorations\n",rendered?"rendered":"failed");return;
     }
+    if (what == "type-paragraph-alignment") {
+        doc=newDoc(520,280,false);hist=History();Text text;text.str="Centered paragraph\nRight aligned\nLeft aligned";text.font=defaultFont();text.size=34;text.x=30;text.y=28;text.boxWidth=460;text.boxHeight=220;
+        ParagraphStyle centered;centered.align=1;ParagraphStyle right;right.align=2;ParagraphStyle left;
+        const size_t first=text.str.find('\n')+1,second=text.str.find('\n',first)+1;
+        text.paragraphs={{first,centered},{second-first,right},{text.str.size()-second,left}};
+        Fill fill;fill.kind=FILL_SOLID;for(int i=0;i<3;++i)fill.colour[i]=fg[i]/255.0f;addTextLayer(doc,text,fill);
+        Toolbar::select(Toolbar::TYPE_H);syncTool();fitNext=true;
+        std::vector<float> coverage;float box[4];const bool rendered=textCoverage(doc.cur().text,doc.w,doc.h,coverage,box,doc.dpi);
+        fprintf(stderr,"type-paragraph-alignment: %s; independent centered, right and left paragraph runs\n",rendered&&text.paragraphs.size()==3?"passed":"failed");return;
+    }
     if (what == "type-tabs") {
         doc=newDoc(520,320,false);hist=History();Text tabs;tabs.str="Name\tValue\nA\tLonger\tB";tabs.font=defaultFont();tabs.size=36;tabs.x=36;tabs.y=46;tabs.boxWidth=260;tabs.boxHeight=200;
         Fill fill;fill.kind=FILL_SOLID;for(int i=0;i<3;++i)fill.colour[i]=fg[i]/255.0f;addTextLayer(doc,tabs,fill);Toolbar::select(Toolbar::TYPE_H);syncTool();fitNext=true;

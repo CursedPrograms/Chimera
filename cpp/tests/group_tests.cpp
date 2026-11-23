@@ -262,6 +262,26 @@ static bool textPathPlacementRangeBehaves() {
     return fullInk > shortInk && shortInk > 0 && wrapInk > clippedInk && clippedInk > 0;
 }
 
+// after PhotoCraft (crates/text/src/layout.rs layout_paragraph): each paragraph uses its own alignment.
+static bool textParagraphAlignmentAppliesPerParagraph() {
+    Text text; text.str = "wide\nsmall"; text.size = 32; text.x = 20; text.y = 20; text.boxWidth = 320;
+    ParagraphStyle centered; centered.align = 1;
+    ParagraphStyle right; right.align = 2;
+    text.paragraphs = {{5, centered}, {5, right}};
+    constexpr int width = 400, height = 140;
+    std::vector<float> coverage; float box[4];
+    if (!textCoverage(text, width, height, coverage, box)) return false;
+    int firstMin = width, firstMax = -1, secondMin = width, secondMax = -1;
+    for (int y = 0; y < height; ++y) for (int x = 0; x < width; ++x) {
+        if (coverage[(size_t)y * width + x] <= 0) continue;
+        if (y < 58) { firstMin = std::min(firstMin, x); firstMax = std::max(firstMax, x); }
+        else { secondMin = std::min(secondMin, x); secondMax = std::max(secondMax, x); }
+    }
+    return firstMax >= firstMin && secondMax >= secondMin &&
+        std::abs((firstMin + firstMax) * 0.5f - (text.x + text.boxWidth * 0.5f)) <= 2.0f &&
+        std::abs(secondMax - (text.x + text.boxWidth)) <= 2;
+}
+
 // after PhotoCraft (crates/doc/src/lib.rs char_runs and paragraph_runs): styles cover UTF-8 bytes
 // without splitting a code point, and a short run list extends with the last style.
 static bool richTextRunsNormalizeAndPersist() {
@@ -839,6 +859,7 @@ int runSelfTests() {
         {"paragraph text wraps and keeps legacy projects readable", paragraphTextWrapsAndPersists},
         {"type follows and saves a Bezier path", textFollowsBezierPathAndPersists},
         {"text path placement respects open ends and closed seams", textPathPlacementRangeBehaves},
+        {"paragraph alignment applies independently", textParagraphAlignmentAppliesPerParagraph},
         {"rich text runs normalize UTF-8 and persist", richTextRunsNormalizeAndPersist},
         {"rich text run styles map by Unicode character", richTextStylesMapToUnicodeCharacters},
         {"rich text run size and tracking affect layout and rasterization", richTextRunMetricsAffectLayoutAndInk},
