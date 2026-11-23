@@ -138,6 +138,9 @@ Mimic is installed, or in a Mimic folder nearby; otherwise use **Filter > Mimic 
   the path, flip it to the other side, on open or closed paths.
 - **Rich text:** character and paragraph styles in runs, so one layer can mix fonts, sizes and colours; the fonts on
   this PC, with recent fonts first; smart quotes; points, pixels or millimetres; layers named from their first line.
+- **Paragraph styles:** alignment (left, centre, right, and the four justify modes), indents, space before and
+  after, auto-leading and vertical alignment, per paragraph, from Text Properties or the options bar; Faux Bold,
+  Faux Italic, Underline and Strikethrough per character; the next text's defaults when nothing is selected.
 - The **Move tool** moves text layers exactly, without a jump when grabbed.
 
 ### Crop, as Photoshop
