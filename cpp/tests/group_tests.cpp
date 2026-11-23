@@ -675,6 +675,9 @@ static bool typeCharacterStyleShortcutsToggleSelections() {
     if(!App::typeToggleCharacterStyle(text,0,2,5)||text.characterStyles()[0].caps!=TextCaps::Small)return false;
     if(!App::typeToggleCharacterStyle(text,0,2,5)||text.characterStyles()[0].caps!=TextCaps::Normal)return false;
     if(App::typeToggleCharacterStyle(text,1,1,2)||App::typeToggleCharacterStyle(text,0,3,6))return false;
+    for(int style=0;style<4;++style)if(!App::typeToggleCharacterStyle(text,0,3,style))return false;
+    const auto styled=text.characterStyles();
+    if(!styled[0].bold||!styled[0].italic||!styled[0].underline||!styled[0].strikethrough)return false;
     Text empty;return App::typeToggleCharacterStyle(empty,0,0,2)&&empty.normalizedRuns()[0].style.underline;
 }
 // after PhotoCraft (crates/text/src/layout/shaping.rs push_cased): all caps changes drawn glyphs,

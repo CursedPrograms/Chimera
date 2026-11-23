@@ -5670,6 +5670,7 @@ static void fillPanel() {
         if(typeLayer==doc.active&&typeStyleSelectionValid&&typeStyleSelectionLayer==typeLayer){start=std::min(typeStyleSelectionStart,styles.size());end=std::min(typeStyleSelectionEnd,styles.size());}
         const size_t metricAt=start<end?start:(start?start-1:0);const auto runs=text.normalizedRuns();
         if(!styles.empty()||!runs.empty()){
+            ImGui::SeparatorText("Character");
             const TextStyle& shownStyle=styles.empty()?runs.front().style:styles[std::min(metricAt,styles.size()-1)];
             const float metricSize=std::max(1.0f,shownStyle.size);
             const float metricVScale=std::max(.01f,shownStyle.verticalScale);
@@ -5683,6 +5684,27 @@ static void fillPanel() {
             if(adjSlider("Horizontal Scale",&hscale,1,1000,"%.0f%%")){Text updated=text;if(typeSetCharacterMetricValue(updated,start,end,2,hscale,doc.dpi,text.scaleY)){typeRememberDiscrete("Horizontal Scale");text=std::move(updated);ch=true;}}
             float vscale=shownStyle.verticalScale*100;
             if(adjSlider("Vertical Scale",&vscale,1,1000,"%.0f%%")){Text updated=text;if(typeSetCharacterMetricValue(updated,start,end,3,vscale,doc.dpi,text.scaleY)){typeRememberDiscrete("Vertical Scale");text=std::move(updated);ch=true;}}
+        }
+        auto styleValue=[&](const TextStyle& style,int index){
+            if(index==0)return style.bold;
+            if(index==1)return style.italic;
+            if(index==2)return style.underline;
+            return style.strikethrough;
+        };
+        auto styleShown=[&](int index){
+            if(styles.empty())return !runs.empty()&&styleValue(runs.front().style,index);
+            if(start<end){for(size_t i=start;i<end;++i)if(!styleValue(styles[i],index))return false;return true;}
+            return styleValue(styles[std::min(start?start-1:0,styles.size()-1)],index);
+        };
+        const char* styleNames[]={"Faux Bold","Faux Italic","Underline","Strikethrough"};
+        for(int index=0;index<4;++index){
+            bool enabled=styleShown(index);
+            if(ImGui::Checkbox(styleNames[index],&enabled)){
+                Text updated=text;
+                if(typeToggleCharacterStyle(updated,start,end,index)){
+                    typeRememberDiscrete(styleNames[index]);text=std::move(updated);ch=true;
+                }
+            }
         }
         auto shown=[&](TextCaps caps){
             if(styles.empty()){const auto runs=text.normalizedRuns();return !runs.empty()&&runs.front().style.caps==caps;}
