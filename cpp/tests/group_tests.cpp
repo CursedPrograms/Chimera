@@ -282,6 +282,22 @@ static bool textParagraphAlignmentAppliesPerParagraph() {
         std::abs(secondMax - (text.x + text.boxWidth)) <= 2;
 }
 
+// after PhotoCraft (crates/text/src/tests.rs auto_and_explicit_leading): paragraph spacing moves following lines.
+static bool textParagraphSpacingMovesFollowingParagraphs() {
+    Text text; text.str = "a\nb"; text.size = 10; text.x = 20; text.y = 10;
+    std::vector<float> coverage; float base[4];
+    if (!textCoverage(text, 120, 80, coverage, base)) return false;
+    ParagraphStyle first; first.spaceAfter = 5;
+    Text after = text; after.paragraphs = {{after.str.size(), first}};
+    float afterBox[4];
+    if (!textCoverage(after, 120, 80, coverage, afterBox)) return false;
+    ParagraphStyle second; second.spaceBefore = 5;
+    Text before = text; before.paragraphs = {{2, ParagraphStyle{}}, {1, second}};
+    float beforeBox[4];
+    if (!textCoverage(before, 120, 80, coverage, beforeBox)) return false;
+    return afterBox[3] > base[3] + 4.0f && beforeBox[3] > base[3] + 4.0f;
+}
+
 // after PhotoCraft (crates/doc/src/lib.rs char_runs and paragraph_runs): styles cover UTF-8 bytes
 // without splitting a code point, and a short run list extends with the last style.
 static bool richTextRunsNormalizeAndPersist() {
@@ -860,6 +876,7 @@ int runSelfTests() {
         {"type follows and saves a Bezier path", textFollowsBezierPathAndPersists},
         {"text path placement respects open ends and closed seams", textPathPlacementRangeBehaves},
         {"paragraph alignment applies independently", textParagraphAlignmentAppliesPerParagraph},
+        {"paragraph spacing moves later paragraphs", textParagraphSpacingMovesFollowingParagraphs},
         {"rich text runs normalize UTF-8 and persist", richTextRunsNormalizeAndPersist},
         {"rich text run styles map by Unicode character", richTextStylesMapToUnicodeCharacters},
         {"rich text run size and tracking affect layout and rasterization", richTextRunMetricsAffectLayoutAndInk},

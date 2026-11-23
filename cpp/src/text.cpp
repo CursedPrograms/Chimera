@@ -598,22 +598,26 @@ bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float bo
     TextStyle fallback; fallback.font=t.font; fallback.size=t.size; fallback.tracking=t.tracking; fallback.leading=t.leading;
     auto lines = linesOf(t.str,styles);
     if (!t.vertical) wrapLines(lines, styles, fallback, t.font, t.boxWidth,36.0f*(std::isfinite(dpi)&&dpi>0?dpi:72.0f)/72.0f);
-    std::vector<int> paragraphAlignments;
-    if (!t.paragraphs.empty()) {
-        const auto paragraphs = t.normalizedParagraphs();
-        paragraphAlignments.reserve(styles.size());
-        size_t byte = 0, run = 0, runEnd = paragraphs.empty() ? 0 : paragraphs[0].bytes;
-        for (size_t character = 0; character < styles.size();) {
-            while (run + 1 < paragraphs.size() && byte >= runEnd) {
-                ++run;
-                runEnd += paragraphs[run].bytes;
-            }
-            paragraphAlignments.push_back(paragraphs.empty() ? t.align : paragraphs[run].style.align);
-            size_t length = 0;
-            utf8CodePoint(t.str, byte, length);
-            byte += std::max<size_t>(1, length);
-            ++character;
+    const auto normalizedParagraphs = t.normalizedParagraphs();
+    std::vector<ParagraphStyle> paragraphStyles;
+    std::vector<size_t> paragraphIndexes;
+    paragraphStyles.reserve(styles.size());
+    paragraphIndexes.reserve(styles.size());
+    size_t byte = 0, run = 0, runEnd = normalizedParagraphs.empty() ? 0 : normalizedParagraphs[0].bytes;
+    size_t paragraphIndex = 0;
+    for (size_t character = 0; character < styles.size() && byte < t.str.size(); ++character) {
+        while (run + 1 < normalizedParagraphs.size() && byte >= runEnd) {
+            ++run;
+            runEnd += normalizedParagraphs[run].bytes;
         }
+        ParagraphStyle style = normalizedParagraphs.empty() ? ParagraphStyle{} : normalizedParagraphs[run].style;
+        if (t.paragraphs.empty()) style.align = t.align;
+        paragraphStyles.push_back(style);
+        paragraphIndexes.push_back(paragraphIndex);
+        size_t length = 0;
+        const uint32_t cp = utf8CodePoint(t.str, byte, length);
+        byte += std::max<size_t>(1, length);
+        if (cp == '\n') ++paragraphIndex;
     }
     const TextPathMetric path = t.pathText ? pathMetric(t) : TextPathMetric();
     const bool pathOn = t.pathText && !t.vertical && path.length > 0;
@@ -787,8 +791,19 @@ bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float bo
     struct LineMetrics { float ascent=0, descent=0, step=0; };
     std::vector<LineMetrics> metrics(lines.size());
     std::vector<float> baselines(lines.size());
+    std::vector<size_t> lineParagraphs(lines.size(), 0);
+    for (size_t li = 0; li < lines.size(); ++li)
+        if (!lines[li].empty() && lines[li].front().character < paragraphIndexes.size())
+            lineParagraphs[li] = paragraphIndexes[lines[li].front().character];
     float lineTop=t.y;
     for(size_t li=0;li<lines.size();++li){
+        if (li > 0 && !lines[li].empty() && !lines[li-1].empty() && lineParagraphs[li] != lineParagraphs[li-1]) {
+            const size_t previous = lines[li-1].front().character;
+            const size_t current = lines[li].front().character;
+            const float after = previous < paragraphStyles.size() ? paragraphStyles[previous].spaceAfter : 0.0f;
+            const float before = current < paragraphStyles.size() ? paragraphStyles[current].spaceBefore : 0.0f;
+            lineTop += (after + before) * pointsToPixels;
+        }
         LineMetrics& m=metrics[li];
         for(const TextGlyph& glyph:lines[li]){
             const TextStyle& style=styleForCharacter(styles,glyph.character,fallback);
@@ -813,8 +828,8 @@ bool textCoverage(const Text& t, int w, int h, std::vector<float>& cov, float bo
             const auto& L = lines[li];
             const auto advances=glyphAdvances(L,styles,fallback,t.font,36.0f*(std::isfinite(dpi)&&dpi>0?dpi:72.0f)/72.0f);
             const float wsum=std::accumulate(advances.begin(),advances.end(),0.0f);
-            const int align = !L.empty() && L.front().character < paragraphAlignments.size()
-                ? paragraphAlignments[L.front().character] : t.align;
+            const int align = !L.empty() && L.front().character < paragraphStyles.size()
+                ? paragraphStyles[L.front().character].align : t.align;
             const float anchorX = t.x + (t.boxWidth > 0
                 ? (align == 1 ? t.boxWidth * 0.5f : align == 2 ? t.boxWidth : 0.0f)
                 : 0.0f);
